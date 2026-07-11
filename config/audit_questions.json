@@ -1,0 +1,66 @@
+{
+  "收入成本": {
+    "questions": [
+      {
+        "id": "rev_occurrence",
+        "text": "收入是否真实发生？截止日前后有无集中确认？"
+      },
+      {
+        "id": "rev_completeness",
+        "text": "收入是否完整记录？有无体外循环迹象？"
+      },
+      {
+        "id": "rev_concentration",
+        "text": "客户集中度是否异常？"
+      }
+    ]
+  },
+  "费用": {
+    "questions": [
+      {
+        "id": "exp_capitalization",
+        "text": "是否存在费用资本化或资本性支出费用化？"
+      },
+      {
+        "id": "exp_year_end",
+        "text": "年末是否存在突击费用或异常波动？"
+      }
+    ]
+  },
+  "暂估往来": {
+    "questions": [
+      {
+        "id": "accrual_reversal",
+        "text": "暂估是否及时冲回？账龄是否异常？"
+      },
+      {
+        "id": "related_party",
+        "text": "是否存在异常关联方往来？"
+      }
+    ]
+  },
+  "资产负债": {
+    "questions": [
+      {
+        "id": "bs_movement",
+        "text": "科目余额变动是否与业务规模匹配？有无异常大额单边发生？"
+      },
+      {
+        "id": "bs_concentration",
+        "text": "往来类科目变动是否由少数明细科目驱动？有无异常大户或新开科目？"
+      }
+    ]
+  },
+  "调账冲销": {
+    "questions": [
+      {
+        "id": "adj_year_end",
+        "text": "年末是否存在大额调账、冲销或红字凭证？"
+      },
+      {
+        "id": "adj_reversal",
+        "text": "反记账/冲销标识是否合规？有无非常规调整动机？"
+      }
+    ]
+  }
+}

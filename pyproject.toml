@@ -1,0 +1,40 @@
+[project]
+name = "audit-workbench"
+version = "0.1.0"
+description = "序时账审计分析工作台 — FastAPI + React + Tauri"
+requires-python = ">=3.11"
+dependencies = [
+    "audit-engine",
+    "audit-api",
+]
+
+[tool.uv.sources]
+audit-engine = { workspace = true }
+audit-api = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/engine", "apps/api"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["packages/engine", "apps/api"]
+testpaths = ["packages/engine/tests", "apps/api/tests"]
+addopts = "-q -m 'not slow'"
+markers = [
+    "slow: 使用本地 Downloads 序时账测试案例，较慢",
+    "integration: 跨模块集成测试",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]

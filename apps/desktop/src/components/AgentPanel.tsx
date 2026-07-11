@@ -1,0 +1,169 @@
+import { useEffect, useRef, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { api, type AgentChatResponse } from "@/api/client";
+import { useAgent } from "@/context/AgentContext";
+import { useWorkspace } from "@/context/WorkspaceContext";
+import { useLlm } from "@/context/LlmContext";
+import { AgentMarkdown } from "@/components/AgentMarkdown";
+
+type ChatMessage = {
+  role: string;
+  content: string;
+  toolCalls?: AgentChatResponse["tool_calls"];
+};
+
+const TOOL_LABELS: Record<string, string> = {
+  get_project_overview: "项目概览",
+  get_rules_catalog: "规则目录",
+  update_rule: "更新规则",
+  toggle_rule: "启停规则",
+  suggest_rule_tuning: "调参建议",
+  apply_rule_tuning: "应用调参",
+  run_sampling_rules: "执行规则",
+  extract_samples: "生成样本",
+  get_sampling_status: "抽样状态",
+  record_rule_feedback: "规则打分",
+  run_module_insight: "模块 AI 分析",
+  apply_module_insight_recommendations: "应用 AI 建议",
+  get_module_insight_cache: "AI 分析缓存",
+  get_module_insight_jobs: "分析进度",
+  focus_analysis_view: "打开分析",
+  run_cross_year_audit: "跨年稽核",
+};
+
+function ToolCallsCard({ toolCalls }: { toolCalls: AgentChatResponse["tool_calls"] }) {
+  if (!toolCalls.length) return null;
+  return (
+    <div className="agent-tool-calls">
+      {toolCalls.map((tc, i) => (
+        <div key={`${tc.tool}-${i}`} className="agent-tool-call">
+          <span className="agent-tool-call__name">{TOOL_LABELS[tc.tool] ?? tc.tool}</span>
+          {tc.result?.error ? (
+            <span className="agent-tool-call__meta error">{String(tc.result.error)}</span>
+          ) : tc.result?.ok === true || tc.result?.cached === true ? (
+            <span className="agent-tool-call__meta">已完成</span>
+          ) : tc.result?.count !== undefined ? (
+            <span className="agent-tool-call__meta">已查询</span>
+          ) : (
+            <span className="agent-tool-call__meta">已查询</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function AgentPanel() {
+  const { projectId, pinnedContext, suggestions, messages, refreshState } = useAgent();
+  const { applyUiActions } = useWorkspace();
+  const { selectedProfileId, selectedProfile } = useLlm();
+  const [input, setInput] = useState("");
+  const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setLocalMessages(messages.map((m) => ({ role: m.role, content: m.content })));
+  }, [messages]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [localMessages]);
+
+  const chat = useMutation({
+    mutationFn: (text: string) =>
+      api.agentChat(projectId!, text, pinnedContext, { profileId: selectedProfileId }),
+    onSuccess: (res) => {
+      setLocalMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: res.reply, toolCalls: res.tool_calls },
+      ]);
+      if (res.ui_actions?.length) applyUiActions(res.ui_actions);
+      refreshState();
+    },
+  });
+
+  if (!projectId) {
+    return (
+      <aside className="agent-panel">
+        <h3>审计助手</h3>
+        <p className="muted">选择项目并上传序时账后，可在此提问。</p>
+      </aside>
+    );
+  }
+
+  const send = (text: string) => {
+    const msg = text.trim();
+    if (!msg || chat.isPending) return;
+    setLocalMessages((prev) => [...prev, { role: "user", content: msg }]);
+    setInput("");
+    chat.mutate(msg);
+  };
+
+  return (
+    <aside className="agent-panel">
+      <header className="agent-panel__head">
+        <h3>审计助手</h3>
+        <p className="muted">基于当前序时账与左侧选中范围 · 可对话打开左侧分析模块</p>
+        {selectedProfile && (
+          <p className="muted llm-active-chip">
+            {selectedProfile.profile_name} · {selectedProfile.model}
+            {selectedProfile.key_configured ? "" : " · 未配置密钥"}
+          </p>
+        )}
+      </header>
+
+      {pinnedContext && (
+        <div className="agent-context-chip">
+          <span className="agent-context-chip__label">当前选中</span>
+          <strong>{pinnedContext.label}</strong>
+        </div>
+      )}
+
+      <div className="agent-messages">
+        {localMessages.length === 0 && (
+          <p className="muted">
+            可问：项目概览、规则说明与改参、规则命中、生成样本、跨年稽核、打开分析模块…
+          </p>
+        )}
+        {localMessages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "agent-msg agent-msg--user" : "agent-msg agent-msg--bot"}>
+            {m.role === "assistant" ? (
+              <>
+                {m.toolCalls?.length ? <ToolCallsCard toolCalls={m.toolCalls} /> : null}
+                <AgentMarkdown content={m.content} />
+              </>
+            ) : (
+              m.content
+            )}
+          </div>
+        ))}
+        {chat.isPending && <p className="muted">思考中…</p>}
+        {chat.isError && <p className="error">{String(chat.error)}</p>}
+        <div ref={bottomRef} />
+      </div>
+
+      {suggestions.length > 0 && (
+        <div className="agent-suggestions">
+          {suggestions.map((s) => (
+            <button key={s} type="button" className="agent-suggestion" onClick={() => send(s)}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <form
+        className="agent-input-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send(input);
+        }}
+      >
+        <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入审计问题…" rows={2} />
+        <button type="submit" className="btn-primary" disabled={chat.isPending || !input.trim()}>
+          发送
+        </button>
+      </form>
+    </aside>
+  );
+}

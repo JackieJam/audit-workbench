@@ -1,0 +1,114 @@
+{
+  "splitting": {
+    "enabled": true,
+    "max_single_amount": 100000,
+    "min_total": 500000,
+    "window_days": 14,
+    "min_txn_count": 5,
+    "burst_multiplier": 3.0,
+    "rationale": "单笔<10万、>=5笔且合计>=50万，且当日笔数超过该供应商日均3倍，排除高频业务伙伴的正常交易模式"
+  },
+  "large_amount": {
+    "enabled": true,
+    "round_number_threshold": 1000000,
+    "repeat_threshold": 10000000,
+    "repeat_window_days": 30,
+    "repeat_min_count": 2,
+    "holiday_min_amount": 100000,
+    "rationale": "整数阈值100万（管理层审批额度）；节假日过账加10万金额门槛，过滤日常小额周末操作；重复阈值1000万聚焦大额关联方"
+  },
+  "manual_entry": {
+    "enabled": true,
+    "pnl_amount_threshold": 100000,
+    "month_end_days": 5,
+    "rationale": "AF型手工凭证424笔，损益科目10万阈值聚焦年末利润调节动机"
+  },
+  "accrual_anomaly": {
+    "enabled": true,
+    "match_window_days": 90,
+    "amount_tolerance": 0.10,
+    "min_amount": 100000,
+    "rationale": "非常规计提按10万金额门槛进入样本，用户独占>50%为集中度异常；悬空计提窗口90天、差异10%，过滤零星小额计提"
+  },
+  "yearend_surge": {
+    "enabled": true,
+    "multiplier": 2.0,
+    "months": [12],
+    "rationale": "12月收入超其他月份均值2倍即触发年末突击确认，符合年末收入截止风险模型要求"
+  },
+  "financing_trade": {
+    "enabled": true,
+    "income_account_prefixes": ["6001", "6051"],
+    "cost_account_prefixes": ["6401", "6402"],
+    "min_revenue_amount": 1000000,
+    "low_margin_threshold": 0.05,
+    "max_loss_rate": 0.50,
+    "min_match_score": 0.55,
+    "max_candidate_groups": 50,
+    "max_related_vouchers": 5,
+    "window_days": 30,
+    "keywords": ["代垫", "代采购", "委托贸易", "保理"],
+    "rationale": "作为疑点候选规则启用：收入与成本在样本中极少出现在同一凭证内，因此按30天窗口寻找收入-成本组合；收入≥100万、组合毛利率≤5%且匹配得分≥55%时进入复核，亏损超过50%的极端匹配先视为噪声"
+  },
+  "cross_year_accrual": {
+    "enabled": true,
+    "coverage_threshold": 0.8,
+    "match_window_days": 90,
+    "rationale": "有3年数据，跨年预提冲销覆盖率<80%即为悬空预提，符合文章强调的跨期舞弊风险"
+  },
+  "cross_year_revenue": {
+    "enabled": true,
+    "dec_multiplier": 1.8,
+    "rationale": "12月收入超前11月均值1.8倍触发，配合年末突击确认规则双重验证"
+  },
+  "cross_year_detection": {
+    "accrual_min_amount": 10000,
+    "accrual_mismatch_tolerance": 0.05,
+    "accrual_high_severity_amount": 1000000,
+    "balance_buildup_growth_ratio": 1.5,
+    "circular_large_amount": 500000,
+    "circular_match_ratio": 0.7,
+    "expense_spike_multiplier": 2.5,
+    "manual_entry_delta_threshold": 0.15,
+    "new_pair_count_threshold": 20,
+    "rationale": "跨年高级检测阈值集中管理（消除散落硬编码）：预提下限1万/不符容差5%/悬空高危线100万；期末余额累积1.5x；资金循环单笔50万、匹配度70%；费用突变2.5x；手工凭证占比上升15ppt；新科目组合20对。默认值与历史硬编码一致，不参与 LLM 校准。"
+  },
+  "cash_pool": {
+    "enabled": true,
+    "keywords": ["资金池", "同名划转", "上划", "下拨"],
+    "large_threshold": 10000000,
+    "rationale": "数据中400笔资金池/同名划转，1000万阈值聚焦大额资金占用风险，符合文章第5.2节资金归集风险穿透要求"
+  },
+  "user_concentration": {
+    "enabled": true,
+    "concentration_threshold": 0.25,
+    "rationale": "1个用户(01452288)占总行数1/3，25%阈值可捕捉职责分离失效风险，符合文章SoD测试要求"
+  },
+  "reversal_pattern": {
+    "enabled": true,
+    "frequent_count": 5,
+    "large_threshold": 500000,
+    "rationale": "2834笔冲销，5笔/用户为频繁冲销阈值，50万为大额冲销阈值，符合文章3.2节冲销风险分析"
+  },
+  "sensitive_fees": {
+    "enabled": true,
+    "categories": {
+      "咨询费": {"keywords": ["咨询", "顾问"], "exclude": [], "threshold": 10000},
+      "代理费": {"keywords": ["代理", "代办"], "exclude": ["货运代理", "报关", "快递"], "threshold": 10000},
+      "中介费": {"keywords": ["中介", "经纪"], "exclude": [], "threshold": 100000},
+      "设计费": {"keywords": ["设计", "策划"], "exclude": ["机械设计"], "threshold": 100000},
+      "捐赠赞助": {"keywords": ["捐赠", "赞助"], "exclude": [], "threshold": 10000},
+      "罚款赔偿": {"keywords": ["罚款", "罚金", "滞纳金", "违约金"], "exclude": [], "threshold": 10000},
+      "招待费": {"keywords": ["招待", "接待"], "exclude": [], "threshold": 50000},
+      "旅游团建": {"keywords": ["旅游", "团建", "考察"], "exclude": ["出差", "差旅"], "threshold": 10000}
+    },
+    "baseline_multiplier": 3.0,
+    "rationale": "参考凭证规则31条敏感费用清单，结合数据画像校准阈值：咨询/代理/招待/旅游/捐赠/罚款/赔偿≥1万，中介/设计≥10万；用户敏感费用率>3x公司均值时全部标记，否则仅标记超阈值的大额"
+  },
+  "whitelist_keywords": [
+    "工资", "个人所得税", "折旧", "摊销",
+    "社保", "公积金", "利息收入", "利息支出", "银行手续费"
+  ],
+  "whitelist_voucher_types": ["AA", "AB", "ZP"],
+  "max_sample_size": 50
+}
