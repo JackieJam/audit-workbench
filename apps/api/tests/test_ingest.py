@@ -3,11 +3,9 @@ from __future__ import annotations
 import io
 
 import pandas as pd
-import pytest
-from fastapi.testclient import TestClient
-
 from audit_api.deps import get_pipeline, get_store
 from audit_api.main import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
@@ -65,3 +63,16 @@ def test_detect_and_commit_ingest(tmp_path, monkeypatch) -> None:
 
     get_store.cache_clear()
     get_pipeline.cache_clear()
+
+
+def test_rejects_legacy_xls_with_actionable_message(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    get_store.cache_clear()
+    pid = client.post("/projects", json={"name": "旧格式"}).json()["project_id"]
+    response = client.post(
+        f"/projects/{pid}/ingest/detect",
+        files=[("files", ("legacy.xls", b"not-an-xlsx", "application/vnd.ms-excel"))],
+    )
+    assert response.status_code == 400
+    assert "另存为 .xlsx" in response.text
+    get_store.cache_clear()

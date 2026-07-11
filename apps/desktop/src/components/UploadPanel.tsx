@@ -69,7 +69,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
       <h3>上传序时账</h3>
       <input
         type="file"
-        accept=".xlsx,.xls"
+        accept=".xlsx"
         multiple
         onChange={(e) => {
           setFiles(Array.from(e.target.files ?? []));

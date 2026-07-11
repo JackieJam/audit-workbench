@@ -246,6 +246,9 @@ def voucher_ids_from_rule_results(rule_results: list[Any], size: int | None = No
 
 
 def _sample_amount(row: pd.Series) -> float:
+    normalized = pd.to_numeric(row.get("_amount_raw"), errors="coerce")
+    if pd.notna(normalized):
+        return float(normalized)
     for col in ("公司代码货币价值", "凭证货币价值"):
         value = row.get(col)
         amount = pd.to_numeric(value, errors="coerce")
@@ -278,7 +281,9 @@ def samples_for_voucher_ids(
     result_samples = []
     matched_df = df[df["凭证编号"].astype(str).isin(selected_voucher_ids)].copy()
 
-    if "公司代码货币价值" in matched_df.columns:
+    if "_amount_abs" in matched_df.columns:
+        matched_df["_sort_amount"] = matched_df["_amount_abs"]
+    elif "公司代码货币价值" in matched_df.columns:
         matched_df["_sort_amount"] = pd.to_numeric(matched_df["公司代码货币价值"], errors="coerce").abs()
     elif "凭证货币价值" in matched_df.columns:
         matched_df["_sort_amount"] = pd.to_numeric(matched_df["凭证货币价值"], errors="coerce").abs()
@@ -300,7 +305,7 @@ def samples_for_voucher_ids(
             "总账科目": str(row.get("总账科目", "")),
             "科目名称": str(row.get("总账科目：长文本", "")),
             "借方金额": amount if dc == "S" else 0,
-            "贷方金额": amount if dc == "H" else 0,
+            "贷方金额": -amount if dc == "H" else 0,
             "来源模块": _find_group_source(groups, vid),
             "是否为人工直入": is_manual,
         })
@@ -626,4 +631,3 @@ def candidate_pool_summary_text(pool: list[dict[str, Any]] | None, limit: int = 
     if len(groups) > limit:
         lines.append(f"...其余 {len(groups) - limit} 个群体未展开。")
     return "\n".join(lines)
-

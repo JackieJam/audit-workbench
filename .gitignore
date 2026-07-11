@@ -12,6 +12,7 @@ build/
 node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
+*.tsbuildinfo
 
 # OS / IDE
 .DS_Store

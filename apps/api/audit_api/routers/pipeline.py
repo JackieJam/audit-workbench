@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 from audit_engine.pipeline import AnalysisPipeline
 from audit_engine.rules_config import default_rules_config
+from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from audit_api.deps import get_pipeline, get_store
 from audit_api.routers.analysis import _manifest_or_404
-from audit_engine.store import ProjectStore
 
 router = APIRouter(prefix="/projects", tags=["pipeline"])
 
@@ -160,11 +161,14 @@ def export_excel(
         raise HTTPException(status_code=400, detail="项目无序时账数据")
     data, stats = pipeline.export_excel(project_id)
     filename = f"audit_sample_{project_id[:8]}.xlsx"
+    encoded_filename = quote(filename, safe="")
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": (
+                f'attachment; filename="audit_sample.xlsx"; filename*=UTF-8\'\'{encoded_filename}'
+            ),
             "X-Report-Stats": json.dumps(stats, ensure_ascii=True),
         },
     )

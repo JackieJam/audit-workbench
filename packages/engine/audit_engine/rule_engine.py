@@ -10,16 +10,19 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from audit_engine.account_classifier import (
     CAT_COST,
     CAT_REVENUE,
 )
-from audit_engine.data_columns import pnl_category as _pnl_category, ensure_category
+from audit_engine.data_columns import ensure_category
+from audit_engine.data_columns import pnl_category as _pnl_category
 
 
 @dataclass(frozen=True)
@@ -98,21 +101,9 @@ def _is_round(amount: float, threshold: float) -> bool:
     return abs_amt >= threshold and abs_amt == int(abs_amt) and int(abs_amt) % 10_000 == 0
 
 
-def _first_non_empty(values: pd.Series) -> str:
-    for value in values:
-        if pd.notna(value):
-            text = str(value).strip()
-            if text and text.lower() != "nan" and text != "未维护":
-                return text
-    return ""
-
-
-def _display_party(grp: pd.DataFrame, code_col: str, name_col: str) -> str:
-    code = _first_non_empty(grp[code_col]) if code_col in grp.columns else ""
-    name = _first_non_empty(grp[name_col]) if name_col in grp.columns else ""
-    if code and name:
-        return f"{code} - {name}"
-    return code or name
+def _clean_fact_text(values: pd.Series) -> pd.Series:
+    cleaned = values.astype("string").str.strip()
+    return cleaned.mask(cleaned.str.lower().isin(["", "nan", "未维护"]))
 
 
 def _text_terms(text: str) -> set[str]:
@@ -141,6 +132,7 @@ def _build_trade_voucher_facts(
     收入/成本判定基于 _acct_category（自动分类），不再依赖前缀清单。
     """
     work = ensure_category(df).copy()
+    work["凭证编号"] = work["凭证编号"].astype(str)
     work["_acct4"] = work["总账科目"].astype(str).str[:4]
     work["_dc"] = work["借/贷标识"].astype(str).str.strip()
     work["_amount_abs"] = pd.to_numeric(work["凭证货币价值"], errors="coerce").fillna(0).abs()
@@ -148,50 +140,84 @@ def _build_trade_voucher_facts(
     income_mask = work["_acct_category"].eq(CAT_REVENUE) & (work["_dc"] == "H")
     cost_mask = work["_acct_category"].eq(CAT_COST) & (work["_dc"] == "S")
 
-    income_amount = work[income_mask].groupby("凭证编号")["_amount_abs"].sum()
-    cost_amount = work[cost_mask].groupby("凭证编号")["_amount_abs"].sum()
+    trade_ids = set(work.loc[income_mask | cost_mask, "凭证编号"])
+    if not trade_ids:
+        return pd.DataFrame()
+
+    income_amount = work.loc[income_mask].groupby("凭证编号")["_amount_abs"].sum()
+    cost_amount = work.loc[cost_mask].groupby("凭证编号")["_amount_abs"].sum()
     income_lines = {
-        vid: tuple(grp.index.tolist())
-        for vid, grp in work[income_mask].groupby("凭证编号")
+        str(vid): tuple(indices.tolist())
+        for vid, indices in work.loc[income_mask].groupby("凭证编号").groups.items()
     }
     cost_lines = {
-        vid: tuple(grp.index.tolist())
-        for vid, grp in work[cost_mask].groupby("凭证编号")
+        str(vid): tuple(indices.tolist())
+        for vid, indices in work.loc[cost_mask].groupby("凭证编号").groups.items()
     }
 
-    rows: list[dict[str, Any]] = []
-    for vid, grp in work.groupby("凭证编号", sort=False):
-        date = grp["过账日期"].min()
-        acct4 = _first_non_empty(grp["_acct4"])
-        account_name = _first_non_empty(
-            grp["总账科目：长文本"] if "总账科目：长文本" in grp.columns else pd.Series("", index=grp.index)
-        )
-        text_parts = []
-        if "凭证抬头摘要" in grp.columns:
-            text_parts.append(_first_non_empty(grp["凭证抬头摘要"]))
-        if "文本" in grp.columns:
-            text_parts.append(_first_non_empty(grp["文本"]))
-        text = " ".join(part for part in text_parts if part).strip()
-        rows.append({
-            "voucher_id": str(vid),
-            "date": date,
-            "year": int(grp["_year"].iloc[0]) if "_year" in grp.columns and pd.notna(grp["_year"].iloc[0]) else (
-                int(date.year) if isinstance(date, pd.Timestamp) else None
-            ),
-            "text": text,
-            "terms": _text_terms(text),
-            "customer": _display_party(grp, "客户", "客户科目：姓名 1"),
-            "vendor": _display_party(grp, "供应商编号", "供应商科目：名称 1"),
-            "user": _first_non_empty(grp["用户名"]) if "用户名" in grp.columns else "",
-            "voucher_type": _first_non_empty(grp["凭证类型"]) if "凭证类型" in grp.columns else "",
-            "category": _pnl_category(acct4, account_name),
-            "revenue_amount": float(income_amount.get(vid, 0.0)),
-            "cost_amount": float(cost_amount.get(vid, 0.0)),
-            "income_line_indices": income_lines.get(vid, tuple()),
-            "cost_line_indices": cost_lines.get(vid, tuple()),
-            "all_line_indices": tuple(grp.index.tolist()),
-        })
-    return pd.DataFrame(rows)
+    source_columns = [
+        "凭证编号", "过账日期", "_acct4", "_year", "总账科目：长文本",
+        "凭证抬头摘要", "文本", "客户", "客户科目：姓名 1", "供应商编号",
+        "供应商科目：名称 1", "用户名", "凭证类型",
+    ]
+    source = work.loc[work["凭证编号"].isin(trade_ids), [
+        col for col in source_columns if col in work.columns
+    ]].copy()
+    for col in source_columns:
+        if col not in source.columns:
+            source[col] = pd.NA
+    for col in source_columns:
+        if col not in {"凭证编号", "过账日期", "_year"}:
+            source[col] = _clean_fact_text(source[col])
+
+    grouped = source.groupby("凭证编号", sort=False)
+    facts = grouped.first().reset_index()
+    facts["date"] = facts["凭证编号"].map(grouped["过账日期"].min())
+    all_lines = {
+        str(vid): tuple(indices.tolist())
+        for vid, indices in grouped.groups.items()
+    }
+
+    def display_party(code: Any, name: Any) -> str:
+        code_text = "" if pd.isna(code) else str(code)
+        name_text = "" if pd.isna(name) else str(name)
+        return f"{code_text} - {name_text}" if code_text and name_text else code_text or name_text
+
+    facts["text"] = (
+        facts["凭证抬头摘要"].fillna("").astype(str)
+        + " "
+        + facts["文本"].fillna("").astype(str)
+    ).str.strip()
+    facts["terms"] = facts["text"].map(_text_terms)
+    facts["customer"] = [
+        display_party(code, name)
+        for code, name in zip(facts["客户"], facts["客户科目：姓名 1"], strict=True)
+    ]
+    facts["vendor"] = [
+        display_party(code, name)
+        for code, name in zip(facts["供应商编号"], facts["供应商科目：名称 1"], strict=True)
+    ]
+    facts["user"] = facts["用户名"].fillna("").astype(str)
+    facts["voucher_type"] = facts["凭证类型"].fillna("").astype(str)
+    facts["category"] = [
+        _pnl_category("" if pd.isna(code) else str(code), "" if pd.isna(name) else str(name))
+        for code, name in zip(facts["_acct4"], facts["总账科目：长文本"], strict=True)
+    ]
+    facts["revenue_amount"] = facts["凭证编号"].map(income_amount).fillna(0.0).astype(float)
+    facts["cost_amount"] = facts["凭证编号"].map(cost_amount).fillna(0.0).astype(float)
+    def tuple_or_empty(value: Any) -> tuple[int, ...]:
+        return value if isinstance(value, tuple) else ()
+
+    facts["income_line_indices"] = facts["凭证编号"].map(income_lines).map(tuple_or_empty)
+    facts["cost_line_indices"] = facts["凭证编号"].map(cost_lines).map(tuple_or_empty)
+    facts["all_line_indices"] = facts["凭证编号"].map(all_lines).map(tuple_or_empty)
+    facts["voucher_id"] = facts["凭证编号"]
+    facts["year"] = pd.to_numeric(facts["_year"], errors="coerce").fillna(facts["date"].dt.year)
+    return facts[[
+        "voucher_id", "date", "year", "text", "terms", "customer", "vendor", "user",
+        "voucher_type", "category", "revenue_amount", "cost_amount", "income_line_indices",
+        "cost_line_indices", "all_line_indices",
+    ]]
 
 
 def _score_trade_relation(rev: pd.Series, cost: pd.Series, window_days: int) -> tuple[float, list[str]]:
@@ -268,70 +294,99 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
     if not c.get("enabled", True):
         return result
 
-    pay = df[
-        df["供应商编号"].notna()
-        & (df["凭证货币价值"].fillna(0).abs() > 0)
-        & (df["凭证货币价值"].fillna(0).abs() < max_single)
-    ].copy()
+    amounts = pd.to_numeric(df["凭证货币价值"], errors="coerce").fillna(0).abs()
+    mask = df["供应商编号"].notna() & amounts.gt(0) & amounts.lt(max_single)
+    pay = pd.DataFrame({
+        "_vendor": df.loc[mask, "供应商编号"].astype(str).to_numpy(dtype=object),
+        "_date": pd.to_datetime(df.loc[mask, "过账日期"], errors="coerce").to_numpy(),
+        "_abs": amounts.loc[mask].to_numpy(dtype=float),
+        "_vid": df.loc[mask, "凭证编号"].astype(str).to_numpy(dtype=object),
+        "_line": df.index.to_numpy()[mask.to_numpy()],
+    })
 
     if pay.empty:
         return result
 
-    pay["_abs"] = pay["凭证货币价值"].abs()
     flagged: set[str] = set()
 
     # 维度1：同日同供应商 — 金额高度相似（差异≤15%）才是化整为零的核心特征
-    for (vendor, _date), grp in pay.groupby(["供应商编号", "过账日期"]):
-        if len(grp) < min_count or grp["_abs"].sum() < min_total:
+    day_grouped = pay.groupby(["_vendor", "_date"], sort=False, dropna=False)
+    day_stats = day_grouped["_abs"].agg(["size", "sum", "mean", "min", "max"])
+    day_stats = day_stats[
+        (day_stats["size"] >= min_count)
+        & (day_stats["sum"] >= min_total)
+        & (day_stats["mean"] > 0)
+    ]
+    day_stats = day_stats[
+        np.maximum(
+            (day_stats["max"] - day_stats["mean"]).abs(),
+            (day_stats["min"] - day_stats["mean"]).abs(),
+        ).div(day_stats["mean"]) <= 0.15
+    ]
+    day_groups = day_grouped.indices
+    vids = pay["_vid"].to_numpy(dtype=object)
+    lines = pay["_line"].to_numpy()
+    for (vendor, day), stats in day_stats.iterrows():
+        positions = day_groups.get((vendor, day))
+        if positions is None:
             continue
-        amts = grp["_abs"].values
-        mean_amt = amts.mean()
-        if mean_amt == 0:
-            continue
-        variance = max(abs(a - mean_amt) / mean_amt for a in amts)
-        if variance > 0.15:
-            continue
-        for vid in grp["凭证编号"].unique():
+        group_vids = vids[positions]
+        for vid in pd.unique(group_vids):
             if vid not in flagged:
                 flagged.add(vid)
                 result.hits.append(RuleHit(
-                    voucher_id=str(vid),
+                    voucher_id=vid,
                     rule_type="化整为零(同日拆分)",
-                    evidence=f"供应商{vendor}同日{len(grp)}笔金额相似（均值{mean_amt:,.0f}，差异≤15%），合计{grp['_abs'].sum():,.0f}",
-                    line_indices=tuple(grp[grp["凭证编号"] == vid].index.tolist()),
+                    evidence=(
+                        f"供应商{vendor}同日{int(stats['size'])}笔金额相似"
+                        f"（均值{stats['mean']:,.0f}，差异≤15%），合计{stats['sum']:,.0f}"
+                    ),
+                    line_indices=tuple(lines[positions][group_vids == vid].tolist()),
                     priority=5,
                 ))
 
     # 维度2：窗口期内金额高度相似（差异≤10%）
-    for vendor, v_rows in pay.groupby("供应商编号"):
-        v_rows = v_rows.sort_values("过账日期")
-        if len(v_rows) < min_count:
+    dates = pay["_date"].to_numpy()
+    abs_values = pay["_abs"].to_numpy(dtype=float)
+    vendor_groups = pay.groupby("_vendor", sort=False).indices
+    window_delta = np.timedelta64(window_days, "D")
+    for vendor, positions in vendor_groups.items():
+        if len(positions) < min_count:
             continue
-        dates = v_rows["过账日期"].values
-        seen_windows: set[int] = set()
+        order = positions[np.argsort(dates[positions], kind="stable")]
+        vendor_dates = dates[order]
+        vendor_amounts = abs_values[order]
+        vendor_vids = vids[order]
+        seen_windows = np.zeros(len(order), dtype=bool)
+        right = 0
 
-        for i in range(len(dates)):
-            if i in seen_windows:
+        for left in range(len(order)):
+            if seen_windows[left] or np.isnat(vendor_dates[left]):
                 continue
-            window_end = dates[i] + pd.Timedelta(days=window_days)
-            window = v_rows[(v_rows["过账日期"] >= dates[i]) & (v_rows["过账日期"] <= window_end)]
-            if len(window) < min_count:
+            if right < left:
+                right = left
+            window_end = vendor_dates[left] + window_delta
+            while right < len(order) and vendor_dates[right] <= window_end:
+                right += 1
+            if right - left < min_count:
                 continue
-            amts = window["_abs"].values
+            amts = vendor_amounts[left:right]
             mean_amt = amts.mean()
             if mean_amt == 0:
                 continue
-            variance = max(abs(a - mean_amt) / mean_amt for a in amts)
+            variance = float(np.max(np.abs(amts - mean_amt) / mean_amt))
             if variance <= 0.10:
-                seen_windows.update(v_rows.index.get_indexer(window.index).tolist())
-                for vid in window["凭证编号"].unique():
+                seen_windows[left:right] = True
+                window_vids = vendor_vids[left:right]
+                window_lines = lines[order[left:right]]
+                for vid in pd.unique(window_vids):
                     if vid not in flagged:
                         flagged.add(vid)
                         result.hits.append(RuleHit(
-                            voucher_id=str(vid),
+                            voucher_id=vid,
                             rule_type="化整为零(窗口相似)",
-                            evidence=f"供应商{vendor}在{window_days}天内{len(window)}笔金额相似（差异≤10%）",
-                            line_indices=tuple(window[window["凭证编号"] == vid].index.tolist()),
+                            evidence=f"供应商{vendor}在{window_days}天内{right - left}笔金额相似（差异≤10%）",
+                            line_indices=tuple(window_lines[window_vids == vid].tolist()),
                             priority=4,
                         ))
     return result
@@ -727,9 +782,15 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
         return result
 
     revenues = facts[facts["revenue_amount"] >= min_revenue_amount].sort_values("revenue_amount", ascending=False)
-    costs = facts[facts["cost_amount"] > 0].copy()
+    costs = (
+        facts[facts["cost_amount"] > 0]
+        .sort_values("date", kind="stable")
+        .reset_index(drop=True)
+    )
     if revenues.empty:
         return result
+    cost_records = costs.to_dict(orient="records")
+    cost_dates = [row["date"] for row in cost_records]
 
     group_count = 0
     seen_groups: set[str] = set()
@@ -767,7 +828,14 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 continue
 
         scored_costs: list[dict[str, Any]] = []
-        for _, cost in costs.iterrows():
+        rev_date = rev["date"]
+        if not isinstance(rev_date, pd.Timestamp):
+            continue
+        start_date = rev_date - pd.Timedelta(days=window_days)
+        end_date = rev_date + pd.Timedelta(days=window_days)
+        left = bisect_left(cost_dates, start_date)
+        right = bisect_right(cost_dates, end_date)
+        for cost in cost_records[left:right]:
             if rev["voucher_id"] == cost["voucher_id"]:
                 continue
             score, reasons = _score_trade_relation(rev, cost, window_days)
@@ -1223,9 +1291,8 @@ def run_all_rules(
     dispatched_base_keys = set()
 
     enabled_rule_keys = _enabled_rule_keys(cfg)
-    total_rules = len(enabled_rule_keys)
 
-    for i, rule_key in enumerate(enabled_rule_keys):
+    for rule_key in enabled_rule_keys:
         base_key = _base_rule_key(rule_key)
         fn = RULE_DISPATCH.get(base_key)
         if fn is None:

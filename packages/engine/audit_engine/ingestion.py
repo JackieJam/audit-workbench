@@ -43,6 +43,12 @@ STANDARD_COLUMNS: tuple[StandardColumn, ...] = (
                    "凭证货币金额（DMBTR）。如果文件只有'本币金额'一列，请映射到'公司代码货币价值'。"),
     StandardColumn("借/贷标识", "core", ("借贷标识", "借贷", "dc indicator"),
                    "S=借方，H=贷方；缺失时尝试从借/贷方列或正负号推断"),
+    StandardColumn("公司代码", "important", ("公司", "company code", "BUKRS"),
+                   "公司代码，多公司数据的凭证唯一性与主体分析依赖此列"),
+    StandardColumn("凭证货币代码", "important", ("凭证货币", "document currency", "WAERS"),
+                   "凭证币种；使用凭证货币金额时禁止跨币种直接汇总"),
+    StandardColumn("公司代码货币代码", "important", ("本位币代码", "公司代码货币", "local currency"),
+                   "公司本位币代码；使用公司代码货币金额时作为汇总币种"),
 
     # ── 重要：缺失只影响相关分析维度 ──
     StandardColumn("总账科目", "important", ("科目编码", "科目代码", "account"),
@@ -444,10 +450,20 @@ def _post_process(
     df = df.copy()
 
     # ── 借/贷标识：三级降级（用户未映射时才尝试合成）──
+    if "借/贷标识" in df.columns:
+        df["借/贷标识"] = _normalize_dc_indicator(df["借/贷标识"])
     if "借/贷标识" not in df.columns:
         df = _synthesize_dc_from_amounts(df)
     if "借/贷标识" not in df.columns:
         df = _synthesize_dc_from_sign(df)
+    elif df["借/贷标识"].eq("").any():
+        missing_dc = df["借/贷标识"].eq("")
+        probe = df.drop(columns=["借/贷标识"]).copy()
+        probe = _synthesize_dc_from_amounts(probe)
+        if "借/贷标识" not in probe.columns:
+            probe = _synthesize_dc_from_sign(probe)
+        if "借/贷标识" in probe.columns:
+            df.loc[missing_dc, "借/贷标识"] = probe.loc[missing_dc, "借/贷标识"]
 
     # ── 凭证货币价值：缺失则尝试从借/贷方金额合成 ──
     if "凭证货币价值" not in df.columns and "借/贷标识" in df.columns:
@@ -473,6 +489,22 @@ def _post_process(
         missing.append(std.name)
 
     return df, missing
+
+
+def _normalize_dc_indicator(series: pd.Series) -> pd.Series:
+    """把常见借贷编码归一为 SAP 兼容的 S/H。"""
+    debit_values = {"s", "d", "debit", "dr", "借", "借方"}
+    credit_values = {"h", "c", "credit", "cr", "贷", "贷方"}
+
+    def normalize(value: object) -> str:
+        text = "" if pd.isna(value) else str(value).strip().lower()
+        if text in debit_values:
+            return "S"
+        if text in credit_values:
+            return "H"
+        return ""
+
+    return series.map(normalize)
 
 
 def _synthesize_dc_from_amounts(df: pd.DataFrame) -> pd.DataFrame:

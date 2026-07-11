@@ -31,14 +31,37 @@ const TOOL_LABELS: Record<string, string> = {
   run_cross_year_audit: "跨年稽核",
 };
 
-function ToolCallsCard({ toolCalls }: { toolCalls: AgentChatResponse["tool_calls"] }) {
+function ToolCallsCard({
+  toolCalls,
+  resolvedActions,
+  onResolve,
+}: {
+  toolCalls: AgentChatResponse["tool_calls"];
+  resolvedActions: Set<string>;
+  onResolve: (actionId: string, decision: "approve" | "reject") => void;
+}) {
   if (!toolCalls.length) return null;
   return (
     <div className="agent-tool-calls">
-      {toolCalls.map((tc, i) => (
+      {toolCalls.map((tc, i) => {
+        const actionId = typeof tc.result?.action_id === "string" ? tc.result.action_id : "";
+        const needsApproval = tc.result?.approval_required === true && actionId && !resolvedActions.has(actionId);
+        return (
         <div key={`${tc.tool}-${i}`} className="agent-tool-call">
           <span className="agent-tool-call__name">{TOOL_LABELS[tc.tool] ?? tc.tool}</span>
-          {tc.result?.error ? (
+          {resolvedActions.has(actionId) || tc.result?.action_status === "approved" ? (
+            <span className="agent-tool-call__meta">已批准</span>
+          ) : tc.result?.action_status === "rejected" ? (
+            <span className="agent-tool-call__meta">已拒绝</span>
+          ) : tc.result?.action_status === "failed" ? (
+            <span className="agent-tool-call__meta error">执行失败</span>
+          ) : needsApproval ? (
+            <span className="agent-tool-call__meta">
+              待确认
+              <button type="button" className="btn-ghost" onClick={() => onResolve(actionId, "approve")}>批准</button>
+              <button type="button" className="btn-ghost danger" onClick={() => onResolve(actionId, "reject")}>拒绝</button>
+            </span>
+          ) : tc.result?.error ? (
             <span className="agent-tool-call__meta error">{String(tc.result.error)}</span>
           ) : tc.result?.ok === true || tc.result?.cached === true ? (
             <span className="agent-tool-call__meta">已完成</span>
@@ -48,7 +71,8 @@ function ToolCallsCard({ toolCalls }: { toolCalls: AgentChatResponse["tool_calls
             <span className="agent-tool-call__meta">已查询</span>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -59,10 +83,11 @@ export function AgentPanel() {
   const { selectedProfileId, selectedProfile } = useLlm();
   const [input, setInput] = useState("");
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
+  const [resolvedActions, setResolvedActions] = useState<Set<string>>(() => new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setLocalMessages(messages.map((m) => ({ role: m.role, content: m.content })));
+    setLocalMessages(messages.map((m) => ({ role: m.role, content: m.content, toolCalls: m.tool_calls })));
   }, [messages]);
 
   useEffect(() => {
@@ -77,6 +102,15 @@ export function AgentPanel() {
         ...prev,
         { role: "assistant", content: res.reply, toolCalls: res.tool_calls },
       ]);
+      if (res.ui_actions?.length) applyUiActions(res.ui_actions);
+      refreshState();
+    },
+  });
+  const resolveAction = useMutation({
+    mutationFn: ({ actionId, decision }: { actionId: string; decision: "approve" | "reject" }) =>
+      api.resolveAgentAction(projectId!, actionId, decision),
+    onSuccess: (res) => {
+      setResolvedActions((current) => new Set(current).add(res.action_id));
       if (res.ui_actions?.length) applyUiActions(res.ui_actions);
       refreshState();
     },
@@ -129,7 +163,13 @@ export function AgentPanel() {
           <div key={i} className={m.role === "user" ? "agent-msg agent-msg--user" : "agent-msg agent-msg--bot"}>
             {m.role === "assistant" ? (
               <>
-                {m.toolCalls?.length ? <ToolCallsCard toolCalls={m.toolCalls} /> : null}
+                {m.toolCalls?.length ? (
+                  <ToolCallsCard
+                    toolCalls={m.toolCalls}
+                    resolvedActions={resolvedActions}
+                    onResolve={(actionId, decision) => resolveAction.mutate({ actionId, decision })}
+                  />
+                ) : null}
                 <AgentMarkdown content={m.content} />
               </>
             ) : (

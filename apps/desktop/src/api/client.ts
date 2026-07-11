@@ -64,6 +64,17 @@ export type IngestResponse = {
   aliases_recorded: number;
 };
 
+export type AnalysisQuality = {
+  amount_source: string;
+  amount_sign_mode: string;
+  amount_sign_confidence: number;
+  currency_basis: string;
+  currencies: string[];
+  mixed_document_currency: boolean;
+  unclassified_amount: number;
+  unclassified_amount_ratio: number;
+};
+
 export type MonthlyRow = {
   月份: number;
   净收入: number;
@@ -102,6 +113,7 @@ export type AuditSelection = {
 export type FinanceModuleId =
   | "income"
   | "expense"
+  | "other_pnl"
   | "working_capital"
   | "balance_sheet"
   | "adjustment"
@@ -243,6 +255,13 @@ export type SampleRow = {
 
 
 export type ExpenseRow = { 年份: number; 费用类别: string; 金额: number; 占比: number };
+export type OtherPnlMonthlyRow = {
+  月份: number;
+  投资收益: number;
+  营业外收入: number;
+  营业外支出: number;
+  净影响: number;
+};
 export type ApMonthlyRow = { 月份: number; 暂估贷方增加: number; 暂估借方减少: number; 暂估净额: number };
 export type ApSupplierRow = { 供应商: string; 暂估贷方增加: number; 暂估借方减少: number; 暂估净额: number };
 export type OrMonthlyRow = { 月份: number; 其他应收S发生额: number; 其他应收H发生额: number; 其他应收净额: number };
@@ -276,6 +295,10 @@ export const api = {
 
   getInsightJobs: (projectId: string) =>
     request<InsightJobsResponse>(`/projects/${projectId}/analysis/modules/insight/jobs`),
+  getAnalysisQuality: (projectId: string) =>
+    request<{ data_version: string; years: Record<string, AnalysisQuality> }>(
+      `/projects/${projectId}/analysis/quality`,
+    ),
 
   getModuleInsight: (projectId: string, moduleKey: string) =>
     request<{ module: string; cached: boolean; insight: ModuleInsight | null }>(
@@ -390,7 +413,12 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) },
     ),
   getAgentState: (projectId: string) =>
-    request<{ messages: Array<{ role: string; content: string; at?: string }>; pinned_context: AuditSelection | null; updated_at?: string }>(
+    request<{
+      messages: Array<{ role: string; content: string; at?: string; tool_calls?: AgentChatResponse["tool_calls"] }>;
+      pinned_context: AuditSelection | null;
+      updated_at?: string;
+      audit_events?: Array<Record<string, unknown>>;
+    }>(
       `/projects/${projectId}/agent/state`,
     ),
   setAgentContext: (projectId: string, pinned_context: AuditSelection | null) =>
@@ -415,6 +443,11 @@ export const api = {
     }),
   clearAgentThread: (projectId: string) =>
     request<{ ok: boolean }>(`/projects/${projectId}/agent/thread`, { method: "DELETE" }),
+  resolveAgentAction: (projectId: string, actionId: string, decision: "approve" | "reject") =>
+    request<{ action_id: string; status: string; result: Record<string, unknown>; ui_actions?: AgentUiAction[] }>(
+      `/projects/${projectId}/agent/actions/${encodeURIComponent(actionId)}/${decision}`,
+      { method: "POST" },
+    ),
 
   getSamples: (projectId: string) =>
     request<{ sample_rows: number; voucher_count: number; samples: SampleRow[] }>(
@@ -426,6 +459,10 @@ export const api = {
   expenseDrilldown: (projectId: string, year: number, category: string) =>
     request<DrilldownResponse>(
       `/projects/${projectId}/analysis/expense/drilldown?year=${year}&category=${encodeURIComponent(category)}`,
+    ),
+  otherPnlMonthly: (projectId: string, year: number) =>
+    request<{ year: number; rows: OtherPnlMonthlyRow[] }>(
+      `/projects/${projectId}/analysis/other-pnl/monthly?year=${year}`,
     ),
   wcApMonthly: (projectId: string, year: number) =>
     request<{ year: number; rows: ApMonthlyRow[] }>(
@@ -510,4 +547,3 @@ export const api = {
 
   exportExcelUrl: (projectId: string) => `${base}/projects/${projectId}/pipeline/export`,
 };
-

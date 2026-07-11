@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
-import pytest
-
+from audit_engine.agent.orchestrator import get_agent_state, resolve_pending_action
 from audit_engine.agent.rule_memory import record_rule_feedback
-from audit_engine.agent.tools import EDITABLE_RULE_KEYS, execute_tool
+from audit_engine.agent.tools import execute_tool
 from audit_engine.store import ProjectStore
 
 
@@ -131,3 +130,27 @@ def test_resolve_module_key_and_questions():
     assert resolve_module_key("expense") == "费用"
     qs = load_module_questions("费用")
     assert len(qs) >= 1
+
+
+def test_pending_mutation_requires_resolution_and_preserves_audit_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store)
+    state = store.load_state(pid)
+    state["agent_thread"] = {
+        "messages": [],
+        "pending_actions": [{
+            "action_id": "act_test",
+            "tool": "update_rule",
+            "args": {"rule_id": "large_amount", "patches": {"round_number_threshold": 900000}},
+            "status": "pending",
+        }],
+    }
+    store.save_state(pid, state)
+
+    resolved = resolve_pending_action(store, pid, "act_test", approve=True)
+    assert resolved["status"] == "approved"
+    assert execute_tool(store, pid, "get_rules_catalog", {})["sampling_rules"]
+    agent_state = get_agent_state(store, pid)
+    assert agent_state["pending_actions"] == []
+    assert agent_state["audit_events"][-1]["decision"] == "approved"

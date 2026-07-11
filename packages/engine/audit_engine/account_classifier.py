@@ -42,6 +42,9 @@ CAT_ADVANCE_RECEIPT = "预收账款"
 CAT_TAX_PAYABLE = "应交税费"
 CAT_LOAN = "借款"
 CAT_EQUITY = "权益"
+CAT_EMPLOYEE_PAYABLE = "应付职工薪酬"
+CAT_BOND_PAYABLE = "应付债券"
+CAT_DIVIDEND_PAYABLE = "应付股利"
 CAT_UNCATEGORIZED = "未分类"
 
 ALL_CATEGORIES: tuple[str, ...] = (
@@ -64,6 +67,9 @@ ALL_CATEGORIES: tuple[str, ...] = (
     CAT_TAX_PAYABLE,
     CAT_LOAN,
     CAT_EQUITY,
+    CAT_EMPLOYEE_PAYABLE,
+    CAT_BOND_PAYABLE,
+    CAT_DIVIDEND_PAYABLE,
     CAT_UNCATEGORIZED,
 )
 
@@ -82,6 +88,9 @@ BALANCE_SHEET_SIDE: dict[str, str] = {
     CAT_ADVANCE_RECEIPT: "负债",
     CAT_TAX_PAYABLE: "负债",
     CAT_LOAN: "负债",
+    CAT_EMPLOYEE_PAYABLE: "负债",
+    CAT_BOND_PAYABLE: "负债",
+    CAT_DIVIDEND_PAYABLE: "负债",
     CAT_EQUITY: "权益",
 }
 
@@ -89,7 +98,7 @@ BALANCE_SHEET_SIDE: dict[str, str] = {
 BALANCE_SHEET_CATEGORIES: tuple[str, ...] = (
     CAT_AR, CAT_OTHER_RECEIVABLE, CAT_PREPAY,
     CAT_AP, CAT_AP_ACCRUAL, CAT_OTHER_PAYABLE, CAT_ADVANCE_RECEIPT,
-    CAT_TAX_PAYABLE, CAT_LOAN,
+    CAT_TAX_PAYABLE, CAT_EMPLOYEE_PAYABLE, CAT_BOND_PAYABLE, CAT_DIVIDEND_PAYABLE, CAT_LOAN,
     CAT_INVENTORY, CAT_FIXED_ASSET,
     CAT_CASH,
     CAT_EQUITY,
@@ -150,6 +159,9 @@ _PRIORITY_RULES: tuple[_Rule, ...] = (
     _Rule(CAT_ADVANCE_RECEIPT, ("预收账款", "合同负债", "预收")),
     _Rule(CAT_PREPAY, ("预付账款", "预付")),
     _Rule(CAT_TAX_PAYABLE, ("应交税费", "应交税金", "应缴税费")),
+    _Rule(CAT_EMPLOYEE_PAYABLE, ("应付职工薪酬", "应付工资", "应付福利费")),
+    _Rule(CAT_BOND_PAYABLE, ("应付债券",)),
+    _Rule(CAT_DIVIDEND_PAYABLE, ("应付股利", "应付利润")),
     _Rule(CAT_AR, ("应收",)),
     _Rule(CAT_AP, ("应付",)),
     # 不用裸「现金」：避免「销售费用-现金折扣」等被误判为货币资金
@@ -271,6 +283,27 @@ def operating_cost_mask(work: pd.DataFrame) -> pd.Series:
     )
     by_cat = work["_acct_category"].eq(CAT_COST) & ~excluded
     return by_prefix | by_cat
+
+
+def investment_income_mask(work: pd.DataFrame) -> pd.Series:
+    """投资收益口径：标准前缀优先，兼容非标准科目名称。"""
+    code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return code4.eq("6111") | name.str.contains("投资收益", na=False)
+
+
+def non_operating_income_mask(work: pd.DataFrame) -> pd.Series:
+    """营业外收入口径。"""
+    code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return code4.eq("6301") | name.str.contains("营业外收入", na=False)
+
+
+def non_operating_expense_mask(work: pd.DataFrame) -> pd.Series:
+    """营业外支出口径。"""
+    code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return code4.eq("6711") | name.str.contains("营业外支出", na=False)
 
 
 def classify_dataframe(

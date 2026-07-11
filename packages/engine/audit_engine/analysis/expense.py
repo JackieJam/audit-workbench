@@ -5,16 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-
 from audit_engine.account_classifier import (
     CAT_EXPENSE,
     CAT_FINANCIAL_EXPENSE,
     CAT_RD_EXPENSE,
     CAT_TAX_SURCHARGE,
 )
-from audit_engine.config.accounts import EXPENSE_CATEGORY_PATTERNS
-from audit_engine.data_columns import ensure_analysis_columns
 from audit_engine.analysis.entry_display import entry_display_columns
+from audit_engine.config.accounts import classify_expense_subcategory
+from audit_engine.data_columns import ensure_analysis_columns
 from audit_engine.profiler import build_financial_summary
 
 
@@ -53,15 +52,6 @@ def build_expense_financials(work_by_year: dict[int, pd.DataFrame]) -> dict[int,
     return {year: build_financial_summary(df, year) for year, df in work_by_year.items()}
 
 
-def _expense_category_masks(work: pd.DataFrame) -> dict[str, pd.Series]:
-    work = ensure_analysis_columns(work)
-    account_name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
-    return {
-        category: account_name.str.contains(pattern, na=False)
-        for category, pattern in EXPENSE_CATEGORY_PATTERNS.items()
-    }
-
-
 def expense_category_entries(
     work: pd.DataFrame,
     category: str,
@@ -80,17 +70,8 @@ def expense_category_entries(
         detail = work[work["_acct_category"].eq(CAT_TAX_SURCHARGE)].copy()
     else:
         expense_base = work[work["_acct_category"].eq(CAT_EXPENSE)].copy()
-        masks = _expense_category_masks(expense_base)
-        if category == "其他费用":
-            matched = pd.Series(False, index=expense_base.index)
-            for mask in masks.values():
-                matched |= mask
-            detail = expense_base.loc[~matched].copy()
-        else:
-            mask = masks.get(category)
-            if mask is None:
-                return pd.DataFrame()
-            detail = expense_base.loc[mask].copy()
+        expense_base["_expense_subcategory"] = expense_base["_account_name"].map(classify_expense_subcategory)
+        detail = expense_base[expense_base["_expense_subcategory"].eq(category)].copy()
 
     if detail.empty:
         return pd.DataFrame()

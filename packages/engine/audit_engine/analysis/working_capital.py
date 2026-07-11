@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.account_classifier import (
     CAT_AP,
     CAT_AP_ACCRUAL,
@@ -12,6 +11,13 @@ from audit_engine.account_classifier import (
 )
 from audit_engine.analysis.entry_display import entry_display_columns
 from audit_engine.data_columns import ensure_analysis_columns
+
+
+def _periods(work: pd.DataFrame) -> list[int]:
+    periods = list(range(1, 13))
+    if work["_month"].eq(13).any():
+        periods.append(13)
+    return periods
 
 
 def _ap_accrual_rows(work: pd.DataFrame) -> pd.DataFrame:
@@ -26,7 +32,7 @@ def _ap_accrual_rows(work: pd.DataFrame) -> pd.DataFrame:
 def ap_accrual_monthly(work: pd.DataFrame) -> pd.DataFrame:
     accrual = _ap_accrual_rows(work)
     rows: list[dict] = []
-    for month in range(1, 13):
+    for month in _periods(accrual):
         m = accrual[accrual["_month"] == month]
         credit_increase = float(-m.loc[m["_dc"] == "H", "_credit_amount"].sum())
         debit_decrease = float(m.loc[m["_dc"] == "S", "_debit_amount"].sum())
@@ -104,7 +110,7 @@ def _other_receivable_rows(work: pd.DataFrame) -> pd.DataFrame:
 def other_receivable_monthly(work: pd.DataFrame) -> pd.DataFrame:
     other_receivable = _other_receivable_rows(work)
     rows: list[dict] = []
-    for month in range(1, 13):
+    for month in _periods(other_receivable):
         m = other_receivable[other_receivable["_month"] == month]
         debit_s = float(m.loc[m["_dc"] == "S", "_amount_raw"].sum())
         credit_h = float((-m.loc[m["_dc"] == "H", "_amount_raw"]).sum())
@@ -154,7 +160,7 @@ def _other_payable_rows(work: pd.DataFrame) -> pd.DataFrame:
 def other_payable_monthly(work: pd.DataFrame) -> pd.DataFrame:
     other_payable = _other_payable_rows(work)
     rows: list[dict] = []
-    for month in range(1, 13):
+    for month in _periods(other_payable):
         m = other_payable[other_payable["_month"] == month]
         accrual_h = float((-m.loc[m["_dc"] == "H", "_amount_raw"]).sum())
         writeoff_s = float(m.loc[m["_dc"] == "S", "_amount_raw"].sum())

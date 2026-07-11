@@ -7,6 +7,7 @@ from typing import Any
 from audit_engine.agent.orchestrator import (
     clear_agent_thread,
     get_agent_state,
+    resolve_pending_action,
     run_agent_chat,
     set_pinned_context,
 )
@@ -72,3 +73,29 @@ def agent_clear(project_id: str, store: ProjectStore = Depends(get_store)) -> di
     _manifest_or_404(store, project_id)
     clear_agent_thread(store, project_id)
     return {"ok": True}
+
+
+@router.post("/{project_id}/agent/actions/{action_id}/approve")
+def agent_approve_action(
+    project_id: str,
+    action_id: str,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        return resolve_pending_action(store, project_id, action_id, approve=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{project_id}/agent/actions/{action_id}/reject")
+def agent_reject_action(
+    project_id: str,
+    action_id: str,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        return resolve_pending_action(store, project_id, action_id, approve=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

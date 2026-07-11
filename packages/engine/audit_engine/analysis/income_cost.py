@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.account_classifier import (
     CAT_EXPENSE,
     CAT_FINANCIAL_EXPENSE,
@@ -44,7 +43,10 @@ def monthly_revenue_cost(work: pd.DataFrame, category: str = "总计") -> pd.Dat
         [CAT_EXPENSE, CAT_RD_EXPENSE, CAT_FINANCIAL_EXPENSE, CAT_TAX_SURCHARGE]
     )
 
-    for month in range(1, 13):
+    periods = list(range(1, 13))
+    if source["_month"].eq(13).any():
+        periods.append(13)
+    for month in periods:
         m = source[source["_month"] == month]
         revenue = m[revenue_mask.reindex(m.index, fill_value=False)]
         cost = m[cost_mask.reindex(m.index, fill_value=False)]

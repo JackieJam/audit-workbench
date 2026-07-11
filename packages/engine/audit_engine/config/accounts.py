@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import re
+
 # ── 自动凭证类型（系统生成，非人工操作）──
 
 AUTO_VOUCHER_TYPES = {
@@ -91,7 +93,7 @@ EXPENSE_CATEGORY_PATTERNS = {
     "物料消耗": "物料|备品|备件|辅材",
     "折旧摊销": "折旧|摊销",
     "加工费": "加工|委托加工|外协",
-    "动力费用": "动力|电|水|气|油|天然气|能源",
+    "动力费用": "动力|电费|水费|燃气|天然气|汽油|柴油|能源",
     "维修费": "维修|维保",
     "差旅费": "差旅|交通|住宿|出差",
     "招待费": "招待|接待|餐费",
@@ -100,6 +102,15 @@ EXPENSE_CATEGORY_PATTERNS = {
     "运输费": "运输|运费|物流",
     "保险费": "保险",
 }
+
+
+def classify_expense_subcategory(account_name: object) -> str:
+    """按配置顺序互斥归类费用，避免同一科目被重复统计。"""
+    text = "" if account_name is None else str(account_name).strip()
+    for category, pattern in EXPENSE_CATEGORY_PATTERNS.items():
+        if re.search(pattern, text):
+            return category
+    return "其他费用"
 
 # ── 调账/冲销关键词 ──
 

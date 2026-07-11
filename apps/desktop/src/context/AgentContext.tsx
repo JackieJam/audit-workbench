@@ -1,13 +1,20 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type AuditSelection } from "@/api/client";
+import { api, type AgentChatResponse, type AuditSelection } from "@/api/client";
+
+type AgentMessage = {
+  role: string;
+  content: string;
+  at?: string;
+  tool_calls?: AgentChatResponse["tool_calls"];
+};
 
 type AgentContextValue = {
   projectId: string | null;
   pinnedContext: AuditSelection | null;
   pinSelection: (ctx: AuditSelection | null) => void;
   suggestions: string[];
-  messages: { role: string; content: string; at?: string }[];
+  messages: AgentMessage[];
   refreshState: () => void;
 };
 
@@ -51,7 +58,7 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
       pinnedContext,
       pinSelection,
       suggestions,
-      messages: (stateQ.data?.messages ?? []) as { role: string; content: string; at?: string }[],
+      messages: (stateQ.data?.messages ?? []) as AgentMessage[],
       refreshState,
     }),
     [projectId, pinnedContext, pinSelection, suggestions, stateQ.data?.messages, refreshState],

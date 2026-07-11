@@ -4,11 +4,10 @@ import io
 import json
 
 import pandas as pd
-import pytest
-from fastapi.testclient import TestClient
-
 from audit_api.deps import get_pipeline, get_store
 from audit_api.main import app
+from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 client = TestClient(app)
 
@@ -98,10 +97,27 @@ def test_pipeline_profiles_rules_samples_export(tmp_path, monkeypatch) -> None:
 
     export = client.get(f"/projects/{pid}/pipeline/export")
     assert export.status_code == 200
+    assert "filename*=UTF-8''" in export.headers["content-disposition"]
     assert export.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert len(export.content) > 1000
+
+    # 导出必须服从页面当前样本事实源，而不是重新按规则生成另一套样本。
+    store = get_store()
+    state = store.load_state(pid)
+    selected_voucher = "2023001"
+    state["samples"] = [{"凭证编号": selected_voucher}]
+    store.save_state(pid, state)
+    export = client.get(f"/projects/{pid}/pipeline/export")
+    workbook = load_workbook(io.BytesIO(export.content), read_only=True)
+    sample_sheet = workbook["样本清单"]
+    exported_vouchers = {
+        str(sample_sheet.cell(row=row, column=2).value)
+        for row in range(2, sample_sheet.max_row + 1)
+        if sample_sheet.cell(row=row, column=2).value
+    }
+    assert exported_vouchers == {selected_voucher}
 
     get_store.cache_clear()
     get_pipeline.cache_clear()

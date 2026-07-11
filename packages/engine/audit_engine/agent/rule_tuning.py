@@ -5,8 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from audit_engine.agent.rule_ops import merge_rules_from_state, patch_rule
 from audit_engine.agent.rule_memory import feedback_summary, list_rule_feedback
+from audit_engine.agent.rule_ops import merge_rules_from_state, patch_rule
 from audit_engine.store import ProjectStore
 
 RULE_ID_TO_NAME: dict[str, str] = {

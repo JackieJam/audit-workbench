@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -40,7 +40,7 @@ class ProjectManifest:
 
     @classmethod
     def create(cls, project_name: str, project_id: str | None = None) -> ProjectManifest:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         pid = project_id or _slug(project_name)
         return cls(
             project_id=pid,
@@ -50,7 +50,7 @@ class ProjectManifest:
         )
 
     def touch(self) -> None:
-        self.updated_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {

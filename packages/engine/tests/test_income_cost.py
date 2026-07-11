@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.analysis.drilldown import monthly_income_cost_entries
 from audit_engine.analysis.income_cost import income_cost_categories, monthly_revenue_cost
 from audit_engine.data_columns import add_analysis_columns

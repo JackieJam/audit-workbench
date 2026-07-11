@@ -127,6 +127,23 @@ def main() -> int:
         log(f"  ✓ {time.perf_counter() - t0:.1f}s")
 
         t0 = time.perf_counter()
+        log(f"▶ 投资收益与营业外收支（{latest}）")
+        other_pnl = _ok(
+            "other pnl",
+            client.get(
+                f"/projects/{pid}/analysis/other-pnl/monthly",
+                params={"year": latest},
+            ),
+        )
+        other_rows = other_pnl["rows"]
+        active_other_months = sum(
+            1 for row in other_rows
+            if any(abs(row.get(key, 0)) > 0 for key in ("投资收益", "营业外收入", "营业外支出"))
+        )
+        log(f"  月度 {len(other_rows)} 行，有其他损益月份 {active_other_months}")
+        log(f"  ✓ {time.perf_counter() - t0:.1f}s")
+
+        t0 = time.perf_counter()
         log("▶ 跨年费用结构")
         expense = _ok("expense", client.get(f"/projects/{pid}/analysis/expense/cross-year"))
         exp_rows = expense.get("rows") or []
@@ -134,7 +151,7 @@ def main() -> int:
             top = max(exp_rows, key=lambda r: abs(r.get("合计", r.get("金额", 0))))
             log(f"  分类数: {len(exp_rows)}，示例: {top.get('费用分类', top)}")
         else:
-            log(f"  分类数: 0")
+            log("  分类数: 0")
         log(f"  ✓ {time.perf_counter() - t0:.1f}s")
 
         t0 = time.perf_counter()
@@ -196,15 +213,21 @@ def main() -> int:
         t0 = time.perf_counter()
         log("▶ 规则执行 + 抽样 + 导出")
         rules = _ok("rules", client.post(f"/projects/{pid}/pipeline/rules/run"))
-        hits = rules.get("hits") or rules.get("rule_hits") or []
         samples = _ok(
             "samples",
             client.post(f"/projects/{pid}/pipeline/samples", json={"method": "by_rule", "size": 20}),
         )
+        total_hits = int(rules.get("total_hits", 0))
+        voucher_count = int(samples.get("voucher_count", 0))
+        assert total_hits > 0
+        assert 0 < voucher_count <= 20
         export = client.get(f"/projects/{pid}/pipeline/export")
         if export.status_code != 200:
             raise RuntimeError(f"export failed: {export.status_code}")
-        log(f"  规则命中: {len(hits)}  样本: {samples.get('count', len(samples.get('samples', [])))}  Excel: {len(export.content):,} bytes")
+        log(
+            f"  规则命中: {total_hits}  样本凭证: {voucher_count}  "
+            f"样本分录: {samples.get('sample_rows', 0)}  Excel: {len(export.content):,} bytes"
+        )
         log(f"  ✓ {time.perf_counter() - t0:.1f}s")
 
         t0 = time.perf_counter()

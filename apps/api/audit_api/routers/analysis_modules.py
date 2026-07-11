@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pandas as pd
@@ -14,6 +13,7 @@ from audit_engine.analysis.balance_sheet import (
 )
 from audit_engine.analysis.drilldown import resolve_drilldown
 from audit_engine.analysis.expense import build_expense_financials, cross_year_expense_table, expense_category_entries
+from audit_engine.analysis.other_pnl import monthly_other_pnl
 from audit_engine.analysis.working_capital import (
     ap_accrual_monthly,
     ap_accrual_suppliers,
@@ -63,6 +63,21 @@ def expense_drilldown(
 
 # ── 暂估往来 ──
 
+
+@router.get("/{project_id}/analysis/other-pnl/monthly")
+def other_pnl_monthly(
+    project_id: str,
+    year: int = Query(...),
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    manifest = _manifest_or_404(store, project_id)
+    _require_year(manifest.years, year)
+    df = monthly_other_pnl(_work(store, project_id, year))
+    return {"year": year, "rows": _df_records(df)}
+
+
+# ── 暂估往来 ──
+
 @router.get("/{project_id}/analysis/working-capital/ap-accrual/monthly")
 def wc_ap_monthly(project_id: str, year: int = Query(...), store: ProjectStore = Depends(get_store)) -> dict:
     manifest = _manifest_or_404(store, project_id)
@@ -75,7 +90,7 @@ def wc_ap_monthly(project_id: str, year: int = Query(...), store: ProjectStore =
 def wc_ap_suppliers(
     project_id: str,
     year: int = Query(...),
-    month: int = Query(..., ge=1, le=12),
+    month: int = Query(..., ge=1, le=13),
     top_n: int = Query(10, ge=1, le=50),
     store: ProjectStore = Depends(get_store),
 ) -> dict:
@@ -150,7 +165,7 @@ def bs_accounts(
     project_id: str,
     year: int = Query(...),
     category: str = Query(...),
-    month: int | None = Query(None, ge=1, le=12),
+    month: int | None = Query(None, ge=1, le=13),
     top_n: int = Query(15, ge=1, le=50),
     store: ProjectStore = Depends(get_store),
 ) -> dict:

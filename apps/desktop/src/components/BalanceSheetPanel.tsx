@@ -24,6 +24,10 @@ function formatWan(v: number) {
   return `${(v / 10000).toFixed(1)}万`;
 }
 
+function periodLabel(period: number) {
+  return period === 13 ? "13期" : `${period}月`;
+}
+
 export function BalanceSheetPanel({ project, preferredYear }: Props) {
   const [year, setYear] = useState(project.years[0] ?? 0);
   const [category, setCategory] = useState("");
@@ -121,7 +125,7 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
     if (!monthlyRef.current || !monthly.data?.rows.length) return;
     const chart = echarts.init(monthlyRef.current);
     const rows = monthly.data.rows;
-    const months = rows.map((r) => `${r.月份}月`);
+    const months = rows.map((r) => periodLabel(r.月份));
     chart.setOption({
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#8b97a8" } },
@@ -141,7 +145,7 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
       const direction = dirs[params.seriesIndex] ?? "net";
       setSelection({
         kind: "bs_category_month", year, category, month, direction,
-        label: `${year}年${month}月 ${category} ${direction === "debit" ? "借方" : direction === "credit" ? "贷方" : "净变动"}`,
+        label: `${year}年${periodLabel(month)} ${category} ${direction === "debit" ? "借方" : direction === "credit" ? "贷方" : "净变动"}`,
         sourceView: "科目类别月度变动",
       });
       setAddedId(null);

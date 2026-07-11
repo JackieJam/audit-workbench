@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
-
-from audit_engine.ingestion import _backfill_posting_date, _normalize_code_column
+from audit_engine.ingestion import _backfill_posting_date, _normalize_code_column, _normalize_dc_indicator
 
 
 def test_backfill_from_voucher_date() -> None:
@@ -20,3 +19,9 @@ def test_normalize_mixed_vendor_code() -> None:
     s = pd.Series(["V001", 1002.0, float("nan"), 3003])
     out = _normalize_code_column(s)
     assert out.tolist() == ["V001", "1002", "", "3003"]
+
+
+def test_normalize_dc_indicator_accepts_common_erp_values() -> None:
+    values = pd.Series(["S", "H", "借", "贷方", "D", "C", "Debit", "Credit", "N/A"])
+    out = _normalize_dc_indicator(values)
+    assert out.tolist() == ["S", "H", "S", "H", "S", "H", "S", "H", ""]

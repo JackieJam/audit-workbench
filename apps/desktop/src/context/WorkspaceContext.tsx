@@ -6,6 +6,7 @@ export type MainTab = "finance" | "suspects" | "sampling";
 export type FinanceModule =
   | "income"
   | "expense"
+  | "other_pnl"
   | "working_capital"
   | "balance_sheet"
   | "adjustment"

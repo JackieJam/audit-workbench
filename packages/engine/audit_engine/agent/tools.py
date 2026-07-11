@@ -7,12 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from audit_engine.analysis.drilldown import resolve_drilldown
-from audit_engine.candidate_pool import add_candidate_group, build_candidate_group, pool_stats
-from audit_engine.pipeline import AnalysisPipeline
-from audit_engine.profiler import build_financial_summary, financials_to_summary_text
 from audit_engine.agent.audit_questions import (
-    MODULE_ID_TO_KEY,
     MODULE_KEY_TO_ID,
     load_module_questions,
     resolve_module_key,
@@ -25,15 +20,20 @@ from audit_engine.agent.rule_memory import (
 from audit_engine.agent.rule_ops import merge_rules_from_state, patch_rule
 from audit_engine.agent.rule_tuning import apply_rule_tuning_suggestion, suggest_rule_tuning
 from audit_engine.agent.ui_actions import attach_ui_actions, finance_module, navigate_main
+from audit_engine.analysis.drilldown import resolve_drilldown
+from audit_engine.candidate_pool import add_candidate_group, build_candidate_group, pool_stats
+from audit_engine.data_columns import analysis_quality_summary
 from audit_engine.experience.column_aliases import learned_column_aliases
 from audit_engine.module_insight import apply_recommendations, run_module_insight_pipeline
 from audit_engine.module_insight_jobs import list_jobs
+from audit_engine.pipeline import AnalysisPipeline
+from audit_engine.profiler import build_financial_summary, financials_to_summary_text
 from audit_engine.store import ProjectStore
-
 
 ANALYSIS_MODULES: list[dict[str, str]] = [
     {"id": "income", "label": "收入成本", "desc": "月度收入成本、客户Top10、钻取、AI风险分析"},
     {"id": "expense", "label": "费用", "desc": "跨年费用结构对比、钻取"},
+    {"id": "other_pnl", "label": "营业外与投资收益", "desc": "投资收益、营业外收入与营业外支出月度分析、钻取"},
     {"id": "working_capital", "label": "暂估往来", "desc": "应付暂估/其他应收/其他应付月度与钻取"},
     {"id": "balance_sheet", "label": "资产负债", "desc": "科目类别月度发生额与科目构成"},
     {"id": "adjustment", "label": "调账冲销", "desc": "调账冲销凭证摘要"},
@@ -215,7 +215,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "module": {
                         "type": "string",
-                        "enum": ["income", "expense", "working_capital", "balance_sheet", "adjustment", "profile", "cross"],
+                        "enum": ["income", "expense", "other_pnl", "working_capital", "balance_sheet", "adjustment", "profile", "cross"],
                         "description": "分析模块 id",
                     },
                     "year": {"type": "integer"},
@@ -462,11 +462,13 @@ def execute_tool(
 
     if name == "get_project_overview":
         financials = {}
+        data_quality = {}
         fin_error = None
         for year in manifest.years:
             work = store.get_work_df(project_id, year)
             if work.empty:
                 continue
+            data_quality[year] = analysis_quality_summary(work)
             try:
                 financials[year] = build_financial_summary(work, year)
             except Exception as exc:
@@ -481,6 +483,7 @@ def execute_tool(
             "candidate_stats": pool_stats(pool),
             "financial_summary": financials_to_summary_text(financials) if financials else "",
             "financial_summary_error": fin_error,
+            "data_quality": data_quality,
         }
 
     if name == "query_drilldown":

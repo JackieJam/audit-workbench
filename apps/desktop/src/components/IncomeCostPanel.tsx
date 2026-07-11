@@ -43,9 +43,13 @@ function formatWan(v: number) {
   return `${(v / 10000).toFixed(1)}万`;
 }
 
+function periodLabel(period: number) {
+  return period === 13 ? "13期" : `${period}月`;
+}
+
 function selectionLabel(sel: ChartSelection): string {
   if (sel.kind === "monthly") {
-    return `${sel.year}年${sel.month}月 · ${sel.category} · ${sel.metricLabel}`;
+    return `${sel.year}年${periodLabel(sel.month)} · ${sel.category} · ${sel.metricLabel}`;
   }
   return `${sel.year}年 · ${sel.category} · 客户「${sel.customer}」`;
 }
@@ -53,7 +57,7 @@ function selectionLabel(sel: ChartSelection): string {
 function selectionToAddPayload(sel: ChartSelection) {
   if (sel.kind === "monthly") {
     return {
-      title: `${sel.year}年${sel.month}月 ${sel.category} ${sel.metricLabel}`,
+      title: `${sel.year}年${periodLabel(sel.month)} ${sel.category} ${sel.metricLabel}`,
       source_module: "收入成本",
       source_view: "月度收入成本",
       selector: {
@@ -63,7 +67,7 @@ function selectionToAddPayload(sel: ChartSelection) {
         metric: sel.metric,
         category: sel.category,
       },
-      reason: `从月度收入成本图选择 ${sel.year}年${sel.month}月 ${sel.metricLabel}，纳入疑点库复核。`,
+      reason: `从月度收入成本图选择 ${sel.year}年${periodLabel(sel.month)} ${sel.metricLabel}，纳入疑点库复核。`,
       tags: ["月度", sel.metricLabel],
     };
   }
@@ -180,7 +184,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
 
   const buildMonthlyOption = useCallback((): echarts.EChartsOption | null => {
     if (!monthlyRows.length) return null;
-    const months = monthlyRows.map((r) => `${r.月份}月`);
+    const months = monthlyRows.map((r) => periodLabel(r.月份));
     // 图上「净成本」用正数发生额：优先后端净成本，否则取 -净成本影响
     const costBars = monthlyRows.map((r) =>
       r.净成本 != null ? r.净成本 : -r.净成本影响,
@@ -277,7 +281,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
                 color: short ? "#c9d4e4" : "#f5f8fc",
                 fontSize: 11,
                 distance: short ? 6 : 8,
-                formatter: (params: { dataIndex?: number; value?: number }) => {
+                formatter: (params) => {
                   const name = names[params.dataIndex ?? 0] ?? "";
                   const shown = name.length > 32 ? `${name.slice(0, 31)}…` : name;
                   return `${shown}  ${formatWan(Number(params.value ?? 0))}`;

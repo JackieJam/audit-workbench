@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from audit_api.logging_config import configure_access_logging
 from audit_api.middleware import reject_foreign_stream
-from audit_api.routers import agent, analysis, analysis_modules, candidates, health, ingest, llm_config, llm_insight, pipeline, projects
+from audit_api.routers import (
+    agent,
+    analysis,
+    analysis_modules,
+    candidates,
+    health,
+    ingest,
+    llm_config,
+    llm_insight,
+    pipeline,
+    projects,
+)
 
 
 @asynccontextmanager

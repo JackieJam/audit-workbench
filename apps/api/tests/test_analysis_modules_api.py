@@ -6,10 +6,9 @@ import io
 import json
 
 import pandas as pd
-from fastapi.testclient import TestClient
-
 from audit_api.deps import get_pipeline, get_store
 from audit_api.main import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
@@ -97,6 +96,12 @@ def test_analysis_module_endpoints(tmp_path, monkeypatch) -> None:
         f"/projects/{pid}/analysis/balance-sheet/categories",
         params={"year": 2023},
     ).status_code == 200
+    other_pnl = client.get(
+        f"/projects/{pid}/analysis/other-pnl/monthly",
+        params={"year": 2023},
+    )
+    assert other_pnl.status_code == 200
+    assert len(other_pnl.json()["rows"]) == 12
     assert client.get(
         f"/projects/{pid}/analysis/adjustment/summary",
         params={"year": 2023},

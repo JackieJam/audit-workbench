@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
-from datetime import datetime, timezone
+import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ import duckdb
 import pandas as pd
 
 from audit_engine.data_columns import add_analysis_columns
+from audit_engine.locking import file_lock
 from audit_engine.runtime import storage_root
 from audit_engine.store.manifest import ProjectManifest, SourceRecord
 
@@ -19,8 +23,10 @@ from audit_engine.store.manifest import ProjectManifest, SourceRecord
 def _parquet_safe(df: pd.DataFrame) -> pd.DataFrame:
     """object 列统一转字符串，避免混合 float/str 导致 Parquet 写入失败。"""
     out = df.copy()
-    for col in out.select_dtypes(include=["object"]).columns:
-        out[col] = out[col].map(lambda v: "" if pd.isna(v) else str(v))
+    for col in out.columns:
+        dtype = out[col].dtype
+        if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype):
+            out[col] = out[col].map(lambda v: "" if pd.isna(v) else str(v))
     return out
 
 
@@ -82,7 +88,9 @@ class ProjectStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def save_state(self, project_id: str, state: dict[str, Any]) -> None:
-        self._write_state(self.project_dir(project_id), state)
+        pdir = self.project_dir(project_id)
+        with file_lock(pdir / ".state.lock"):
+            self._write_state(pdir, state)
 
     def load_candidate_pool(self, project_id: str) -> list[dict[str, Any]]:
         pool = self.load_state(project_id).get("candidate_pool")
@@ -133,7 +141,7 @@ class ProjectStore:
         manifest = self.load_manifest(project_id)
         manifest.years = years
         manifest.total_rows = total
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         journal_src = next((s for s in manifest.sources if s.type == "journal"), None)
         if journal_src is None:
             manifest.sources.append(
@@ -146,11 +154,43 @@ class ProjectStore:
         self.save_manifest(manifest)
 
         state = self.load_state(project_id)
+        state = self._invalidate_analysis_state(state, now)
         state["column_mapping"] = column_mapping
         state["missing_columns"] = missing_columns
         state["year_summary"] = year_summary
+        state["data_version"] = self._dataset_version(project_id, years)
+        state["data_ingested_at"] = now
         self.save_state(project_id, state)
         return manifest
+
+    @staticmethod
+    def _invalidate_analysis_state(state: dict[str, Any], now: str) -> dict[str, Any]:
+        """Drop every result derived from journal contents while preserving user configuration."""
+        for key in (
+            "profiles",
+            "financials",
+            "cross_year_findings",
+            "rule_results",
+            "samples",
+            "candidate_pool",
+            "module_insights",
+            "module_insight_jobs",
+            "rule_tuning_suggestions",
+        ):
+            state.pop(key, None)
+        thread = dict(state.get("agent_thread") or {})
+        if thread:
+            thread["pinned_context"] = None
+            messages = list(thread.get("messages") or [])
+            messages.append({
+                "role": "assistant",
+                "content": "项目数据已重新导入，旧分析结果与选中上下文已失效，请基于新数据重新分析。",
+                "at": now,
+            })
+            thread["messages"] = messages[-40:]
+            thread["updated_at"] = now
+            state["agent_thread"] = thread
+        return state
 
     def save_journal_year(self, project_id: str, year: int, df: pd.DataFrame) -> int:
         """Persist one year's journal lines to raw/years/{year}.parquet."""
@@ -170,7 +210,7 @@ class ProjectStore:
 
         manifest.total_rows = total
         journal_src = next((s for s in manifest.sources if s.type == "journal"), None)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if journal_src is None:
             journal_src = SourceRecord(type="journal", years=years, rows=total, updated_at=now)
             manifest.sources.append(journal_src)
@@ -181,12 +221,16 @@ class ProjectStore:
 
         self._rebuild_unified_parquet(project_id, years)
         self.save_manifest(manifest)
+        state = self._invalidate_analysis_state(self.load_state(project_id), now)
+        state["data_version"] = self._dataset_version(project_id, years)
+        state["data_ingested_at"] = now
+        self.save_state(project_id, state)
         return len(df)
 
     def get_work_df(self, project_id: str, year: int) -> pd.DataFrame:
         """Load journal year and build analysis-ready work frame (cached in derived/)."""
         # v3: 毛利成本排除生产成本；分类器变更需换文件名以失效旧缓存
-        work_version = 3
+        work_version = 4
         pdir = self.project_dir(project_id)
         derived = pdir / "derived" / f"work_v{work_version}_{year}.parquet"
         journal = pdir / "raw" / "years" / f"{year}.parquet"
@@ -268,6 +312,16 @@ class ProjectStore:
         finally:
             conn.close()
 
+    def _dataset_version(self, project_id: str, years: list[int]) -> str:
+        digest = hashlib.sha256()
+        for year in years:
+            path = self.project_dir(project_id) / "raw" / "years" / f"{year}.parquet"
+            digest.update(str(year).encode())
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()[:16]
+
     def _write_manifest(self, manifest: ProjectManifest) -> None:
         path = self.project_dir(manifest.project_id) / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,10 +329,12 @@ class ProjectStore:
 
     def _write_state(self, pdir: Path, state: dict[str, Any]) -> None:
         path = pdir / "state.json"
-        path.write_text(
-            json.dumps(self._jsonable(state), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(self._jsonable(state), ensure_ascii=False, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            handle.write(payload)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
 
     @staticmethod
     def _jsonable(obj: Any) -> Any:

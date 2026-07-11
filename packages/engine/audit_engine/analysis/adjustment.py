@@ -6,15 +6,22 @@ import re
 from collections.abc import Iterable
 
 import pandas as pd
-
+from audit_engine.analysis.entry_display import entry_display_columns
 from audit_engine.config.accounts import DEFAULT_ADJUSTMENT_KEYWORDS
 from audit_engine.data_columns import ensure_analysis_columns
-from audit_engine.analysis.entry_display import entry_display_columns
 
 
 def _keyword_pattern(keywords: Iterable[str]) -> str:
     escaped = [re.escape(str(k).strip()) for k in keywords if str(k).strip()]
     return "|".join(escaped)
+
+
+_TRUE_REVERSAL_VALUES = frozenset({"1", "true", "t", "y", "yes", "是", "x", "已冲销", "冲销"})
+
+
+def _is_reversal_flag(value: object) -> bool:
+    text = "" if pd.isna(value) else str(value).strip().lower()
+    return text in _TRUE_REVERSAL_VALUES
 
 
 def adjustment_summary(
@@ -29,7 +36,7 @@ def adjustment_summary(
         return pd.DataFrame()
 
     text_hit = work["_combined_text"].str.contains(pattern, na=False, regex=True)
-    reversal_hit = work["_reversal_text"].str.strip().astype(bool)
+    reversal_hit = work["_reversal_text"].map(_is_reversal_flag)
     hit_rows = work[text_hit | reversal_hit].copy()
     if hit_rows.empty:
         return pd.DataFrame()
@@ -50,8 +57,8 @@ def adjustment_summary(
         "凭证类型": ("凭证类型", lambda x: "、".join(sorted({str(v) for v in x.dropna()}))),
         "命中关键词": ("_combined_text", _matched_words),
         "反记账标识": ("_reversal_text", lambda x: "、".join(sorted({v for v in x.astype(str) if v.strip() and v != "nan"}))),
-        "借方金额": ("_debit_abs", "sum"),
-        "贷方金额": ("_credit_abs", "sum"),
+        "借方金额": ("_debit_amount", "sum"),
+        "贷方金额": ("_credit_amount", lambda values: -values.sum()),
         "最大行金额": ("_amount_abs", "max"),
         "凭证抬头摘要": ("_header_text", "first"),
         "摘要": ("_line_text", lambda x: " | ".join(dict.fromkeys([str(v) for v in x.dropna() if str(v).strip()]))[:240]),

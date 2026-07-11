@@ -9,7 +9,6 @@ Excel 输出模块：生成审计抽样报告。
 
 from __future__ import annotations
 
-import io
 from typing import Any
 
 import pandas as pd
@@ -46,6 +45,7 @@ def generate_report_bytes(
     llm_judgments: dict[str, list[Any]] | None = None,
     max_sample_size: int = 50,
     manual_final_samples: list[dict] | None = None,
+    explicit_samples: list[dict] | None = None,
 ) -> tuple[bytes, dict]:
     """生成 Excel 报告字节流，返回 (bytes, stats)。"""
     import tempfile
@@ -58,6 +58,7 @@ def generate_report_bytes(
             df, rule_results, path, llm_judgments,
             max_sample_size=max_sample_size,
             manual_final_samples=manual_final_samples,
+            explicit_samples=explicit_samples,
         )
         data = Path(path).read_bytes()
     return data, stats
@@ -70,6 +71,7 @@ def generate_report(
     llm_judgments: dict[str, list[Any]] | None = None,
     max_sample_size: int = 50,
     manual_final_samples: list[dict] | None = None,
+    explicit_samples: list[dict] | None = None,
 ) -> dict:
     """
     生成 Excel 报告，返回统计摘要 dict。
@@ -78,7 +80,13 @@ def generate_report(
     judgment_lookup = _build_judgment_lookup(llm_judgments)
     hit_lookup = _build_hit_lookup(rule_results)
 
-    if judgment_lookup:
+    if explicit_samples is not None:
+        confirmed_vids = list(dict.fromkeys(
+            str(sample.get("凭证编号", "")).strip()
+            for sample in explicit_samples
+            if str(sample.get("凭证编号", "")).strip()
+        ))
+    elif judgment_lookup:
         # 有 LLM 核实：按风险级别排序，取 top N
         confirmed_primary_vids = sorted(
             judgment_lookup.keys(),
@@ -213,7 +221,7 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup):
         )
 
         for _, row in voucher_rows.iterrows():
-            amt = row.get("凭证货币价值")
+            amt = row.get("_amount_raw", row.get("凭证货币价值"))
             values = [
                 seq,
                 vid,
@@ -293,7 +301,7 @@ def _write_manual_final_sheet(wb, df, manual_final_samples):
                 row.get("总账科目"),
                 row.get("总账科目：长文本"),
                 row.get("借/贷标识"),
-                row.get("凭证货币价值"),
+                row.get("_amount_raw", row.get("凭证货币价值")),
                 str(row.get("文本", ""))[:120],
                 row.get("供应商科目：名称 1"),
                 row.get("客户科目：姓名 1"),

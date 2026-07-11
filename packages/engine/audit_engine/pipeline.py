@@ -15,7 +15,7 @@ from audit_engine.cross_year import CrossYearFinding, run_cross_year_analysis
 from audit_engine.profiler import build_financial_summary, build_profile
 from audit_engine.reporter import generate_report_bytes
 from audit_engine.rule_engine import RuleResult, run_all_rules
-from audit_engine.rules_config import default_rules_config, merge_rules_config
+from audit_engine.rules_config import merge_rules_config
 from audit_engine.store import ProjectStore
 
 
@@ -101,7 +101,6 @@ class AnalysisPipeline:
     def build_profiles(self, project_id: str) -> dict[int, dict]:
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
-        overrides = _category_overrides(state)
         profiles: dict[int, dict] = {}
         financials: dict[int, dict] = {}
         for year in manifest.years:
@@ -248,7 +247,7 @@ class AnalysisPipeline:
         rules = self.load_rules(project_id)
         frames = []
         for year in manifest.years:
-            df = self._store.load_journal_year(project_id, year)
+            df = self._store.get_work_df(project_id, year)
             if not df.empty:
                 if "_year" not in df.columns:
                     df = df.copy()
@@ -268,4 +267,5 @@ class AnalysisPipeline:
             llm_judgments={},
             max_sample_size=int(rules.get("max_sample_size", 50)),
             manual_final_samples=manual_final,
+            explicit_samples=list(state.get("samples") or []) if "samples" in state else None,
         )

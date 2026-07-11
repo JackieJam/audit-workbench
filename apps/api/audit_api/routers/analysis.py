@@ -13,6 +13,7 @@ from audit_engine.analysis.income_cost import (
     income_cost_categories,
     monthly_revenue_cost,
 )
+from audit_engine.data_columns import analysis_quality_summary
 from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -59,6 +60,16 @@ def module_audit_questions(project_id: str, module_key: str, store: ProjectStore
     return {"module": module_key, "questions": questions}
 
 
+@router.get("/{project_id}/analysis/quality")
+def analysis_quality(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
+    manifest = _manifest_or_404(store, project_id)
+    quality = {
+        str(year): analysis_quality_summary(store.get_work_df(project_id, year))
+        for year in manifest.years
+    }
+    return {"data_version": store.load_state(project_id).get("data_version", ""), "years": quality}
+
+
 @router.get("/{project_id}/analysis/income-cost/categories")
 def income_cost_category_list(
     project_id: str,
@@ -89,7 +100,7 @@ def income_cost_monthly(
 def income_cost_drilldown_monthly(
     project_id: str,
     year: int = Query(...),
-    month: int = Query(..., ge=1, le=12),
+    month: int = Query(..., ge=1, le=13),
     metric: str = Query(..., pattern="^(revenue|cost|gross)$"),
     category: str = Query("总计"),
     limit: int = Query(200, ge=1, le=2000),

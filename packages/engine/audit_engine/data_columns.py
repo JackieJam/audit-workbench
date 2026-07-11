@@ -6,16 +6,68 @@ import pandas as pd
 
 from audit_engine.account_classifier import apply_prefix_category, auto_classify, classify_dataframe
 
+AMOUNT_MODE_SIGNED = "signed_raw"
+AMOUNT_MODE_DC_MULTIPLIER = "dc_multiplier"
 
-def normalize_signed_amount(raw: pd.Series, dc: pd.Series) -> pd.Series:
-    """统一金额符号：S（借）为正、H（贷）为负。"""
+
+def infer_amount_sign_mode(
+    raw: pd.Series,
+    dc: pd.Series,
+    voucher_ids: pd.Series | None = None,
+) -> tuple[str, float]:
+    """判断金额列是自身带方向，还是需结合借贷标识解释。
+
+    两种常见导出格式：
+    - signed_raw：借方通常为正、贷方通常为负，反向发生额保留相反符号；
+    - dc_multiplier：借贷列决定正常方向，原始正负表示正常/冲回。
+
+    优先选择能让凭证借贷残差更小的模式；没有凭证号时按贷方金额符号多数决。
+    """
     values = pd.to_numeric(raw, errors="coerce").fillna(0.0)
     side = dc.astype(str).str.strip()
-    abs_amt = values.abs()
-    signed = abs_amt.where(side == "S", 0.0)
-    signed = signed.where(side != "H", -abs_amt)
-    unknown = ~side.isin(["S", "H"])
-    return signed.where(~unknown, values)
+    recognized = side.isin(["S", "H"]) & values.ne(0)
+    if not recognized.any():
+        return AMOUNT_MODE_SIGNED, 0.0
+
+    signed_candidate = values
+    dc_candidate = values.where(side != "H", -values)
+
+    if voucher_ids is not None:
+        voucher = voucher_ids.fillna("").astype(str).str.strip()
+        usable = recognized & voucher.ne("")
+        if usable.any():
+            denominator = float(values.loc[usable].abs().sum()) or 1.0
+            signed_residual = float(signed_candidate.loc[usable].groupby(voucher.loc[usable]).sum().abs().sum()) / denominator
+            dc_residual = float(dc_candidate.loc[usable].groupby(voucher.loc[usable]).sum().abs().sum()) / denominator
+            if abs(signed_residual - dc_residual) > 1e-9:
+                mode = AMOUNT_MODE_SIGNED if signed_residual < dc_residual else AMOUNT_MODE_DC_MULTIPLIER
+                confidence = abs(signed_residual - dc_residual) / max(signed_residual, dc_residual, 1e-9)
+                return mode, round(min(confidence, 1.0), 4)
+
+    credit_values = values.loc[recognized & side.eq("H")]
+    if not credit_values.empty:
+        positive_ratio = float(credit_values.gt(0).mean())
+        mode = AMOUNT_MODE_DC_MULTIPLIER if positive_ratio >= 0.5 else AMOUNT_MODE_SIGNED
+        return mode, round(abs(positive_ratio - 0.5) * 2, 4)
+    return AMOUNT_MODE_SIGNED, 0.0
+
+
+def normalize_signed_amount(
+    raw: pd.Series,
+    dc: pd.Series,
+    voucher_ids: pd.Series | None = None,
+    *,
+    mode: str | None = None,
+) -> pd.Series:
+    """统一金额方向，同时保留负借方/正贷方等反向发生额。"""
+    values = pd.to_numeric(raw, errors="coerce").fillna(0.0)
+    side = dc.astype(str).str.strip()
+    resolved_mode = mode or infer_amount_sign_mode(values, side, voucher_ids)[0]
+    if resolved_mode == AMOUNT_MODE_DC_MULTIPLIER:
+        signed = values.where(side != "H", -values)
+    else:
+        signed = values.copy()
+    return signed.where(side.isin(["S", "H"]), values)
 
 
 def _account_text_col(df: pd.DataFrame) -> str | None:
@@ -37,6 +89,36 @@ def _display_party(code: object, name: object) -> str:
     if code_s and name_s:
         return f"{code_s} - {name_s}"
     return code_s or name_s or "未维护"
+
+
+def _propagate_unique_party(
+    df: pd.DataFrame,
+    display: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    """同凭证只有一个明确主体时，把主体安全地补到收入/暂估等对应行。"""
+    original = display.fillna("未维护").astype(str)
+    if "凭证编号" not in df.columns:
+        return original, pd.Series("line", index=df.index)
+
+    group_cols = ["凭证编号"]
+    for col in ("公司代码", "会计年度"):
+        if col in df.columns and df[col].astype(str).str.strip().ne("").any():
+            group_cols.insert(0, col)
+
+    valid = original.ne("未维护") & original.str.strip().ne("")
+    unique_by_group = (
+        df.loc[valid, group_cols]
+        .assign(_party=original.loc[valid])
+        .groupby(group_cols, dropna=False)["_party"]
+        .agg(lambda values: next(iter(set(values))) if len(set(values)) == 1 else "")
+    )
+    keys = pd.MultiIndex.from_frame(df[group_cols]) if len(group_cols) > 1 else df[group_cols[0]]
+    inherited = pd.Series(keys.map(unique_by_group), index=df.index).fillna("")
+    result = original.where(valid, inherited.where(inherited.ne(""), "未维护"))
+    source = pd.Series("missing", index=df.index)
+    source.loc[valid] = "line"
+    source.loc[~valid & inherited.ne("")] = "voucher"
+    return result, source
 
 
 def _related_party_category(account_name: object, default: str = "") -> str:
@@ -77,7 +159,23 @@ def add_analysis_columns(
         out.loc[p13, "_month"] = 13
     amount_col = "公司代码货币价值" if "公司代码货币价值" in out.columns else "凭证货币价值"
     out["_dc"] = out["借/贷标识"].astype(str).str.strip()
-    out["_amount_raw"] = normalize_signed_amount(out[amount_col], out["_dc"])
+    voucher_ids = out["凭证编号"] if "凭证编号" in out.columns else None
+    amount_mode, amount_confidence = infer_amount_sign_mode(out[amount_col], out["_dc"], voucher_ids)
+    out["_amount_raw"] = normalize_signed_amount(
+        out[amount_col],
+        out["_dc"],
+        voucher_ids,
+        mode=amount_mode,
+    )
+    out["_amount_sign_mode"] = amount_mode
+    out["_amount_sign_confidence"] = amount_confidence
+    out["_amount_source"] = amount_col
+    if amount_col == "公司代码货币价值":
+        out["_currency_basis"] = "company"
+        out["_amount_currency"] = _safe_text(out, "公司代码货币代码").replace("", "未维护")
+    else:
+        out["_currency_basis"] = "document"
+        out["_amount_currency"] = _safe_text(out, "凭证货币代码").replace("", "未维护")
     out["_amount_abs"] = out["_amount_raw"].abs()
     out["_debit_amount"] = out["_amount_raw"].where(out["_dc"] == "S", 0)
     out["_credit_amount"] = out["_amount_raw"].where(out["_dc"] == "H", 0)
@@ -119,12 +217,14 @@ def add_analysis_columns(
     customer_name = _safe_text(out, "客户科目：姓名 1")
     vendor_code = _safe_text(out, "供应商编号") if "供应商编号" in out.columns else _safe_text(out, "供应商")
     vendor_name = _safe_text(out, "供应商科目：名称 1")
-    out["_customer_display"] = [
+    customer_display = pd.Series([
         _display_party(code, name) for code, name in zip(customer_code, customer_name, strict=False)
-    ]
-    out["_vendor_display"] = [
+    ], index=out.index)
+    vendor_display = pd.Series([
         _display_party(code, name) for code, name in zip(vendor_code, vendor_name, strict=False)
-    ]
+    ], index=out.index)
+    out["_customer_display"], out["_customer_source"] = _propagate_unique_party(out, customer_display)
+    out["_vendor_display"], out["_vendor_source"] = _propagate_unique_party(out, vendor_display)
 
     reversal_cols = [c for c in ("反记账", "反记帐", "冲销标识") if c in out.columns]
     if reversal_cols:
@@ -138,6 +238,7 @@ def add_analysis_columns(
 REQUIRED_ANALYSIS_COLUMNS = {
     "_acct", "_acct4", "_acct_category", "_month", "_amount_raw", "_amount_abs", "_dc",
     "_debit_amount", "_credit_amount", "_account_name", "_pnl_category", "_customer_display",
+    "_amount_source", "_amount_sign_mode", "_currency_basis", "_amount_currency", "_customer_source", "_vendor_source",
 }
 
 
@@ -164,3 +265,28 @@ def ensure_analysis_columns(
     if REQUIRED_ANALYSIS_COLUMNS.issubset(work.columns):
         return work
     return add_analysis_columns(work, category_overrides=category_overrides)
+
+
+def analysis_quality_summary(work: pd.DataFrame) -> dict[str, object]:
+    """返回会影响图表可信度的核心数据质量指标。"""
+    work = ensure_analysis_columns(work)
+    total_amount = float(work["_amount_abs"].sum())
+    unclassified_amount = float(
+        work.loc[work["_acct_category"].eq("未分类"), "_amount_abs"].sum()
+    )
+    currencies = sorted({
+        str(value)
+        for value in work["_amount_currency"].dropna().astype(str)
+        if str(value).strip() and str(value) != "未维护"
+    })
+    currency_basis = str(work["_currency_basis"].iat[0]) if not work.empty else ""
+    return {
+        "amount_source": str(work["_amount_source"].iat[0]) if not work.empty else "",
+        "amount_sign_mode": str(work["_amount_sign_mode"].iat[0]) if not work.empty else "",
+        "amount_sign_confidence": float(work["_amount_sign_confidence"].iat[0]) if not work.empty else 0.0,
+        "currency_basis": currency_basis,
+        "currencies": currencies,
+        "mixed_document_currency": currency_basis == "document" and len(currencies) > 1,
+        "unclassified_amount": unclassified_amount,
+        "unclassified_amount_ratio": unclassified_amount / total_amount if total_amount else 0.0,
+    }

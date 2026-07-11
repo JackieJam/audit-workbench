@@ -16,9 +16,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
-from audit_engine.data_columns import add_analysis_columns
+from audit_engine.account_classifier import (
+    investment_income_mask,
+    non_operating_expense_mask,
+    non_operating_income_mask,
+    operating_cost_mask,
+    operating_revenue_mask,
+)
 from audit_engine.analysis.income_cost import monthly_revenue_cost
+from audit_engine.config.accounts import AUTO_VOUCHER_TYPES, classify_expense_subcategory
+from audit_engine.data_columns import analysis_quality_summary, ensure_analysis_columns
 
 # ── 主函数 ──
 
@@ -444,27 +451,26 @@ def build_financial_summary(df: pd.DataFrame, year: int) -> dict[str, Any]:
     df["_acct6"] = acct.str[:6]
     df["_acct2"] = acct.str[:2]
     df["_text"] = df["总账科目：长文本"].astype(str).fillna("")
-    amount_col = "公司代码货币价值" if "公司代码货币价值" in df.columns else "凭证货币价值"
-    df["_val"] = pd.to_numeric(df[amount_col], errors="coerce").fillna(0)
-    df["_abs"] = df["_val"].abs()
-    dc = df["借/贷标识"].astype(str).str.strip()
-    df["_debit_amount"] = df["_abs"].where(dc == "S", 0)
-    df["_credit_amount"] = df["_abs"].where(dc == "H", 0)
-    df["_debit_normal"] = df["_val"]
-    df["_credit_normal"] = -df["_val"]
-    df["_month"] = df["过账日期"].dt.month
-    visual_work = add_analysis_columns(df)
+    visual_work = ensure_analysis_columns(df)
+    quality = analysis_quality_summary(visual_work)
+    if quality["mixed_document_currency"]:
+        raise ValueError("存在多种凭证币且缺少公司代码货币金额，禁止直接汇总")
     monthly_pnl_view = monthly_revenue_cost(visual_work)
+
+    # 所有财务图表统一使用结合借贷标识与原始正负推断后的金额，避免各模块口径漂移。
+    df["_val"] = visual_work["_amount_raw"].values
+    df["_abs"] = visual_work["_amount_abs"].values
+    df["_debit_amount"] = visual_work["_debit_abs"].values
+    df["_credit_amount"] = visual_work["_credit_abs"].values
+    df["_month"] = visual_work["_month"].values
 
     # 把分类列回填到 df，便于后续按类别筛选
     df["_acct_category"] = visual_work["_acct_category"].values
 
     from audit_engine.account_classifier import (
-        CAT_COST,
         CAT_EXPENSE,
         CAT_FINANCIAL_EXPENSE,
         CAT_RD_EXPENSE,
-        CAT_REVENUE,
         CAT_TAX_SURCHARGE,
     )
 
@@ -472,20 +478,14 @@ def build_financial_summary(df: pd.DataFrame, year: int) -> dict[str, Any]:
         # 兼容历史调用：4 位精确匹配（用于投资收益 6111 / 营业外 6301/6711 等无对应分类的兜底）
         return float(df[df["_acct4"] == prefix][col].sum())
 
-    def _sum_credit_normal(prefix: str) -> float:
-        return _sum_by_acct4(prefix, "_credit_normal")
-
-    def _sum_debit_normal(prefix: str) -> float:
-        return _sum_by_acct4(prefix, "_debit_normal")
-
     def _sum_pnl_by_mask(mask: pd.Series, category: str | None = None) -> float:
         rows = visual_work.loc[mask]
         if category:
             rows = rows[rows["_pnl_category"] == category]
         return float(rows["_pnl_effect"].sum())
 
-    revenue_mask = visual_work["_acct_category"].eq(CAT_REVENUE)
-    cost_mask = visual_work["_acct_category"].eq(CAT_COST)
+    revenue_mask = operating_revenue_mask(visual_work)
+    cost_mask = operating_cost_mask(visual_work)
 
     # ── 收入分类（类别细分用 _pnl_category，主要凭 SAP 标准 6001 才有"主营业务-X"标签）──
     revenue_categorized = {
@@ -520,32 +520,12 @@ def build_financial_summary(df: pd.DataFrame, year: int) -> dict[str, Any]:
     # ── 费用分类（按总账科目：长文本的关键词匹配）──
     exp_mask = df["_acct_category"].eq(CAT_EXPENSE)
     exp_df = df[exp_mask].copy()
-    exp_text = exp_df["_text"]
-
-    exp_cat_map = {
-        "人工": exp_text.str.contains("人工|工资|福利|社保|公积金|养老|医疗|失业|工伤|生育|薪酬", na=False),
-        "物料消耗": exp_text.str.contains("物料|备品|备件|辅材", na=False),
-        "折旧摊销": exp_text.str.contains("折旧|摊销", na=False),
-        "加工费": exp_text.str.contains("加工|委托加工|外协", na=False),
-        "动力费用": exp_text.str.contains("动力|电|水|气|油|天然气|能源", na=False),
-        "维修费": exp_text.str.contains("维修|维保", na=False),
-        "差旅费": exp_text.str.contains("差旅|交通|住宿|出差", na=False),
-        "招待费": exp_text.str.contains("招待|接待|餐费", na=False),
-        "办公费": exp_text.str.contains("办公|邮寄|文具", na=False),
-        "市场调研": exp_text.str.contains("市场调研|调研|咨询", na=False),
-        "运输费": exp_text.str.contains("运输|运费|物流", na=False),
-        "保险费": exp_text.str.contains("保险", na=False),
-    }
+    exp_df["_expense_subcategory"] = exp_df["_text"].map(classify_expense_subcategory)
     expenses: dict[str, float] = {}
-    matched_mask = pd.Series(False, index=exp_df.index)
-    for cat, mask in exp_cat_map.items():
-        cat_sum = float(exp_df.loc[mask, "_debit_normal"].sum())
-        if cat_sum > 0:
-            expenses[cat] = cat_sum
-        matched_mask |= mask
-    other_exp = float(exp_df.loc[~matched_mask, "_debit_normal"].sum())
-    if other_exp > 0:
-        expenses["其他费用"] = other_exp
+    for category, rows in exp_df.groupby("_expense_subcategory"):
+        net_amount = float(rows["_val"].sum())
+        if abs(net_amount) > 1e-9:
+            expenses[str(category)] = net_amount
 
     # ── 制造费用分摊（8143 明细科目）──
     mfg_expenses: dict[str, float] = {}
@@ -569,29 +549,30 @@ def build_financial_summary(df: pd.DataFrame, year: int) -> dict[str, Any]:
                 production_cost[clean_name] = float(val)
 
     # ── 其他损益科目（按自动分类）──
-    def _sum_by_category(category: str, col: str) -> float:
-        return float(df.loc[df["_acct_category"].eq(category), col].sum())
+    def _sum_by_category(category: str) -> float:
+        return float(df.loc[df["_acct_category"].eq(category), "_val"].sum())
 
-    rd_expense = _sum_by_category(CAT_RD_EXPENSE, "_debit_normal")
-    financial_expense = _sum_by_category(CAT_FINANCIAL_EXPENSE, "_debit_normal")
-    investment_income = _sum_credit_normal("6111")
-    non_operating_income = _sum_credit_normal("6301")
-    non_operating_expense = _sum_debit_normal("6711")
-    tax_surcharge = _sum_by_category(CAT_TAX_SURCHARGE, "_debit_normal")
+    rd_expense = _sum_by_category(CAT_RD_EXPENSE)
+    financial_expense = _sum_by_category(CAT_FINANCIAL_EXPENSE)
+    investment_income = float(visual_work.loc[investment_income_mask(visual_work), "_pnl_effect"].sum())
+    non_operating_income = float(visual_work.loc[non_operating_income_mask(visual_work), "_pnl_effect"].sum())
+    non_operating_expense = float(visual_work.loc[non_operating_expense_mask(visual_work), "_amount_raw"].sum())
+    tax_surcharge = _sum_by_category(CAT_TAX_SURCHARGE)
 
     # ── 月度趋势（收入/成本/毛利），与审计可视化总计口径一致 ──
     monthly_by_month = monthly_pnl_view.set_index("月份")
+    periods = [int(month) for month in monthly_by_month.index]
     monthly_revenue = {
         int(m): float(monthly_by_month.loc[m, "净收入"]) if m in monthly_by_month.index else 0
-        for m in range(1, 13)
+        for m in periods
     }
     monthly_cost = {
         int(m): float(-monthly_by_month.loc[m, "净成本影响"]) if m in monthly_by_month.index else 0
-        for m in range(1, 13)
+        for m in periods
     }
     monthly_gp = {
         int(m): float(monthly_by_month.loc[m, "毛利"]) if m in monthly_by_month.index else 0
-        for m in range(1, 13)
+        for m in periods
     }
     cost_structure = production_cost if production_cost else mfg_expenses
 

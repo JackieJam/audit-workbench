@@ -32,6 +32,10 @@ function formatWan(v: number) {
   return `${(v / 10000).toFixed(1)}万`;
 }
 
+function periodLabel(period: number) {
+  return period === 13 ? "13期" : `${period}月`;
+}
+
 export function WorkingCapitalPanel({ project, preferredYear }: Props) {
   const [year, setYear] = useState(project.years[0] ?? 0);
   const [tab, setTab] = useState<WcTab>("ap");
@@ -133,7 +137,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
     const rows = tab === "ap" ? apMonthly.data?.rows : tab === "or" ? orMonthly.data?.rows : opMonthly.data?.rows;
     if (!rows?.length) return;
     const chart = echarts.init(monthlyRef.current);
-    const months = rows.map((r) => `${r.月份}月`);
+    const months = rows.map((r) => periodLabel(r.月份));
     if (tab === "ap") {
       const apRows = rows as import("@/api/client").ApMonthlyRow[];
       chart.setOption({
@@ -154,7 +158,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
         const direction = AP_DIRS[params.seriesIndex] ?? "net";
         setSelection({
           kind: "ap_accrual_month", year, month, direction,
-          label: `${year}年${month}月 应付暂估 ${AP_LABELS[direction]}`,
+          label: `${year}年${periodLabel(month)} 应付暂估 ${AP_LABELS[direction]}`,
           sourceView: "应付暂估月度", tags: ["暂估异常", "月度"],
         });
         setAddedId(null);
@@ -182,7 +186,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
         const direction = OR_DIRS[params.seriesIndex] ?? "net";
         setSelection({
           kind: "other_receivable_month", year, month, direction,
-          label: `${year}年${month}月 其他应收 ${OR_LABELS[direction]}`,
+          label: `${year}年${periodLabel(month)} 其他应收 ${OR_LABELS[direction]}`,
           sourceView: "其他应收月度", tags: ["往来异常", "月度"],
         });
         setAddedId(null);
@@ -209,7 +213,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
       const direction = OP_DIRS[params.seriesIndex] ?? "net";
       setSelection({
         kind: "other_payable_month", year, month, direction,
-        label: `${year}年${month}月 其他应付 ${OP_LABELS[direction]}`,
+        label: `${year}年${periodLabel(month)} 其他应付 ${OP_LABELS[direction]}`,
         sourceView: "其他应付月度", tags: ["往来异常", "月度"],
       });
       setAddedId(null);
@@ -235,7 +239,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
       setSelection({
         kind: "ap_accrual_supplier",
         year, month: selection.month, direction: "net", supplier,
-        label: `${year}年${selection.month}月 供应商「${supplier}」暂估`,
+        label: `${year}年${periodLabel(selection.month)} 供应商「${supplier}」暂估`,
         sourceView: "应付暂估供应商", tags: ["供应商", "暂估异常"],
       });
       setAddedId(null);

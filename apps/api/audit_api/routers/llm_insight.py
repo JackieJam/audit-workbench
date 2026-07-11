@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from audit_engine.llm_runtime import resolve_llm_runtime
 from audit_engine.module_insight import (

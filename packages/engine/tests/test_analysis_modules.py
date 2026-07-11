@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.analysis.adjustment import adjustment_summary
 from audit_engine.analysis.balance_sheet import balance_sheet_categories, category_monthly_movement
 from audit_engine.analysis.expense import cross_year_expense_table, expense_category_entries

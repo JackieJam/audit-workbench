@@ -10,7 +10,6 @@ from typing import Any
 
 import pandas as pd
 
-from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
 from audit_engine.account_classifier import (
     CAT_AR,
     CAT_EXPENSE,
@@ -20,6 +19,7 @@ from audit_engine.account_classifier import (
     CAT_REVENUE,
     CAT_TAX_SURCHARGE,
 )
+from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
 from audit_engine.data_columns import ensure_category
 
 

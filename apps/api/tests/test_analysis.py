@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from fastapi.testclient import TestClient
-
 from audit_api.deps import get_pipeline, get_store
 from audit_api.main import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

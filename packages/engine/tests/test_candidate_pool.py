@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.candidate_pool import add_candidate_group, build_candidate_group, pool_stats
 
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.module_insight import build_module_payload, condition_to_selector
 
 

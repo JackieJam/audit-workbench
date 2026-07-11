@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.account_classifier import BALANCE_SHEET_CATEGORIES, BALANCE_SHEET_SIDE
-from audit_engine.data_columns import ensure_analysis_columns
 from audit_engine.analysis.entry_display import entry_display_columns
+from audit_engine.data_columns import ensure_analysis_columns
 
 
 def balance_sheet_categories(work: pd.DataFrame) -> list[str]:
@@ -29,10 +28,13 @@ def _net_change(debit: float, credit: float, category: str) -> float:
 def category_monthly_movement(work: pd.DataFrame, category: str) -> pd.DataFrame:
     rows_src = _category_rows(work, category)
     rows: list[dict] = []
-    for month in range(1, 13):
+    periods = list(range(1, 13))
+    if rows_src["_month"].eq(13).any():
+        periods.append(13)
+    for month in periods:
         m = rows_src[rows_src["_month"] == month]
-        debit = float(m["_debit_abs"].sum())
-        credit = float(m["_credit_abs"].sum())
+        debit = float(m.loc[m["_dc"].eq("S"), "_amount_raw"].sum())
+        credit = float(-m.loc[m["_dc"].eq("H"), "_amount_raw"].sum())
         rows.append({"月份": month, "借方发生额": debit, "贷方发生额": credit, "净变动": _net_change(debit, credit, category)})
     return pd.DataFrame(rows)
 
@@ -46,8 +48,8 @@ def category_account_breakdown(work: pd.DataFrame, category: str, month: int | N
 
     grouped_rows: list[dict] = []
     for code, grp in rows_src.groupby("_acct"):
-        debit = float(grp["_debit_abs"].sum())
-        credit = float(grp["_credit_abs"].sum())
+        debit = float(grp.loc[grp["_dc"].eq("S"), "_amount_raw"].sum())
+        credit = float(-grp.loc[grp["_dc"].eq("H"), "_amount_raw"].sum())
         name = next((n for n in grp["_account_name"].astype(str) if n and n != "nan"), "")
         grouped_rows.append({
             "科目编号": str(code), "科目名称": name,
@@ -67,15 +69,15 @@ def category_month_entries(work: pd.DataFrame, category: str, month: int, direct
     if direction == "debit":
         detail = detail[detail["_dc"] == "S"].copy()
         amount_label = "借方发生额"
-        detail[amount_label] = detail["_debit_abs"]
+        detail[amount_label] = detail["_amount_raw"]
     elif direction == "credit":
         detail = detail[detail["_dc"] == "H"].copy()
         amount_label = "贷方发生额"
-        detail[amount_label] = detail["_credit_abs"]
+        detail[amount_label] = -detail["_amount_raw"]
     elif direction == "net":
         amount_label = "净变动影响"
         sign = 1.0 if BALANCE_SHEET_SIDE.get(category) == "资产" else -1.0
-        detail[amount_label] = sign * (detail["_debit_abs"] - detail["_credit_abs"])
+        detail[amount_label] = sign * detail["_amount_raw"]
     else:
         return pd.DataFrame()
     if detail.empty:

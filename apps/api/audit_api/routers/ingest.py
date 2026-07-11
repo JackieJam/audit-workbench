@@ -86,8 +86,8 @@ async def _read_uploads(files: list[UploadFile]) -> list[io.BytesIO]:
     buffers: list[io.BytesIO] = []
     for f in files:
         name = (f.filename or "").lower()
-        if not name.endswith((".xlsx", ".xls")):
-            raise HTTPException(status_code=400, detail=f"不支持的文件类型：{f.filename}")
+        if not name.endswith(".xlsx"):
+            raise HTTPException(status_code=400, detail=f"仅支持 .xlsx；请先将旧版 .xls 另存为 .xlsx：{f.filename}")
         data = await f.read()
         if not data:
             raise HTTPException(status_code=400, detail=f"文件为空：{f.filename}")

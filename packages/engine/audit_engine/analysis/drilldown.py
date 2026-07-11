@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pandas as pd
-
 from audit_engine.account_classifier import operating_cost_mask, operating_revenue_mask
 from audit_engine.analysis.adjustment import adjustment_voucher_entries
 from audit_engine.analysis.balance_sheet import category_account_entries, category_month_entries
 from audit_engine.analysis.entry_display import entry_display_columns
 from audit_engine.analysis.expense import expense_category_entries
+from audit_engine.analysis.other_pnl import other_pnl_entries
 from audit_engine.analysis.working_capital import (
     ap_accrual_entries,
     other_payable_entries,
@@ -31,7 +31,7 @@ def monthly_income_cost_entries(
     if metric == "revenue":
         detail = source[operating_revenue_mask(source) & (source["_month"] == month)].copy()
         amount_label = "收入影响"
-        detail[amount_label] = detail["_amount_raw"]
+        detail[amount_label] = detail["_pnl_effect"]
     elif metric == "cost":
         detail = source[operating_cost_mask(source) & (source["_month"] == month)].copy()
         amount_label = "成本发生额"
@@ -70,7 +70,7 @@ def customer_revenue_entries(
     if detail.empty:
         return pd.DataFrame()
 
-    detail["收入影响"] = detail["_amount_raw"]
+    detail["收入影响"] = detail["_pnl_effect"]
     detail = detail.sort_values("_amount_abs", ascending=False)
     if top_n:
         detail = detail.head(top_n)
@@ -80,7 +80,6 @@ def customer_revenue_entries(
 def resolve_drilldown(work: pd.DataFrame, selector: dict, *, limit: int | None = None) -> pd.DataFrame:
     """按 selector 解析各模块钻取明细（供疑点入库复用）。"""
     kind = selector.get("kind")
-    year = selector.get("year")  # noqa: kept for API validation
 
     if kind == "monthly_income_cost":
         return monthly_income_cost_entries(
@@ -99,6 +98,13 @@ def resolve_drilldown(work: pd.DataFrame, selector: dict, *, limit: int | None =
         )
     if kind == "expense_category":
         return expense_category_entries(work, str(selector["expense_category"]), top_n=limit)
+    if kind == "other_pnl_month":
+        return other_pnl_entries(
+            work,
+            month=int(selector["month"]),
+            metric=str(selector["metric"]),
+            top_n=limit,
+        )
     if kind == "ap_accrual_month":
         return ap_accrual_entries(
             work,

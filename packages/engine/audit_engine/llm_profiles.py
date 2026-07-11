@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from audit_engine.llm_config import DEFAULT_LLM_CONFIG, normalize
+from audit_engine.llm_config import DEFAULT_LLM_CONFIG
 from audit_engine.locking import file_lock
 from audit_engine.runtime import storage_root
 
