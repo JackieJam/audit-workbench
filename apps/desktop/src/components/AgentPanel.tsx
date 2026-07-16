@@ -78,13 +78,24 @@ function ToolCallsCard({
 }
 
 export function AgentPanel() {
-  const { projectId, pinnedContext, suggestions, messages, refreshState } = useAgent();
+  const {
+    projectId,
+    pinnedContext,
+    suggestions,
+    messages,
+    refreshState,
+    draftPrompt,
+    focusAgentNonce,
+    clearDraftPrompt,
+  } = useAgent();
   const { applyUiActions } = useWorkspace();
   const { selectedProfileId, selectedProfile } = useLlm();
   const [input, setInput] = useState("");
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [resolvedActions, setResolvedActions] = useState<Set<string>>(() => new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setLocalMessages(messages.map((m) => ({ role: m.role, content: m.content, toolCalls: m.tool_calls })));
@@ -93,6 +104,18 @@ export function AgentPanel() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [localMessages]);
+
+  useEffect(() => {
+    if (!focusAgentNonce || !draftPrompt) return;
+    const text = draftPrompt;
+    setInput(text);
+    clearDraftPrompt();
+    panelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(text.length, text.length);
+    });
+  }, [focusAgentNonce, draftPrompt, clearDraftPrompt]);
 
   const chat = useMutation({
     mutationFn: (text: string) =>
@@ -118,7 +141,7 @@ export function AgentPanel() {
 
   if (!projectId) {
     return (
-      <aside className="agent-panel">
+      <aside className="agent-panel" ref={panelRef}>
         <h3>审计助手</h3>
         <p className="muted">选择项目并上传序时账后，可在此提问。</p>
       </aside>
@@ -134,7 +157,7 @@ export function AgentPanel() {
   };
 
   return (
-    <aside className="agent-panel">
+    <aside className="agent-panel" ref={panelRef}>
       <header className="agent-panel__head">
         <h3>审计助手</h3>
         <p className="muted">基于当前序时账与左侧选中范围 · 可对话打开左侧分析模块</p>
@@ -156,7 +179,7 @@ export function AgentPanel() {
       <div className="agent-messages">
         {localMessages.length === 0 && (
           <p className="muted">
-            可问：项目概览、规则说明与改参、规则命中、生成样本、跨年稽核、打开分析模块…
+            可从各分析模块点「AI 风险分析」，或直接提问：项目概览、规则改参、生成样本、跨年稽核…
           </p>
         )}
         {localMessages.map((m, i) => (
@@ -199,7 +222,13 @@ export function AgentPanel() {
           send(input);
         }}
       >
-        <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="输入审计问题…" rows={2} />
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="输入审计问题…"
+          rows={2}
+        />
         <button type="submit" className="btn-primary" disabled={chat.isPending || !input.trim()}>
           发送
         </button>

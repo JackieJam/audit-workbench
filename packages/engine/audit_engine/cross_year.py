@@ -50,6 +50,7 @@ _CROSS_YEAR_DETECTION_DEFAULTS: dict[str, float] = {
     "balance_buildup_growth_ratio": 1.5,          # 期末余额逐年累积的增幅倍数
     "circular_large_amount": 500_000.0,           # 对手方资金循环单笔大额线
     "circular_match_ratio": 0.7,                  # 进出金额匹配度
+    "circular_max_vouchers": 15.0,                # 单对手方最多保留凭证数
     "expense_spike_multiplier": 2.5,              # 费用科目年度突变倍数
     "manual_entry_delta_threshold": 0.15,         # 手工凭证占比上升幅度（ppt）
     "new_pair_count_threshold": 20.0,             # 新科目组合数量阈值
@@ -111,6 +112,7 @@ def _run_cross_year_impl(
         prepared,
         large_amount=t["circular_large_amount"],
         match_ratio=t["circular_match_ratio"],
+        max_vouchers=int(t.get("circular_max_vouchers", 15)),
     ))
     findings.extend(_expense_category_spike(
         prepared, spike_multiplier=t["expense_spike_multiplier"]))
@@ -340,9 +342,11 @@ def _counterparty_circular_flow(
     year_map: dict[int, pd.DataFrame],
     large_amount: float = _CROSS_YEAR_DETECTION_DEFAULTS["circular_large_amount"],
     match_ratio: float = _CROSS_YEAR_DETECTION_DEFAULTS["circular_match_ratio"],
+    max_vouchers: int = 15,
 ) -> list[CrossYearFinding]:
     findings = []
     years = sorted(year_map.keys())
+    max_vouchers = max(1, int(max_vouchers or 15))
 
     for i in range(len(years) - 1):
         yr_n, yr_n1 = years[i], years[i + 1]
@@ -371,24 +375,49 @@ def _counterparty_circular_flow(
 
         overlap_vendors = set(dec_large_out["供应商编号"]) & set(q1_large_in["供应商编号"])
         for vendor in overlap_vendors:
-            out_amt = dec_large_out[dec_large_out["供应商编号"] == vendor]["凭证货币价值"].abs().sum()
-            in_amt = q1_large_in[q1_large_in["供应商编号"] == vendor]["凭证货币价值"].abs().sum()
+            # 空供应商会把无关大额流水汇总成一条“伪循环”，直接丢弃
+            vendor_key = "" if vendor is None or (isinstance(vendor, float) and pd.isna(vendor)) else str(vendor).strip()
+            if not vendor_key or vendor_key.lower() in {"nan", "none", "未维护", "0"}:
+                continue
+
+            out_rows = dec_large_out[dec_large_out["供应商编号"] == vendor]
+            in_rows = q1_large_in[q1_large_in["供应商编号"] == vendor]
+            out_amt = out_rows["凭证货币价值"].abs().sum()
+            in_amt = in_rows["凭证货币价值"].abs().sum()
             ratio = min(out_amt, in_amt) / max(out_amt, in_amt) if max(out_amt, in_amt) > 0 else 0
 
             if ratio > match_ratio:
-                vids = (
-                    dec_large_out[dec_large_out["供应商编号"] == vendor]["凭证编号"].tolist()
-                    + q1_large_in[q1_large_in["供应商编号"] == vendor]["凭证编号"].tolist()
+                # 按单行金额保留头部凭证，避免一个对手方拖入数百张无关凭证
+                ranked = (
+                    pd.concat([out_rows, in_rows], ignore_index=True)
+                    .assign(
+                        _vid=lambda d: d["凭证编号"].astype(str),
+                        _amt=lambda d: pd.to_numeric(d["凭证货币价值"], errors="coerce").abs().fillna(0),
+                    )
+                    .groupby("_vid", sort=False)["_amt"]
+                    .sum()
+                    .sort_values(ascending=False)
                 )
-                vendor_name = dec_large_out[dec_large_out["供应商编号"] == vendor]["供应商科目：名称 1"].iloc[0] if "供应商科目：名称 1" in dec_large_out.columns else vendor
+                vids = ranked.head(max_vouchers).index.astype(str).tolist()
+                vendor_name = (
+                    out_rows["供应商科目：名称 1"].iloc[0]
+                    if "供应商科目：名称 1" in out_rows.columns and len(out_rows)
+                    else vendor_key
+                )
                 findings.append(CrossYearFinding(
                     category="对手方跨年资金循环",
                     description=f"供应商{vendor_name}：{yr_n}年末付出{out_amt:,.0f}，{yr_n1}年Q1收回{in_amt:,.0f}（匹配度{ratio:.0%}），疑似资金空转",
                     years_involved=[yr_n, yr_n1],
-                    voucher_ids=list(set(vids)),
+                    voucher_ids=vids,
                     amount=(out_amt + in_amt) / 2,
                     severity="高",
-                    evidence={"vendor": str(vendor), "out_amount": round(out_amt, 2), "in_amount": round(in_amt, 2)},
+                    evidence={
+                        "vendor": vendor_key,
+                        "out_amount": round(float(out_amt), 2),
+                        "in_amount": round(float(in_amt), 2),
+                        "voucher_cap": max_vouchers,
+                        "voucher_total": int(len(ranked)),
+                    },
                 ))
 
     return findings

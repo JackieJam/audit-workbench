@@ -261,14 +261,29 @@ def samples_for_voucher_ids(
     voucher_ids: set[str] | list[str] | tuple[str, ...],
     df: pd.DataFrame,
     pool: list[dict[str, Any]] | None = None,
+    rules_config: dict | None = None,
 ) -> list[dict[str, Any]]:
     """按凭证号从原始序时账展开样本明细。"""
+    from audit_engine.routine_filter import (
+        filter_export_voucher_rows,
+        pure_routine_voucher_ids,
+    )
+
     if "凭证编号" not in df.columns:
         return []
 
     selected_voucher_ids = {str(v) for v in voucher_ids if str(v)}
     if not selected_voucher_ids:
         return []
+
+    # 剔除纯常规机械凭证，避免疑点库全量抽样时灌入社保/结转噪声
+    if rules_config:
+        pure_ids = pure_routine_voucher_ids(
+            df[df["凭证编号"].astype(str).isin(selected_voucher_ids)],
+            rules_config,
+            purpose="candidates",
+        )
+        selected_voucher_ids -= pure_ids
 
     groups = list(pool or [])
     manual_vids = {
@@ -280,6 +295,8 @@ def samples_for_voucher_ids(
 
     result_samples = []
     matched_df = df[df["凭证编号"].astype(str).isin(selected_voucher_ids)].copy()
+    if matched_df.empty:
+        return []
 
     if "_amount_abs" in matched_df.columns:
         matched_df["_sort_amount"] = matched_df["_amount_abs"]
@@ -290,25 +307,27 @@ def samples_for_voucher_ids(
     else:
         matched_df["_sort_amount"] = 0
 
-    matched_df = matched_df.sort_values("_sort_amount", ascending=False)
-
-    for _, row in matched_df.iterrows():
-        vid = str(row["凭证编号"])
-        is_manual = vid in manual_vids
-        amount = _sample_amount(row)
-        dc = str(row.get("借/贷标识", ""))
-        result_samples.append({
-            "凭证编号": vid,
-            "过账日期": str(row.get("过账日期", ""))[:10] if pd.notna(row.get("过账日期")) else "",
-            "凭证类型": str(row.get("凭证类型", "")),
-            "文本": str(row.get("文本", ""))[:60],
-            "总账科目": str(row.get("总账科目", "")),
-            "科目名称": str(row.get("总账科目：长文本", "")),
-            "借方金额": amount if dc == "S" else 0,
-            "贷方金额": -amount if dc == "H" else 0,
-            "来源模块": _find_group_source(groups, vid),
-            "是否为人工直入": is_manual,
-        })
+    for vid, grp in matched_df.groupby(matched_df["凭证编号"].astype(str), sort=False):
+        rows = filter_export_voucher_rows(grp, rules_config, has_rule_hit=False) if rules_config else grp
+        if rows.empty:
+            continue
+        rows = rows.sort_values("_sort_amount", ascending=False) if "_sort_amount" in rows.columns else rows
+        is_manual = str(vid) in manual_vids
+        for _, row in rows.iterrows():
+            amount = _sample_amount(row)
+            dc = str(row.get("借/贷标识", ""))
+            result_samples.append({
+                "凭证编号": str(vid),
+                "过账日期": str(row.get("过账日期", ""))[:10] if pd.notna(row.get("过账日期")) else "",
+                "凭证类型": str(row.get("凭证类型", "")),
+                "文本": str(row.get("文本", ""))[:60],
+                "总账科目": str(row.get("总账科目", "")),
+                "科目名称": str(row.get("总账科目：长文本", "")),
+                "借方金额": amount if dc == "S" else 0,
+                "贷方金额": -amount if dc == "H" else 0,
+                "来源模块": _find_group_source(groups, str(vid)),
+                "是否为人工直入": is_manual,
+            })
 
     return result_samples
 
@@ -318,10 +337,11 @@ def sample_from_rule_results(
     df: pd.DataFrame,
     size: int | None = None,
     pool: list[dict[str, Any]] | None = None,
+    rules_config: dict | None = None,
 ) -> list[dict[str, Any]]:
     """直接从已执行的规则结果生成最终样本，避免二次运行规则导致口径漂移。"""
     voucher_ids = voucher_ids_from_rule_results(rule_results, size=size)
-    return samples_for_voucher_ids(voucher_ids, df, pool=pool)
+    return samples_for_voucher_ids(voucher_ids, df, pool=pool, rules_config=rules_config)
 
 
 def sample_from_pool(
@@ -594,7 +614,7 @@ def sample_from_pool(
     else:
         raise ValueError(f"不支持的抽样方式: {method}")
 
-    return samples_for_voucher_ids(selected_voucher_ids, df, pool=groups)
+    return samples_for_voucher_ids(selected_voucher_ids, df, pool=groups, rules_config=rules_config)
 
 
 def _find_group_source(groups: list[dict], voucher_id: str) -> str:

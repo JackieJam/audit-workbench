@@ -416,6 +416,7 @@ export const api = {
     request<{
       messages: Array<{ role: string; content: string; at?: string; tool_calls?: AgentChatResponse["tool_calls"] }>;
       pinned_context: AuditSelection | null;
+      suggestions?: string[];
       updated_at?: string;
       audit_events?: Array<Record<string, unknown>>;
     }>(
@@ -546,4 +547,28 @@ export const api = {
     }>(`/llm/active${profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""}`),
 
   exportExcelUrl: (projectId: string) => `${base}/projects/${projectId}/pipeline/export`,
+
+  /** Fetch Excel as blob — avoids SPA navigation hang from raw `<a href>` downloads. */
+  exportExcel: async (projectId: string): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(`${base}/projects/${projectId}/pipeline/export`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || res.statusText);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const plain = disposition.match(/filename="?([^";]+)"?/i);
+    let filename = `audit_sample_${projectId.slice(0, 8)}.xlsx`;
+    if (utf8?.[1]) {
+      try {
+        filename = decodeURIComponent(utf8[1]);
+      } catch {
+        filename = utf8[1];
+      }
+    } else if (plain?.[1]) {
+      filename = plain[1];
+    }
+    return { blob, filename };
+  },
 };

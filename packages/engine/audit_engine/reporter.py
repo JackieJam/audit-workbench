@@ -46,6 +46,7 @@ def generate_report_bytes(
     max_sample_size: int = 50,
     manual_final_samples: list[dict] | None = None,
     explicit_samples: list[dict] | None = None,
+    rules_config: dict | None = None,
 ) -> tuple[bytes, dict]:
     """生成 Excel 报告字节流，返回 (bytes, stats)。"""
     import tempfile
@@ -59,6 +60,7 @@ def generate_report_bytes(
             max_sample_size=max_sample_size,
             manual_final_samples=manual_final_samples,
             explicit_samples=explicit_samples,
+            rules_config=rules_config,
         )
         data = Path(path).read_bytes()
     return data, stats
@@ -72,20 +74,31 @@ def generate_report(
     max_sample_size: int = 50,
     manual_final_samples: list[dict] | None = None,
     explicit_samples: list[dict] | None = None,
+    rules_config: dict | None = None,
 ) -> dict:
     """
     生成 Excel 报告，返回统计摘要 dict。
     """
+    from audit_engine.routine_filter import (
+        filter_export_voucher_rows,
+        prioritize_voucher_ids_for_export,
+    )
+
     # ── 构建凭证维度的合并视图 ──
     judgment_lookup = _build_judgment_lookup(llm_judgments)
     hit_lookup = _build_hit_lookup(rule_results)
+    hit_vids = set(hit_lookup.keys())
 
     if explicit_samples is not None:
-        confirmed_vids = list(dict.fromkeys(
-            str(sample.get("凭证编号", "")).strip()
-            for sample in explicit_samples
-            if str(sample.get("凭证编号", "")).strip()
-        ))
+        confirmed_vids = prioritize_voucher_ids_for_export(
+            [
+                str(sample.get("凭证编号", "")).strip()
+                for sample in explicit_samples
+                if str(sample.get("凭证编号", "")).strip()
+            ],
+            hit_voucher_ids=hit_vids,
+            max_size=max_sample_size,
+        )
     elif judgment_lookup:
         # 有 LLM 核实：按风险级别排序，取 top N
         confirmed_primary_vids = sorted(
@@ -120,7 +133,9 @@ def generate_report(
         )[:max_sample_size]
 
     wb = Workbook()
-    _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup)
+    _write_sample_sheet(
+        wb, df, confirmed_vids, hit_lookup, judgment_lookup, rules_config=rules_config,
+    )
     if manual_final_samples:
         _write_manual_final_sheet(wb, df, manual_final_samples)
     _write_stats_sheet(wb, rule_results, llm_judgments)
@@ -178,7 +193,9 @@ def _hit_voucher_ids(hit) -> list[str]:
     return [vid for vid in dict.fromkeys(ids) if vid]
 
 
-def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup):
+def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rules_config=None):
+    from audit_engine.routine_filter import filter_export_voucher_rows
+
     ws = wb.active
     ws.title = "样本清单"
     voucher_rows_map = {
@@ -206,6 +223,11 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup):
             voucher_rows = df.iloc[0:0]
         hits = hit_lookup.get(vid, [])
         judgment = judgment_lookup.get(vid)
+        voucher_rows = filter_export_voucher_rows(
+            voucher_rows,
+            rules_config,
+            has_rule_hit=bool(hits),
+        )
 
         rule_types = " | ".join(dict.fromkeys(h.rule_type for h in hits))
         evidences = " | ".join(dict.fromkeys(h.evidence for h in hits))

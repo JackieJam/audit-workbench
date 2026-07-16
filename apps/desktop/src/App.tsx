@@ -10,6 +10,7 @@ import { AgentProvider, useAgent } from "@/context/AgentContext";
 import { WorkspaceProvider } from "@/context/WorkspaceContext";
 import { LlmProvider } from "@/context/LlmContext";
 import { LlmSettingsPanel } from "@/components/LlmSettingsPanel";
+import { useAgentPanelWidth } from "@/hooks/useAgentPanelWidth";
 import type { ProjectSummary } from "@/api/client";
 
 type Tab = "finance" | "suspects" | "sampling" | "llm";
@@ -31,6 +32,7 @@ function AppWorkspace({
   selected: ProjectSummary | null;
 }) {
   const { pinSelection } = useAgent();
+  const { width, workspaceRef, onSplitterPointerDown, resetWidth, nudgeWidth } = useAgentPanelWidth();
 
   if (tab === "llm") {
     return (
@@ -42,13 +44,39 @@ function AppWorkspace({
 
   return (
     <WorkspaceProvider pinSelection={pinSelection} onNavigateMain={(t) => setTab(t)}>
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef}>
         <main className="main">
           {tab === "finance" && <FinancePage project={selected} />}
           {tab === "suspects" && <SuspectsPage project={selected} />}
           {tab === "sampling" && <SamplingPage project={selected} />}
         </main>
-        <AgentPanel />
+        <div
+          className="workspace-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整审计助手宽度"
+          aria-valuenow={width}
+          tabIndex={0}
+          title="拖动调整宽度 · 双击恢复默认"
+          onPointerDown={onSplitterPointerDown}
+          onDoubleClick={resetWidth}
+          onKeyDown={(e) => {
+            const step = e.shiftKey ? 40 : 16;
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              nudgeWidth(step);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              nudgeWidth(-step);
+            } else if (e.key === "Home") {
+              e.preventDefault();
+              resetWidth();
+            }
+          }}
+        />
+        <div className="agent-panel-shell" style={{ width }}>
+          <AgentPanel />
+        </div>
       </div>
     </WorkspaceProvider>
   );

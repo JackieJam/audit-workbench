@@ -9,6 +9,20 @@ const METHODS = [
   { id: "all", label: "全量（不抽样）" },
 ];
 
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Delay revoke so Safari / Chrome finish reading the blob
+  window.setTimeout(() => URL.revokeObjectURL(url), 2_000);
+}
+
 export function SamplingPage({ project }: Props) {
   const rules = useQuery({
     queryKey: ["rule-results", project?.project_id],
@@ -31,6 +45,11 @@ export function SamplingPage({ project }: Props) {
     mutationFn: (body: { method: string; size?: number }) =>
       api.extractSamples(project!.project_id, body),
     onSuccess: () => samples.refetch(),
+  });
+
+  const downloadExcel = useMutation({
+    mutationFn: () => api.exportExcel(project!.project_id),
+    onSuccess: ({ blob, filename }) => triggerBlobDownload(blob, filename),
   });
 
   if (!project) {
@@ -82,15 +101,24 @@ export function SamplingPage({ project }: Props) {
             disabled={extract.isPending}
             onClick={() => extract.mutate({ method: m.id, size: 50 })}
           >
-            2. {m.label}
+            {extract.isPending ? "抽样中…" : `2. ${m.label}`}
           </button>
         ))}
-        <a className="btn-primary" href={api.exportExcelUrl(project.project_id)} download>
-          3. 下载 Excel 底稿
-        </a>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={downloadExcel.isPending}
+          onClick={() => downloadExcel.mutate()}
+        >
+          {downloadExcel.isPending ? "生成中…" : "3. 下载 Excel 底稿"}
+        </button>
       </div>
 
       {extract.isError && <p className="error">{String(extract.error)}</p>}
+      {downloadExcel.isError && <p className="error">下载失败：{String(downloadExcel.error)}</p>}
+      {downloadExcel.isSuccess && !downloadExcel.isPending && (
+        <p className="muted">Excel 已开始下载；若浏览器弹出「另存为」，请选本机文件夹（避开 iCloud Drive）。</p>
+      )}
 
       {samples.data && (
         <p className="muted">

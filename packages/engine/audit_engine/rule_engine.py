@@ -53,22 +53,10 @@ class RuleResult:
 # ─────────────────────────────────────────────
 
 def apply_whitelist(df: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    kw_list: list[str] = cfg.get("whitelist_keywords", [])
-    vtype_list: list[str] = cfg.get("whitelist_voucher_types", [])
+    """排除常规机械分录（科目名+文本+自动凭证类型）。兼容旧 whitelist_* 字段。"""
+    from audit_engine.routine_filter import apply_routine_exclusion
 
-    mask = pd.Series(False, index=df.index)
-
-    if vtype_list and "凭证类型" in df.columns:
-        mask |= df["凭证类型"].isin(vtype_list)
-
-    if kw_list and "文本" in df.columns:
-        for kw in kw_list:
-            mask |= df["文本"].str.contains(kw, na=False)
-
-    # 金额为 0
-    mask |= df["凭证货币价值"].fillna(0).abs() == 0
-
-    return df[~mask].copy(), df[mask].copy()
+    return apply_routine_exclusion(df, cfg, purpose="rules")
 
 
 # ─────────────────────────────────────────────
@@ -1266,7 +1254,12 @@ def _base_rule_key(rule_key: str) -> str:
 
 def _enabled_rule_keys(cfg: dict) -> list[str]:
     """Return all enabled rule keys from config, excluding whitelist/meta keys."""
-    meta_keys = {"whitelist_keywords", "whitelist_voucher_types", "max_sample_size"}
+    meta_keys = {
+        "whitelist_keywords",
+        "whitelist_voucher_types",
+        "routine_exclusion",
+        "max_sample_size",
+    }
     return sorted(
         k for k, v in cfg.items()
         if k not in meta_keys and isinstance(v, dict) and v.get("enabled", False)

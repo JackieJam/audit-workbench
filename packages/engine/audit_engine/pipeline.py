@@ -198,7 +198,9 @@ class AnalysisPipeline:
         if method == "by_rule" and state.get("rule_results"):
             results = _rule_results_from_dict(state["rule_results"])
             max_size = size or int(rules.get("max_sample_size", 50))
-            samples = sample_from_rule_results(results, unified, size=max_size, pool=pool)
+            samples = sample_from_rule_results(
+                results, unified, size=max_size, pool=pool, rules_config=rules,
+            )
         else:
             max_size = size or int(rules.get("max_sample_size", 50))
             cross_raw = state.get("cross_year_findings") or []
@@ -268,4 +270,5 @@ class AnalysisPipeline:
             max_sample_size=int(rules.get("max_sample_size", 50)),
             manual_final_samples=manual_final,
             explicit_samples=list(state.get("samples") or []) if "samples" in state else None,
+            rules_config=rules,
         )

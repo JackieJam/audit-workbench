@@ -49,6 +49,9 @@ def add_candidate(
     body: AddCandidateRequest,
     store: ProjectStore = Depends(get_store),
 ) -> dict:
+    from audit_engine.routine_filter import prepare_candidate_detail
+    from audit_engine.rules_config import default_rules_config, merge_rules_config
+
     manifest = _manifest_or_404(store, project_id)
     selector = body.selector
     year = selector.get("year")
@@ -69,6 +72,14 @@ def add_candidate(
         detail = detail[detail["凭证编号"].astype(str).isin(vids)].copy()
         if detail.empty:
             raise HTTPException(status_code=400, detail="所选凭证在当前条件下无匹配分录")
+
+    rules_cfg = default_rules_config()
+    state = store.load_state(project_id)
+    if isinstance(state.get("rules_config"), dict):
+        rules_cfg = merge_rules_config(rules_cfg, state.get("rules_config"))
+    detail = prepare_candidate_detail(detail, rules_cfg, selector=selector)
+    if detail.empty:
+        raise HTTPException(status_code=400, detail="过滤常规机械分录后无剩余样本可入库")
 
     group = build_candidate_group(
         title=body.title,

@@ -263,7 +263,15 @@ def apply_recommendations(
     module_key: str,
     indices: list[int] | None = None,
 ) -> dict[str, Any]:
+    from audit_engine.routine_filter import prepare_candidate_detail
+    from audit_engine.rules_config import default_rules_config, merge_rules_config
+
     pool = store.load_candidate_pool(project_id)
+    rules_cfg = default_rules_config()
+    state = store.load_state(project_id)
+    if isinstance(state.get("rules_config"), dict):
+        rules_cfg = merge_rules_config(rules_cfg, state.get("rules_config"))
+
     added = skipped = 0
     errors: list[str] = []
     selected = indices if indices is not None else list(range(len(recommendations)))
@@ -282,6 +290,11 @@ def apply_recommendations(
             if detail.empty:
                 skipped += 1
                 errors.append(f"{rec.get('title', idx)}: 无匹配分录")
+                continue
+            detail = prepare_candidate_detail(detail, rules_cfg, selector=selector)
+            if detail.empty:
+                skipped += 1
+                errors.append(f"{rec.get('title', idx)}: 过滤常规分录后无剩余样本")
                 continue
             group = build_candidate_group(
                 title=str(rec.get("title") or f"{module_key} 抽样建议"),

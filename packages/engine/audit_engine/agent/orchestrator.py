@@ -22,13 +22,16 @@ SYSTEM_PROMPT = (
     "3) 规则命中与抽样 → get_rule_hit_summary、run_sampling_rules、extract_samples（大数据量可能较慢，先提示）；"
     "4) 规则迭代记忆 → record_rule_feedback、list_rule_feedback、suggest_rule_tuning、apply_rule_tuning；"
     "5) 模块 AI 分析 → run_module_insight、get_module_insight_cache、apply_module_insight_recommendations、get_module_insight_jobs；"
+    "   若用户要求「对所有模块进行AI风险分析」，依次对有风险问题配置的模块执行 run_module_insight："
+    "   收入成本、费用、营业外与投资收益、暂估往来、资产负债、调账冲销；"
+    "   每完成一个模块简要汇报，全部完成后再汇总主要风险与可入库抽样建议；"
     "6) 跨年 → run_cross_year_audit、get_cross_year_findings；"
     "7) 列名映射 → get_column_mapping_status；抽样状态 → get_sampling_status；"
     "8) 打开左侧页签 → focus_analysis_view（分析）、run_sampling_rules/extract_samples（抽样）、apply_module_insight_recommendations（疑点库）。"
     "修改规则阈值时必须保留或更新 rationale。应用调参建议前向用户说明变更内容。"
 )
 
-MAX_TOOL_ROUNDS = 6
+MAX_TOOL_ROUNDS = 10
 MAX_HISTORY = 40
 MAX_AUDIT_EVENTS = 200
 MUTATING_TOOLS = {
@@ -91,16 +94,24 @@ def _history_content(message: dict[str, Any]) -> str:
     return content
 
 
+DEFAULT_AGENT_SUGGESTIONS = [
+    "对所有模块进行AI风险分析",
+    "概览项目年份与规模",
+    "抽样规则有哪些？",
+    "根据反馈建议规则调参",
+]
+
+
 def _suggested_followups(ctx: AuditSelection | None) -> list[str]:
     if not ctx:
-        return [
-            "概览项目年份与规模",
-            "抽样规则有哪些？",
-            "对费用模块做 AI 风险分析",
-            "根据反馈建议规则调参",
-        ]
+        return list(DEFAULT_AGENT_SUGGESTIONS)
     label = ctx.get("label", "当前范围")
-    return [f"「{label}」有何风险？", f"解释「{label}」代表性凭证", f"将「{label}」纳入疑点库"]
+    return [
+        "对所有模块进行AI风险分析",
+        f"「{label}」有何风险？",
+        f"解释「{label}」代表性凭证",
+        f"将「{label}」纳入疑点库",
+    ]
 
 
 def run_agent_chat(
@@ -248,6 +259,9 @@ def get_agent_state(store: ProjectStore, project_id: str) -> dict[str, Any]:
     return {
         "messages": messages,
         "pinned_context": thread.get("pinned_context"),
+        "suggestions": _suggested_followups(
+            thread.get("pinned_context") if isinstance(thread.get("pinned_context"), dict) else None
+        ),
         "updated_at": thread.get("updated_at"),
         "audit_events": thread.get("audit_events") or [],
         "pending_actions": [

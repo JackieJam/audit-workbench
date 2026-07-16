@@ -68,10 +68,11 @@
     "balance_buildup_growth_ratio": 1.5,
     "circular_large_amount": 500000,
     "circular_match_ratio": 0.7,
+    "circular_max_vouchers": 15,
     "expense_spike_multiplier": 2.5,
     "manual_entry_delta_threshold": 0.15,
     "new_pair_count_threshold": 20,
-    "rationale": "跨年高级检测阈值集中管理（消除散落硬编码）：预提下限1万/不符容差5%/悬空高危线100万；期末余额累积1.5x；资金循环单笔50万、匹配度70%；费用突变2.5x；手工凭证占比上升15ppt；新科目组合20对。默认值与历史硬编码一致，不参与 LLM 校准。"
+    "rationale": "跨年高级检测阈值集中管理（消除散落硬编码）：预提下限1万/不符容差5%/悬空高危线100万；期末余额累积1.5x；资金循环单笔50万、匹配度70%、单对手方最多15张凭证；费用突变2.5x；手工凭证占比上升15ppt；新科目组合20对。默认值与历史硬编码一致，不参与 LLM 校准。"
   },
   "cash_pool": {
     "enabled": true,
@@ -109,6 +110,63 @@
     "工资", "个人所得税", "折旧", "摊销",
     "社保", "公积金", "利息收入", "利息支出", "银行手续费"
   ],
-  "whitelist_voucher_types": ["AA", "AB", "ZP"],
+  "whitelist_voucher_types": ["AA", "AB", "ZP", "ML", "AF", "WE", "WA", "CO", "WL", "RV"],
+  "routine_exclusion": {
+    "enabled": true,
+    "always_exclude_voucher_types": ["AA", "AB", "ZP", "ML", "AF", "WE", "WA", "CO", "WL", "RV"],
+    "always_exclude_account_patterns": ["差异.?结转", "差异-在制品", "在制品差异"],
+    "categories": {
+      "statutory_benefits": {
+        "account_patterns": [
+          "社会保险", "社保", "住房公积金", "公积金",
+          "基本养老", "基本医疗", "失业保险", "工伤保险", "生育保险",
+          "个人所得税", "应交个人所得税", "应付职工薪酬-社会保险", "应付职工薪酬-住房公积"
+        ],
+        "text_patterns": ["社保", "公积金", "社会保险", "个税", "公积金缴纳", "社保缴纳"],
+        "exclude_from_rules": true,
+        "exclude_from_candidates": true,
+        "exclude_from_export_lines": true,
+        "rationale": "法定代扣代缴/缴纳类分录裁量空间低，不应占抽样名额"
+      },
+      "wage_salary": {
+        "account_patterns": ["费用-人工-工资", "应付职工薪酬-工资", "工资薪金", "应付工资"],
+        "text_patterns": ["计提人工费", "计提工资", "发放工资", "工资发放"],
+        "exclude_from_rules": true,
+        "exclude_from_candidates": false,
+        "exclude_from_export_lines": true,
+        "rationale": "常规工资计提发放对规则引擎是噪声；人工费用钻取时保留，导出仍压缩"
+      },
+      "depreciation_amortization": {
+        "account_patterns": ["累计折旧", "折旧费", "累计摊销", "摊销费"],
+        "text_patterns": ["计提折旧", "折旧", "摊销"],
+        "exclude_from_rules": true,
+        "exclude_from_candidates": true,
+        "exclude_from_export_lines": true,
+        "rationale": "系统批量折旧/摊销运行，抽样价值低"
+      },
+      "bank_interest_fees": {
+        "account_patterns": ["利息收入", "利息支出", "银行手续费", "财务费用-手续费", "财务费用-利息"],
+        "text_patterns": ["银行手续费", "利息收入", "利息支出", "活期存款利息"],
+        "exclude_from_rules": true,
+        "exclude_from_candidates": true,
+        "exclude_from_export_lines": true,
+        "rationale": "日常银行结息与手续费属机械分录"
+      },
+      "fx_revaluation": {
+        "account_patterns": ["汇兑损益", "汇兑", "调汇"],
+        "text_patterns": ["汇兑", "调汇", "汇率"],
+        "exclude_from_rules": true,
+        "exclude_from_candidates": true,
+        "exclude_from_export_lines": true,
+        "rationale": "汇兑重估批量过账；仅当钻取财务费用(汇兑)时受保护"
+      }
+    },
+    "max_vouchers_per_candidate_group": 50,
+    "max_lines_per_voucher_in_export": 40,
+    "export_skip_routine_lines": true,
+    "drop_pure_routine_vouchers": true,
+    "circular_max_vouchers_per_finding": 15,
+    "rationale": "按问题类排除低抽样价值的法定/系统/结转分录，避免疑点库与底稿被机械分录淹没"
+  },
   "max_sample_size": 50
 }
