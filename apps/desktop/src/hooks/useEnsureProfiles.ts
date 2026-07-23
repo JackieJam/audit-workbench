@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, type ProjectSummary } from "@/api/client";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 const PROFILE_SCHEMA_VERSION = 2;
 
@@ -22,7 +23,11 @@ function profilesNeedBuild(
 export function useEnsureProfiles(project: ProjectSummary | null) {
   const yearsKey = project?.years?.join(",") ?? "";
   return useQuery({
-    queryKey: ["profiles", project?.project_id, yearsKey],
+    queryKey: [
+      "profiles",
+      ...(project ? projectDataKey(project) : [null, null]),
+      yearsKey,
+    ],
     queryFn: async () => {
       if (!project?.project_id) throw new Error("无项目");
       const cached = await api.getProfiles(project.project_id);
@@ -32,6 +37,6 @@ export function useEnsureProfiles(project: ProjectSummary | null) {
       return cached;
     },
     enabled: !!(project?.years?.length),
-    staleTime: 10 * 60 * 1000,
+    ...financialAnalysisQueryOptions,
   });
 }

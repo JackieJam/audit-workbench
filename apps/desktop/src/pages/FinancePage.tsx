@@ -16,6 +16,7 @@ import { WorkingCapitalPanel } from "@/components/WorkingCapitalPanel";
 import { useAgent } from "@/context/AgentContext";
 import { useWorkspace, type FinanceModule } from "@/context/WorkspaceContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary | null };
 
@@ -36,9 +37,10 @@ export function FinancePage({ project }: Props) {
   useEnsureProfiles(project);
   const insightStatus = useModuleInsightStatus(project?.project_id);
   const quality = useQuery({
-    queryKey: ["analysis-quality", project?.project_id],
+    queryKey: ["analysis-quality", ...(project ? projectDataKey(project) : [null, null])],
     queryFn: () => api.getAnalysisQuality(project!.project_id),
     enabled: !!project?.project_id && project.years.length > 0,
+    ...financialAnalysisQueryOptions,
   });
   const qualityWarnings = Object.entries(quality.data?.years ?? {}).flatMap(([year, item]) => {
     const warnings: { key: string; text: string }[] = [];

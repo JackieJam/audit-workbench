@@ -7,6 +7,7 @@ import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary };
 
@@ -24,9 +25,10 @@ export function ExpensePanel({ project }: Props) {
   const { pinSelection } = useAgent();
 
   const data = useQuery({
-    queryKey: ["expense-cross", project.project_id],
+    queryKey: ["expense-cross", ...projectDataKey(project)],
     queryFn: () => api.expenseCrossYear(project.project_id),
     enabled: project.years.length > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const drilldown = useQuery({
@@ -139,7 +141,7 @@ export function ExpensePanel({ project }: Props) {
         <h3>跨年费用结构对比</h3>
         <p className="chart-hint muted">点击柱形回查分录，勾选行后「加入疑点库」。</p>
         <ChartLoadingBar
-          loading={data.isLoading || data.isFetching}
+          loading={data.isLoading}
           label="费用结构加载中"
           hint="首次汇总大账套可能需要数十秒"
         />
@@ -155,10 +157,7 @@ export function ExpensePanel({ project }: Props) {
             未识别到费用类分录。请检查科目编码、科目名称及费用分类映射。
           </div>
         ) : (
-          <div
-            ref={chartRef}
-            className={`chart-box chart-box--category-labels${data.isFetching ? " chart-box--loading" : ""}`}
-          />
+          <div ref={chartRef} className="chart-box chart-box--category-labels" />
         )}
       </div>
       {selection && (

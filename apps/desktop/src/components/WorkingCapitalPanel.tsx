@@ -7,6 +7,7 @@ import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 type WcTab = "ap" | "or" | "op";
@@ -54,28 +55,32 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
 
 
   const apMonthly = useQuery({
-    queryKey: ["wc-ap", project.project_id, year],
+    queryKey: ["wc-ap", ...projectDataKey(project), year],
     queryFn: () => api.wcApMonthly(project.project_id, year),
     enabled: year > 0 && tab === "ap",
+    ...financialAnalysisQueryOptions,
   });
 
   const orMonthly = useQuery({
-    queryKey: ["wc-or", project.project_id, year],
+    queryKey: ["wc-or", ...projectDataKey(project), year],
     queryFn: () => api.wcOrMonthly(project.project_id, year),
     enabled: year > 0 && tab === "or",
+    ...financialAnalysisQueryOptions,
   });
 
   const opMonthly = useQuery({
-    queryKey: ["wc-op", project.project_id, year],
+    queryKey: ["wc-op", ...projectDataKey(project), year],
     queryFn: () => api.wcOpMonthly(project.project_id, year),
     enabled: year > 0 && tab === "op",
+    ...financialAnalysisQueryOptions,
   });
 
   const apMonth = selection?.kind.startsWith("ap") ? selection.month : 0;
   const apSuppliers = useQuery({
-    queryKey: ["wc-ap-sup", project.project_id, year, apMonth],
+    queryKey: ["wc-ap-sup", ...projectDataKey(project), year, apMonth],
     queryFn: () => api.wcApSuppliers(project.project_id, year, apMonth),
     enabled: year > 0 && tab === "ap" && apMonth > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const drilldown = useQuery({

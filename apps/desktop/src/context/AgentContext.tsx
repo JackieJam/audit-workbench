@@ -38,6 +38,7 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
   const [draftPrompt, setDraftPrompt] = useState<string | null>(null);
   const [focusAgentNonce, setFocusAgentNonce] = useState(0);
   const localPinProjectRef = useRef<string | null>(null);
+  const pinRequestIdRef = useRef(0);
 
   const stateQ = useQuery({
     queryKey: ["agent-state", projectId],
@@ -46,6 +47,7 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
   });
 
   useEffect(() => {
+    pinRequestIdRef.current += 1;
     localPinProjectRef.current = null;
     setPinnedContext(null);
     setSuggestions(DEFAULT_SUGGESTIONS);
@@ -74,11 +76,15 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
 
   const pinSelection = useCallback(
     (ctx: AuditSelection | null) => {
+      const requestId = ++pinRequestIdRef.current;
       localPinProjectRef.current = projectId;
       setPinnedContext(ctx);
       if (!projectId) return;
       api.setAgentContext(projectId, ctx).then((res) => {
-        if (localPinProjectRef.current !== projectId) return;
+        if (
+          localPinProjectRef.current !== projectId ||
+          pinRequestIdRef.current !== requestId
+        ) return;
         setPinnedContext(
           res.pinned_context
             ? (res.pinned_context as AuditSelection)

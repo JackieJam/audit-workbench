@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { UploadPanel } from "@/components/UploadPanel";
@@ -31,7 +31,12 @@ function AppWorkspace({
   setTab: (t: Tab) => void;
   selected: ProjectSummary | null;
 }) {
-  const { pinSelection, focusAgentNonce } = useAgent();
+  const { pinSelection, pinnedContext, focusAgentNonce } = useAgent();
+  const lastFinanceContextRef = useRef<{
+    projectId: string;
+    context: NonNullable<typeof pinnedContext>;
+  } | null>(null);
+  const previousTabRef = useRef(tab);
   const {
     width,
     collapsed,
@@ -49,7 +54,28 @@ function AppWorkspace({
 
   useEffect(() => {
     if (!selected) return;
-    if (tab === "suspects") {
+    const previousTab = previousTabRef.current;
+    previousTabRef.current = tab;
+    if (
+      lastFinanceContextRef.current &&
+      lastFinanceContextRef.current.projectId !== selected.project_id
+    ) {
+      lastFinanceContextRef.current = null;
+    }
+    if (previousTab === tab) return;
+
+    if (previousTab === "finance" && pinnedContext) {
+      lastFinanceContextRef.current = {
+        projectId: selected.project_id,
+        context: pinnedContext,
+      };
+    }
+
+    if (tab === "finance") {
+      if (lastFinanceContextRef.current?.projectId === selected.project_id) {
+        pinSelection(lastFinanceContextRef.current.context);
+      }
+    } else if (tab === "suspects") {
       pinSelection({
         label: "疑点工作台",
         source_module: "疑点工作台",
@@ -64,7 +90,7 @@ function AppWorkspace({
         selector: { kind: "workspace_overview", workspace: "sampling" },
       });
     }
-  }, [pinSelection, selected?.project_id, tab]);
+  }, [pinSelection, pinnedContext, selected?.project_id, tab]);
 
   if (tab === "llm") {
     return (
@@ -78,7 +104,9 @@ function AppWorkspace({
     <WorkspaceProvider pinSelection={pinSelection} onNavigateMain={(t) => setTab(t)}>
       <div className="workspace" ref={workspaceRef}>
         <main className="main">
-          {tab === "finance" && <FinancePage project={selected} />}
+          <div hidden={tab !== "finance"} aria-hidden={tab !== "finance"}>
+            <FinancePage project={selected} />
+          </div>
           {tab === "suspects" && <SuspectsPage project={selected} />}
           {tab === "sampling" && <SamplingPage project={selected} />}
         </main>
@@ -263,6 +291,17 @@ export default function App() {
               <UploadPanel
                 projectId={selectedId}
                 onImported={() => {
+                  if (selectedId) {
+                    for (const key of [
+                      "agent-state",
+                      "module-insight",
+                      "candidates",
+                      "rule-results",
+                      "samples",
+                    ]) {
+                      queryClient.invalidateQueries({ queryKey: [key, selectedId] });
+                    }
+                  }
                   queryClient.invalidateQueries({ queryKey: ["projects"] });
                   setSidebarCollapsed(true);
                 }}

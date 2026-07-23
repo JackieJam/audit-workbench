@@ -7,6 +7,7 @@ import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 
@@ -41,9 +42,10 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
   usePreferredYear(preferredYear, project.years, setYear);
 
   const cats = useQuery({
-    queryKey: ["bs-cats", project.project_id, year],
+    queryKey: ["bs-cats", ...projectDataKey(project), year],
     queryFn: () => api.bsCategories(project.project_id, year),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   useEffect(() => {
@@ -53,15 +55,17 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
   }, [cats.data, category]);
 
   const monthly = useQuery({
-    queryKey: ["bs-monthly", project.project_id, year, category],
+    queryKey: ["bs-monthly", ...projectDataKey(project), year, category],
     queryFn: () => api.bsMonthly(project.project_id, year, category),
     enabled: year > 0 && !!category,
+    ...financialAnalysisQueryOptions,
   });
 
   const accounts = useQuery({
-    queryKey: ["bs-accounts", project.project_id, year, category],
+    queryKey: ["bs-accounts", ...projectDataKey(project), year, category],
     queryFn: () => api.bsAccounts(project.project_id, year, category),
     enabled: year > 0 && !!category,
+    ...financialAnalysisQueryOptions,
   });
 
   const drilldown = useQuery({

@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, type CrossYearFinding, type ProjectSummary } from "@/api/client";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary };
 
@@ -11,9 +12,10 @@ function severityClass(s: string) {
 
 export function CrossYearPanel({ project }: Props) {
   const findings = useQuery({
-    queryKey: ["cross-year", project.project_id],
+    queryKey: ["cross-year", ...projectDataKey(project)],
     queryFn: () => api.getCrossYear(project.project_id),
     enabled: project.years.length >= 2,
+    ...financialAnalysisQueryOptions,
   });
 
   const run = useMutation({

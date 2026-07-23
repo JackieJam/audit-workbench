@@ -9,6 +9,7 @@ import { moduleOverviewSelection } from "@/lib/agentContext";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = {
   project: ProjectSummary;
@@ -112,21 +113,24 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
 
 
   const categories = useQuery({
-    queryKey: ["ic-cats", project.project_id, year],
+    queryKey: ["ic-cats", ...projectDataKey(project), year],
     queryFn: () => api.incomeCostCategories(project.project_id, year),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const monthly = useQuery({
-    queryKey: ["ic-monthly", project.project_id, year, category],
+    queryKey: ["ic-monthly", ...projectDataKey(project), year, category],
     queryFn: () => api.incomeCostMonthly(project.project_id, year, category),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const customers = useQuery({
-    queryKey: ["ic-customers", project.project_id, year, category],
+    queryKey: ["ic-customers", ...projectDataKey(project), year, category],
     queryFn: () => api.incomeCostCustomers(project.project_id, year, category),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const drilldown = useQuery({
@@ -350,34 +354,28 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
           净收入=主营/其他业务收入；净成本=主营/其他业务成本（6401/6402，不含生产成本→存货）；毛利=净收入−净成本。点击柱/点可回查分录。
         </p>
         <ChartLoadingBar
-          loading={monthly.isLoading || monthly.isFetching}
+          loading={monthly.isLoading}
           label="月度收入成本加载中"
         />
         {monthly.isError && <p className="error">{String(monthly.error)}</p>}
-        {monthly.isSuccess && !monthly.isFetching && !monthlyHasValues && (
+        {monthly.isSuccess && !monthlyHasValues && (
           <p className="muted">该年度暂无收入成本数据，请切换其他年度或检查科目分类。</p>
         )}
-        <div
-          ref={monthlyRef}
-          className={`chart-box${monthly.isFetching ? " chart-box--loading" : ""}`}
-        />
+        <div ref={monthlyRef} className="chart-box" />
       </div>
 
       <div className="chart-card">
         <h3>客户收入 Top10</h3>
         <ChartLoadingBar
-          loading={customers.isLoading || customers.isFetching}
+          loading={customers.isLoading}
           label="客户收入加载中"
         />
-        {!customers.isLoading && !customers.isFetching && !(customers.data?.rows.length) ? (
+        {!customers.isLoading && !(customers.data?.rows.length) ? (
           <p className="muted">当前数据无客户维度或未识别客户列。</p>
         ) : (
           <>
             <p className="chart-hint muted">客户名标在柱上（短柱在右侧）；点击条形可回查分录。</p>
-            <div
-              ref={customerRef}
-              className={`chart-box tall${customers.isFetching ? " chart-box--loading" : ""}`}
-            />
+            <div ref={customerRef} className="chart-box tall" />
           </>
         )}
       </div>

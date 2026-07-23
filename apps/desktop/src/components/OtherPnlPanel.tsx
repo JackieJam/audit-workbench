@@ -9,6 +9,7 @@ import { useAgent } from "@/context/AgentContext";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 import { moduleOverviewSelection } from "@/lib/agentContext";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 type Metric = "investment_income" | "non_operating_income" | "non_operating_expense";
@@ -38,9 +39,10 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
   usePreferredYear(preferredYear, project.years, setYear);
 
   const monthly = useQuery({
-    queryKey: ["other-pnl-monthly", project.project_id, year],
+    queryKey: ["other-pnl-monthly", ...projectDataKey(project), year],
     queryFn: () => api.otherPnlMonthly(project.project_id, year),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
   const drilldown = useQuery({
     queryKey: ["other-pnl-drilldown", project.project_id, selection],
@@ -136,7 +138,7 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
       <div className="chart-card">
         <h3>投资收益与营业外收支</h3>
         <p className="chart-hint muted">收入类按贷增借减、支出类按借增贷减；Period 13 单独展示。点击图形可回查分录。</p>
-        <ChartLoadingBar loading={monthly.isLoading || monthly.isFetching} label="营业外与投资收益加载中" />
+        <ChartLoadingBar loading={monthly.isLoading} label="营业外与投资收益加载中" />
         <div ref={chartRef} className="chart-box" />
       </div>
       {selection && (

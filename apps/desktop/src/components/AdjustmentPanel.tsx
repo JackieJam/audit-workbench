@@ -6,6 +6,7 @@ import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
+import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 
@@ -18,9 +19,10 @@ export function AdjustmentPanel({ project, preferredYear }: Props) {
   usePreferredYear(preferredYear, project.years, setYear);
 
   const summary = useQuery({
-    queryKey: ["adj-summary", project.project_id, year],
+    queryKey: ["adj-summary", ...projectDataKey(project), year],
     queryFn: () => api.adjustmentSummary(project.project_id, year),
     enabled: year > 0,
+    ...financialAnalysisQueryOptions,
   });
 
   const drilldown = useQuery({
