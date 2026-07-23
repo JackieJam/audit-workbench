@@ -312,14 +312,22 @@ export function ProfilePanel({ project, preferredYear }: Props) {
 
       {yearKeys.length > 0 ? (
         <div className="pipeline-actions profile-toolbar">
-          <label className="filters">
-            年度
-            <select value={year} onChange={(event) => setYear(Number(event.target.value))}>
+          <div className="profile-year-switcher">
+            <span className="profile-year-switcher__label">年度</span>
+            <div className="profile-year-switcher__options" role="group" aria-label="统计画像年度">
               {yearKeys.map((item) => (
-                <option key={item} value={item}>{item}</option>
+                <button
+                  key={item}
+                  type="button"
+                  className={`profile-year-switcher__button${item === year ? " active" : ""}`}
+                  aria-pressed={item === year}
+                  onClick={() => setYear(item)}
+                >
+                  {item}
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
+          </div>
           <button
             type="button"
             className="btn-ghost"
