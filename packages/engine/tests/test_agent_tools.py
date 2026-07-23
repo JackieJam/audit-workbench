@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
-from audit_engine.agent.orchestrator import get_agent_state, resolve_pending_action
+from audit_engine.agent.orchestrator import (
+    get_agent_state,
+    resolve_pending_action,
+    set_pinned_context,
+)
 from audit_engine.agent.rule_memory import record_rule_feedback
 from audit_engine.agent.tools import execute_tool
 from audit_engine.store import ProjectStore
@@ -130,6 +134,37 @@ def test_resolve_module_key_and_questions():
     assert resolve_module_key("expense") == "费用"
     qs = load_module_questions("费用")
     assert len(qs) >= 1
+
+
+def test_module_overview_context_avoids_unsupported_candidate_suggestion(tmp_path):
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store)
+
+    result = set_pinned_context(
+        store,
+        pid,
+        {
+            "label": "费用 · 2024年",
+            "source_module": "费用",
+            "source_view": "模块概览",
+            "selector": {"kind": "module_overview", "module": "expense", "year": 2024},
+        },
+    )
+
+    assert any("运行" in item and "AI 风险分析" in item for item in result["suggestions"])
+    assert not any("纳入疑点库" in item for item in result["suggestions"])
+
+    suspects = set_pinned_context(
+        store,
+        pid,
+        {
+            "label": "疑点工作台",
+            "source_module": "疑点工作台",
+            "source_view": "候选疑点与复核状态",
+            "selector": {"kind": "workspace_overview", "workspace": "suspects"},
+        },
+    )
+    assert any("审计证据" in item for item in suspects["suggestions"])
 
 
 def test_pending_mutation_requires_resolution_and_preserves_audit_event(tmp_path, monkeypatch):

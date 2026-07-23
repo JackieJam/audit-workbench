@@ -24,6 +24,7 @@ function clampWidth(width: number, workspaceWidth: number): number {
 /** 右侧审计助手面板宽度（可拖拽，持久化）。 */
 export function useAgentPanelWidth() {
   const [width, setWidth] = useState(readStoredWidth);
+  const [collapsed, setCollapsed] = useState(false);
   const dragging = useRef(false);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
 
@@ -75,6 +76,8 @@ export function useAgentPanelWidth() {
   }, []);
 
   const resetWidth = useCallback(() => setWidth(DEFAULT_WIDTH), []);
+  const collapse = useCallback(() => setCollapsed(true), []);
+  const expand = useCallback(() => setCollapsed(false), []);
 
   const nudgeWidth = useCallback(
     (delta: number) => {
@@ -83,5 +86,14 @@ export function useAgentPanelWidth() {
     [setClampedWidth, width],
   );
 
-  return { width, workspaceRef, onSplitterPointerDown, resetWidth, nudgeWidth };
+  return {
+    width,
+    collapsed,
+    workspaceRef,
+    onSplitterPointerDown,
+    resetWidth,
+    nudgeWidth,
+    collapse,
+    expand,
+  };
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pandas as pd
 from audit_engine.cross_year import _counterparty_circular_flow
 from audit_engine.reporter import generate_report_bytes
@@ -13,6 +15,7 @@ from audit_engine.routine_filter import (
 )
 from audit_engine.rule_engine import RuleHit, RuleResult, apply_whitelist
 from audit_engine.rules_config import default_rules_config
+from openpyxl import load_workbook
 
 
 def _cfg() -> dict:
@@ -144,9 +147,6 @@ def test_export_respects_max_sample_size_and_skips_routine_lines() -> None:
     assert stats["sample_vouchers"] == 20
     assert len(data) > 1000
     # exported workbook should not be dominated by social insurance lines
-    from io import BytesIO
-    from openpyxl import load_workbook
-
     wb = load_workbook(BytesIO(data), read_only=True)
     ws = wb["样本清单"]
     names = []

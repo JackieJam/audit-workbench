@@ -308,6 +308,40 @@ body.is-resizing-agent canvas {
   height: 100%;
   display: flex;
   flex-direction: column;
+  transition: width 0.2s ease;
+}
+
+.agent-panel-shell--collapsed {
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.agent-panel-expand {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 16px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.agent-panel-expand span:first-child {
+  color: var(--accent);
+  font-size: 1rem;
+}
+
+.agent-panel-expand:hover,
+.agent-panel-expand:focus-visible {
+  color: var(--text);
+  background: rgba(79, 142, 247, 0.08);
+  outline: none;
 }
 
 .agent-panel {
@@ -326,6 +360,36 @@ body.is-resizing-agent canvas {
 .agent-panel__head h3 {
   margin: 0;
   font-size: 1rem;
+}
+
+.agent-panel__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-panel__title-row h3 {
+  margin: 0;
+}
+
+.agent-panel__collapse {
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.agent-panel__collapse:hover,
+.agent-panel__collapse:focus-visible {
+  border-color: var(--border);
+  color: var(--text);
+  outline: none;
 }
 
 .agent-panel__key {
@@ -349,6 +413,13 @@ body.is-resizing-agent canvas {
 .agent-context-chip__label {
   display: block;
   color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.agent-context-chip__path {
+  display: block;
+  margin: 2px 0;
+  color: var(--accent);
   font-size: 0.75rem;
 }
 
@@ -560,6 +631,87 @@ body.is-resizing-agent canvas {
   text-align: center;
 }
 
+.data-quality-strip {
+  margin: 8px 0 10px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.05);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.data-quality-strip summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.data-quality-strip summary::-webkit-details-marker {
+  display: none;
+}
+
+.data-quality-strip__status {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  border-radius: 50%;
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.data-quality-strip__summary {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.data-quality-strip__summary strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.data-quality-strip__action {
+  margin-left: auto;
+  color: #fbbf24;
+  white-space: nowrap;
+}
+
+.data-quality-strip__details {
+  padding: 8px 12px 10px 39px;
+  border-top: 1px solid rgba(251, 191, 36, 0.18);
+  line-height: 1.55;
+}
+
+.data-quality-strip__details p,
+.data-quality-strip__details ul {
+  margin: 0;
+}
+
+.data-quality-strip__details ul {
+  padding: 6px 0 0 18px;
+}
+
+.data-quality-strip--error {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-color: rgba(248, 113, 113, 0.36);
+  background: rgba(248, 113, 113, 0.06);
+  color: #fca5a5;
+}
+
 .income-cost-panel {
   display: flex;
   flex-direction: column;
@@ -637,6 +789,21 @@ body.is-resizing-agent canvas {
   opacity: 0.35;
   pointer-events: none;
   transition: opacity 0.2s ease;
+}
+
+.chart-state {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.chart-state--error {
+  color: #fca5a5;
 }
 
 .chart-loading {
@@ -963,7 +1130,7 @@ body.is-resizing-agent canvas {
 .module-panel {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
 }
 
 .selectable-table tbody tr {
@@ -982,7 +1149,7 @@ body.is-resizing-agent canvas {
 .insight-launch {
   display: flex;
   justify-content: flex-end;
-  margin: 0 0 12px;
+  margin: 0;
 }
 
 .insight-launch__btn {

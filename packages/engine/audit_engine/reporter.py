@@ -79,10 +79,7 @@ def generate_report(
     """
     生成 Excel 报告，返回统计摘要 dict。
     """
-    from audit_engine.routine_filter import (
-        filter_export_voucher_rows,
-        prioritize_voucher_ids_for_export,
-    )
+    from audit_engine.routine_filter import prioritize_voucher_ids_for_export
 
     # ── 构建凭证维度的合并视图 ──
     judgment_lookup = _build_judgment_lookup(llm_judgments)

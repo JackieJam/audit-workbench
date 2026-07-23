@@ -5,6 +5,7 @@ import { api, type ProjectSummary } from "@/api/client";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
@@ -114,7 +115,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("working_capital", "暂估往来", year));
       return;
     }
     pinSelection({
@@ -130,7 +131,7 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
       },
       summary: drilldown.data ? { rows: drilldown.data.row_count } : undefined,
     });
-  }, [selection, drilldown.data?.row_count, pinSelection]);
+  }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
   useEffect(() => {
     if (!monthlyRef.current) return;

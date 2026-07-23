@@ -5,6 +5,7 @@ import { api, type ProjectSummary } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { useAgent } from "@/context/AgentContext";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
@@ -164,7 +165,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("income", "收入成本", year));
       return;
     }
     const payload = selectionToAddPayload(selection);
@@ -175,7 +176,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
       selector: payload.selector,
       summary: drilldown.data ? { rows: drilldown.data.row_count } : undefined,
     });
-  }, [selection, drilldown.data?.row_count, pinSelection]);
+  }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
   const monthlyRows = monthly.data?.rows ?? [];
   const monthlyHasValues = monthlyRows.some(

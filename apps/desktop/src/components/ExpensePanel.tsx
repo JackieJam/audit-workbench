@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as echarts from "echarts";
 import { api, type ProjectSummary } from "@/api/client";
+import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 
 type Props = { project: ProjectSummary };
 
@@ -20,7 +22,6 @@ export function ExpensePanel({ project }: Props) {
   const [addedId, setAddedId] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { pinSelection } = useAgent();
-
 
   const data = useQuery({
     queryKey: ["expense-cross", project.project_id],
@@ -117,7 +118,7 @@ export function ExpensePanel({ project }: Props) {
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("expense", "费用"));
       return;
     }
     pinSelection({
@@ -137,7 +138,28 @@ export function ExpensePanel({ project }: Props) {
       <div className="chart-card">
         <h3>跨年费用结构对比</h3>
         <p className="chart-hint muted">点击柱形回查分录，勾选行后「加入疑点库」。</p>
-        <div ref={chartRef} className="chart-box chart-box--category-labels" />
+        <ChartLoadingBar
+          loading={data.isLoading || data.isFetching}
+          label="费用结构加载中"
+          hint="首次汇总大账套可能需要数十秒"
+        />
+        {data.isError ? (
+          <div className="chart-state chart-state--error" role="alert">
+            <span>费用结构读取失败：{String(data.error)}</span>
+            <button type="button" className="btn-ghost" onClick={() => data.refetch()}>
+              重试
+            </button>
+          </div>
+        ) : data.isSuccess && data.data.rows.length === 0 ? (
+          <div className="chart-state">
+            未识别到费用类分录。请检查科目编码、科目名称及费用分类映射。
+          </div>
+        ) : (
+          <div
+            ref={chartRef}
+            className={`chart-box chart-box--category-labels${data.isFetching ? " chart-box--loading" : ""}`}
+          />
+        )}
       </div>
       {selection && (
         <DrilldownPanel

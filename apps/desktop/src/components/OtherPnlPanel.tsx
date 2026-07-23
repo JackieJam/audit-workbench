@@ -4,9 +4,11 @@ import type * as echarts from "echarts";
 import { api, type ProjectSummary } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
+import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 type Metric = "investment_income" | "non_operating_income" | "non_operating_expense";
@@ -101,7 +103,7 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("other_pnl", "营业外与投资收益", year));
       return;
     }
     pinSelection({
@@ -116,12 +118,13 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
       },
       summary: drilldown.data ? { rows: drilldown.data.row_count } : undefined,
     });
-  }, [selection, drilldown.data?.row_count, pinSelection]);
+  }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
   if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
 
   return (
     <div className="module-panel">
+      <ModuleInsightCard projectId={project.project_id} moduleKey="营业外与投资收益" />
       <div className="filters">
         <label>
           年度

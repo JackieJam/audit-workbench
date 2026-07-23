@@ -5,6 +5,7 @@ import { api, type ProjectSummary } from "@/api/client";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
@@ -102,7 +103,7 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("balance_sheet", "资产负债", year));
       return;
     }
     pinSelection({
@@ -119,7 +120,7 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
       },
       summary: drilldown.data ? { rows: drilldown.data.row_count } : undefined,
     });
-  }, [selection, drilldown.data?.row_count, pinSelection]);
+  }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
   useEffect(() => {
     if (!monthlyRef.current || !monthly.data?.rows.length) return;

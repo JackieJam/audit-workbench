@@ -4,6 +4,7 @@ import { api, type AdjustmentSummaryRow, type ProjectSummary } from "@/api/clien
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
 import { useAgent } from "@/context/AgentContext";
+import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
@@ -53,7 +54,7 @@ export function AdjustmentPanel({ project, preferredYear }: Props) {
 
   useEffect(() => {
     if (!selected) {
-      pinSelection(null);
+      pinSelection(moduleOverviewSelection("adjustment", "调账冲销", year));
       return;
     }
     pinSelection({

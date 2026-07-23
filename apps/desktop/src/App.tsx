@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { UploadPanel } from "@/components/UploadPanel";
@@ -31,8 +31,40 @@ function AppWorkspace({
   setTab: (t: Tab) => void;
   selected: ProjectSummary | null;
 }) {
-  const { pinSelection } = useAgent();
-  const { width, workspaceRef, onSplitterPointerDown, resetWidth, nudgeWidth } = useAgentPanelWidth();
+  const { pinSelection, focusAgentNonce } = useAgent();
+  const {
+    width,
+    collapsed,
+    workspaceRef,
+    onSplitterPointerDown,
+    resetWidth,
+    nudgeWidth,
+    collapse,
+    expand,
+  } = useAgentPanelWidth();
+
+  useEffect(() => {
+    if (focusAgentNonce > 0) expand();
+  }, [expand, focusAgentNonce]);
+
+  useEffect(() => {
+    if (!selected) return;
+    if (tab === "suspects") {
+      pinSelection({
+        label: "疑点工作台",
+        source_module: "疑点工作台",
+        source_view: "候选疑点与复核状态",
+        selector: { kind: "workspace_overview", workspace: "suspects" },
+      });
+    } else if (tab === "sampling") {
+      pinSelection({
+        label: "抽样底稿",
+        source_module: "抽样底稿",
+        source_view: "规则命中、样本与导出",
+        selector: { kind: "workspace_overview", workspace: "sampling" },
+      });
+    }
+  }, [pinSelection, selected?.project_id, tab]);
 
   if (tab === "llm") {
     return (
@@ -50,32 +82,50 @@ function AppWorkspace({
           {tab === "suspects" && <SuspectsPage project={selected} />}
           {tab === "sampling" && <SamplingPage project={selected} />}
         </main>
+        {!collapsed ? (
+          <div
+            className="workspace-splitter"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整审计助手宽度"
+            aria-valuenow={width}
+            tabIndex={0}
+            title="拖动调整宽度 · 双击恢复默认"
+            onPointerDown={onSplitterPointerDown}
+            onDoubleClick={resetWidth}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 40 : 16;
+              if (e.key === "ArrowLeft") {
+                e.preventDefault();
+                nudgeWidth(step);
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                nudgeWidth(-step);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                resetWidth();
+              }
+            }}
+          />
+        ) : null}
         <div
-          className="workspace-splitter"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="调整审计助手宽度"
-          aria-valuenow={width}
-          tabIndex={0}
-          title="拖动调整宽度 · 双击恢复默认"
-          onPointerDown={onSplitterPointerDown}
-          onDoubleClick={resetWidth}
-          onKeyDown={(e) => {
-            const step = e.shiftKey ? 40 : 16;
-            if (e.key === "ArrowLeft") {
-              e.preventDefault();
-              nudgeWidth(step);
-            } else if (e.key === "ArrowRight") {
-              e.preventDefault();
-              nudgeWidth(-step);
-            } else if (e.key === "Home") {
-              e.preventDefault();
-              resetWidth();
-            }
-          }}
-        />
-        <div className="agent-panel-shell" style={{ width }}>
-          <AgentPanel />
+          className={`agent-panel-shell${collapsed ? " agent-panel-shell--collapsed" : ""}`}
+          style={{ width: collapsed ? 48 : width }}
+        >
+          {collapsed ? (
+            <button
+              type="button"
+              className="agent-panel-expand"
+              onClick={expand}
+              title="展开审计助手"
+              aria-label="展开审计助手"
+            >
+              <span aria-hidden>✦</span>
+              <span>助手</span>
+            </button>
+          ) : (
+            <AgentPanel onCollapse={collapse} />
+          )}
         </div>
       </div>
     </WorkspaceProvider>

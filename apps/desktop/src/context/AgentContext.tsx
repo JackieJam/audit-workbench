@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentChatResponse, type AuditSelection } from "@/api/client";
 
@@ -24,12 +24,20 @@ type AgentContextValue = {
 
 const Ctx = createContext<AgentContextValue | null>(null);
 
+const DEFAULT_SUGGESTIONS = [
+  "对所有模块进行AI风险分析",
+  "概览项目年份与规模",
+  "抽样规则有哪些？",
+  "根据反馈建议规则调参",
+];
+
 export function AgentProvider({ projectId, children }: { projectId: string | null; children: ReactNode }) {
   const queryClient = useQueryClient();
   const [pinnedContext, setPinnedContext] = useState<AuditSelection | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [draftPrompt, setDraftPrompt] = useState<string | null>(null);
   const [focusAgentNonce, setFocusAgentNonce] = useState(0);
+  const localPinProjectRef = useRef<string | null>(null);
 
   const stateQ = useQuery({
     queryKey: ["agent-state", projectId],
@@ -38,28 +46,46 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
   });
 
   useEffect(() => {
-    if (stateQ.data?.pinned_context) {
-      setPinnedContext(stateQ.data.pinned_context as AuditSelection);
+    localPinProjectRef.current = null;
+    setPinnedContext(null);
+    setSuggestions(DEFAULT_SUGGESTIONS);
+    setDraftPrompt(null);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setPinnedContext(null);
+      setSuggestions(DEFAULT_SUGGESTIONS);
+      return;
     }
-    if (stateQ.data?.suggestions?.length) {
-      setSuggestions(stateQ.data.suggestions);
-    } else if (!stateQ.data?.pinned_context) {
-      setSuggestions([
-        "对所有模块进行AI风险分析",
-        "概览项目年份与规模",
-        "抽样规则有哪些？",
-        "根据反馈建议规则调参",
-      ]);
-    }
-  }, [stateQ.data?.pinned_context, stateQ.data?.suggestions]);
+    if (!stateQ.isSuccess) return;
+    if (localPinProjectRef.current === projectId) return;
+    setPinnedContext(
+      stateQ.data?.pinned_context
+        ? (stateQ.data.pinned_context as AuditSelection)
+        : null,
+    );
+    setSuggestions(
+      stateQ.data?.suggestions?.length
+        ? stateQ.data.suggestions
+        : DEFAULT_SUGGESTIONS,
+    );
+  }, [projectId, stateQ.dataUpdatedAt, stateQ.isSuccess]);
 
   const pinSelection = useCallback(
     (ctx: AuditSelection | null) => {
+      localPinProjectRef.current = projectId;
       setPinnedContext(ctx);
       if (!projectId) return;
       api.setAgentContext(projectId, ctx).then((res) => {
+        if (localPinProjectRef.current !== projectId) return;
+        setPinnedContext(
+          res.pinned_context
+            ? (res.pinned_context as AuditSelection)
+            : null,
+        );
         if (res.suggestions?.length) setSuggestions(res.suggestions);
-      });
+      }).catch(() => undefined);
     },
     [projectId],
   );

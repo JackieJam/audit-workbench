@@ -106,6 +106,28 @@ def _suggested_followups(ctx: AuditSelection | None) -> list[str]:
     if not ctx:
         return list(DEFAULT_AGENT_SUGGESTIONS)
     label = ctx.get("label", "当前范围")
+    selector = ctx.get("selector") or {}
+    if selector.get("kind") == "module_overview":
+        return [
+            f"分析「{label}」的主要风险",
+            f"解释「{label}」的图表口径",
+            f"运行「{label}」AI 风险分析",
+            "检查当前项目的数据质量与覆盖度",
+        ]
+    if selector.get("kind") == "workspace_overview":
+        if selector.get("workspace") == "suspects":
+            return [
+                "概览当前疑点及风险等级",
+                "哪些疑点最值得优先复核？",
+                "解释疑点进入候选库的依据",
+                "下一步应补充哪些审计证据？",
+            ]
+        return [
+            "检查当前抽样是否可以导出",
+            "概览规则命中与样本规模",
+            "解释当前抽样规则",
+            "根据复核反馈建议规则调参",
+        ]
     return [
         "对所有模块进行AI风险分析",
         f"「{label}」有何风险？",

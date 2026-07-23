@@ -77,7 +77,7 @@ function ToolCallsCard({
   );
 }
 
-export function AgentPanel() {
+export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
   const {
     projectId,
     pinnedContext,
@@ -142,7 +142,14 @@ export function AgentPanel() {
   if (!projectId) {
     return (
       <aside className="agent-panel" ref={panelRef}>
-        <h3>审计助手</h3>
+        <div className="agent-panel__title-row">
+          <h3>审计助手</h3>
+          {onCollapse ? (
+            <button type="button" className="agent-panel__collapse" onClick={onCollapse} aria-label="收起审计助手">
+              ›
+            </button>
+          ) : null}
+        </div>
         <p className="muted">选择项目并上传序时账后，可在此提问。</p>
       </aside>
     );
@@ -159,7 +166,20 @@ export function AgentPanel() {
   return (
     <aside className="agent-panel" ref={panelRef}>
       <header className="agent-panel__head">
-        <h3>审计助手</h3>
+        <div className="agent-panel__title-row">
+          <h3>审计助手</h3>
+          {onCollapse ? (
+            <button
+              type="button"
+              className="agent-panel__collapse"
+              onClick={onCollapse}
+              title="收起助手，释放图表空间"
+              aria-label="收起审计助手"
+            >
+              ›
+            </button>
+          ) : null}
+        </div>
         <p className="muted">基于当前序时账与左侧选中范围 · 可对话打开左侧分析模块</p>
         {selectedProfile && (
           <p className="muted llm-active-chip">
@@ -171,7 +191,10 @@ export function AgentPanel() {
 
       {pinnedContext && (
         <div className="agent-context-chip">
-          <span className="agent-context-chip__label">当前选中</span>
+          <span className="agent-context-chip__label">当前分析范围</span>
+          <span className="agent-context-chip__path">
+            {pinnedContext.source_module} / {pinnedContext.source_view}
+          </span>
           <strong>{pinnedContext.label}</strong>
         </div>
       )}

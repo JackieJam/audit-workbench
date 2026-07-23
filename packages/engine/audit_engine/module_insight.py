@@ -10,6 +10,11 @@ from typing import Any
 import pandas as pd
 
 from audit_engine.analysis.adjustment import adjustment_summary
+from audit_engine.analysis.balance_sheet import (
+    balance_sheet_categories,
+    category_account_breakdown,
+    category_monthly_movement,
+)
 from audit_engine.analysis.drilldown import resolve_drilldown
 from audit_engine.analysis.expense import cross_year_expense_table
 from audit_engine.analysis.income_cost import customer_revenue_top, monthly_revenue_cost
@@ -143,6 +148,25 @@ def build_module_payload(
             for year, work in work_by_year.items()
             if not work.empty
         ]
+    elif module_key == "资产负债":
+        payload["balance_sheet"] = [
+            {
+                "year": year,
+                "categories": [
+                    {
+                        "category": category,
+                        "monthly": _records(category_monthly_movement(work, category), 13),
+                        "top_accounts": _records(
+                            category_account_breakdown(work, category, top_n=10),
+                            10,
+                        ),
+                    }
+                    for category in balance_sheet_categories(work)
+                ],
+            }
+            for year, work in work_by_year.items()
+            if not work.empty
+        ]
     elif module_key == "调账冲销":
         payload["adjustment_summaries"] = {
             str(y): _records(adjustment_summary(work), 20)
@@ -248,6 +272,19 @@ def condition_to_selector(condition: dict[str, Any]) -> dict[str, Any]:
             "year": year,
             "month": int(c.get("month", 1)),
             "metric": str(c.get("metric", "investment_income")),
+        },
+        "bs_category_month": lambda: {
+            "kind": "bs_category_month",
+            "year": year,
+            "category": str(c.get("category", "")),
+            "month": int(c.get("month", 1)),
+            "direction": str(c.get("direction", "net")),
+        },
+        "bs_category_account": lambda: {
+            "kind": "bs_category_account",
+            "year": year,
+            "category": str(c.get("category", "")),
+            "account": str(c.get("account", "")),
         },
     }
     if kind not in mapping:

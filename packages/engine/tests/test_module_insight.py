@@ -37,3 +37,58 @@ def test_build_expense_payload(tmp_path) -> None:
     assert payload["module"] == "费用"
     assert "年末是否存在突击费用" in payload["risk_focus"][0]
     assert "signature" in payload
+
+
+def test_build_balance_sheet_payload_and_selectors(tmp_path) -> None:
+    from audit_engine.store import ProjectStore
+
+    store = ProjectStore(root=tmp_path)
+    manifest = store.create_project("资产负债payload测试")
+    pid = manifest.project_id
+    df = pd.DataFrame(
+        {
+            "凭证编号": ["1", "1"],
+            "过账日期": pd.to_datetime(["2024-06-01", "2024-06-01"]),
+            "凭证货币价值": [1000.0, 1000.0],
+            "借/贷标识": ["S", "H"],
+            "总账科目": ["100201", "220201"],
+            "总账科目：长文本": ["银行存款", "应付账款"],
+        }
+    )
+    store.ingest_journal(pid, {2024: df}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    payload = build_module_payload(
+        store,
+        pid,
+        "资产负债",
+        risk_questions=[{"id": "x", "text": "是否存在异常大额单边发生？"}],
+    )
+
+    assert payload["balance_sheet"][0]["year"] == 2024
+    categories = payload["balance_sheet"][0]["categories"]
+    assert categories
+    assert all("monthly" in item and "top_accounts" in item for item in categories)
+
+    month_selector = condition_to_selector(
+        {
+            "kind": "bs_category_month",
+            "year": 2024,
+            "category": categories[0]["category"],
+            "month": 6,
+            "direction": "net",
+        }
+    )
+    assert month_selector["kind"] == "bs_category_month"
+    assert month_selector["month"] == 6
+    assert month_selector["direction"] == "net"
+
+    account_selector = condition_to_selector(
+        {
+            "kind": "bs_category_account",
+            "year": 2024,
+            "category": categories[0]["category"],
+            "account": "100201",
+        }
+    )
+    assert account_selector["kind"] == "bs_category_account"
+    assert account_selector["account"] == "100201"
