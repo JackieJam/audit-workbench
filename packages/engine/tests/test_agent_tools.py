@@ -166,6 +166,19 @@ def test_module_overview_context_avoids_unsupported_candidate_suggestion(tmp_pat
     )
     assert any("审计证据" in item for item in suspects["suggestions"])
 
+    profile = set_pinned_context(
+        store,
+        pid,
+        {
+            "label": "统计画像 · 2024年",
+            "source_module": "统计画像",
+            "source_view": "模块概览",
+            "selector": {"kind": "module_overview", "module": "profile", "year": 2024},
+        },
+    )
+    assert any("本福特" in item for item in profile["suggestions"])
+    assert not any("运行" in item and "AI 风险分析" in item for item in profile["suggestions"])
+
 
 def test_pending_mutation_requires_resolution_and_preserves_audit_event(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))

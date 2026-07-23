@@ -9,6 +9,10 @@ from audit_engine.analysis.balance_sheet import category_account_entries, catego
 from audit_engine.analysis.entry_display import entry_display_columns
 from audit_engine.analysis.expense import expense_category_entries
 from audit_engine.analysis.other_pnl import other_pnl_entries
+from audit_engine.analysis.statistical_profile import (
+    benford_digit_entries,
+    month_end_entries,
+)
 from audit_engine.analysis.working_capital import (
     ap_accrual_entries,
     other_payable_entries,
@@ -103,6 +107,18 @@ def resolve_drilldown(work: pd.DataFrame, selector: dict, *, limit: int | None =
             work,
             month=int(selector["month"]),
             metric=str(selector["metric"]),
+            top_n=limit,
+        )
+    if kind == "profile_benford_digit":
+        return benford_digit_entries(
+            work,
+            int(selector["digit"]),
+            top_n=limit,
+        )
+    if kind == "profile_month_end":
+        return month_end_entries(
+            work,
+            int(selector["month"]),
             top_n=limit,
         )
     if kind == "ap_accrual_month":

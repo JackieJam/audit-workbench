@@ -223,10 +223,46 @@ export type ProfileOverview = {
 };
 
 export type YearProfile = {
+  schema_version?: number;
   year: number;
   overview: ProfileOverview;
-  temporal_patterns?: { monthly?: { month: number; vouchers: number; amount: number }[] };
-  manual_entry_ratio?: { manual_ratio?: number };
+  amount_distribution?: {
+    voucher_level?: {
+      p25?: number;
+      p50?: number;
+      p75?: number;
+      p90?: number;
+      p95?: number;
+      p99?: number;
+      max?: number;
+      mean?: number;
+    };
+    top_1pct_voucher_count?: number;
+    top_1pct_amount_ratio?: number;
+  };
+  benford_first_digit?: {
+    sample_size: number;
+    observed: Record<string, number>;
+    expected: Record<string, number>;
+    deviation: Record<string, number>;
+    mean_absolute_deviation?: number;
+    top_deviation_digit?: number | null;
+    order_magnitude_count?: number;
+    applicable?: boolean;
+    conformity?: string;
+    basis?: string;
+  };
+  temporal_patterns?: {
+    monthly_count?: Record<string, number>;
+    monthly_amount?: Record<string, number>;
+    month_end_concentration?: Record<string, number>;
+    dec_vs_avg_multiplier?: number;
+  };
+  manual_entry_ratio?: {
+    manual_ratio?: number;
+    manual_voucher_ratio?: number;
+    manual_voucher_count?: number;
+  };
 };
 
 export type CrossYearFinding = {

@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, type ProjectSummary } from "@/api/client";
 
+const PROFILE_SCHEMA_VERSION = 2;
+
 function profilesNeedBuild(
   years: number[],
   profiles: Record<string, unknown> | undefined,
@@ -8,7 +10,12 @@ function profilesNeedBuild(
   if (!years.length) return false;
   const map = profiles ?? {};
   if (!Object.keys(map).length) return true;
-  return years.some((y) => !(map[String(y)] ?? map[y]));
+  return years.some((year) => {
+    const profile = (map[String(year)] ?? map[year]) as
+      | { schema_version?: number }
+      | undefined;
+    return !profile || profile.schema_version !== PROFILE_SCHEMA_VERSION;
+  });
 }
 
 /** 若 state 中尚无画像，则自动 POST 生成；否则读缓存。 */

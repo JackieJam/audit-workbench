@@ -108,6 +108,21 @@ def _suggested_followups(ctx: AuditSelection | None) -> list[str]:
     label = ctx.get("label", "当前范围")
     selector = ctx.get("selector") or {}
     if selector.get("kind") == "module_overview":
+        module = selector.get("module")
+        if module == "profile":
+            return [
+                "解释当前统计画像的异常信号",
+                "本福特偏离应该如何复核？",
+                "哪些月份存在期末集中风险？",
+                "根据金额分布建议抽样层级",
+            ]
+        if module == "cross":
+            return [
+                "概览跨年稽核发现",
+                "哪些跨年异常最值得优先复核？",
+                "解释跨年稽核的规则口径",
+                "查看跨年异常涉及的凭证",
+            ]
         return [
             f"分析「{label}」的主要风险",
             f"解释「{label}」的图表口径",

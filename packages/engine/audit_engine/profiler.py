@@ -24,14 +24,21 @@ from audit_engine.account_classifier import (
     operating_revenue_mask,
 )
 from audit_engine.analysis.income_cost import monthly_revenue_cost
+from audit_engine.analysis.statistical_profile import (
+    benford_eligible_rows,
+    first_digit,
+)
 from audit_engine.config.accounts import AUTO_VOUCHER_TYPES, classify_expense_subcategory
 from audit_engine.data_columns import analysis_quality_summary, ensure_analysis_columns
+
+PROFILE_SCHEMA_VERSION = 2
 
 # ── 主函数 ──
 
 def build_profile(df: pd.DataFrame, year: int) -> dict[str, Any]:
     """对单年 DataFrame 生成完整画像。"""
     return {
+        "schema_version": PROFILE_SCHEMA_VERSION,
         "year": year,
         "overview": _overview(df),
         "amount_distribution": _amount_distribution(df),
@@ -65,7 +72,8 @@ def _overview(df: pd.DataFrame) -> dict:
 
 def _amount_distribution(df: pd.DataFrame) -> dict:
     """金额分布：行级 + 凭证级（凭证级更有审计意义）。"""
-    amt = df["凭证货币价值"].abs().dropna()
+    work = ensure_analysis_columns(df)
+    amt = work["_amount_abs"].dropna()
     nonzero = amt[amt > 0]
 
     def _percentiles(s: pd.Series) -> dict:
@@ -84,12 +92,14 @@ def _amount_distribution(df: pd.DataFrame) -> dict:
 
     # 凭证级金额：每张凭证的借方合计（=贷方合计绝对值）
     voucher_debit = (
-        df[df["借/贷标识"] == "S"]
-        .groupby("凭证编号")["凭证货币价值"]
+        work[work["_dc"] == "S"]
+        .groupby("凭证编号")["_amount_abs"]
         .sum()
-        .abs()
     )
     voucher_nonzero = voucher_debit[voucher_debit > 0]
+    top_1pct_count = max(1, int(np.ceil(len(voucher_nonzero) * 0.01))) if len(voucher_nonzero) else 0
+    top_1pct_amount = float(voucher_nonzero.nlargest(top_1pct_count).sum()) if top_1pct_count else 0.0
+    voucher_total = float(voucher_nonzero.sum())
 
     by_type: dict[str, dict] = {}
     if "凭证类型" in df.columns:
@@ -111,32 +121,51 @@ def _amount_distribution(df: pd.DataFrame) -> dict:
         "by_voucher_type": by_type,
         "round_number_count": round_count,
         "round_number_ratio": round(round_count / len(nonzero), 4) if len(nonzero) > 0 else 0,
+        "top_1pct_voucher_count": top_1pct_count,
+        "top_1pct_amount_ratio": round(top_1pct_amount / voucher_total, 4) if voucher_total else 0,
     }
 
 
 def _benford_first_digit(df: pd.DataFrame) -> dict:
     """本福特定律首位数字分布，用于识别非自然金额模式。"""
-    amounts = pd.to_numeric(df["凭证货币价值"], errors="coerce").abs()
-    amounts = amounts.replace([np.inf, -np.inf], np.nan).dropna()
-    amounts = amounts[amounts > 0]
+    eligible = benford_eligible_rows(df)
+    amounts = eligible["_amount_abs"]
+    expected = {d: float(np.log10(1 + 1 / d)) for d in range(1, 10)}
     if amounts.empty:
         return {
             "sample_size": 0,
             "observed": {},
-            "expected": {d: round(float(np.log10(1 + 1 / d)), 4) for d in range(1, 10)},
+            "expected": {d: round(value, 4) for d, value in expected.items()},
             "deviation": {},
             "total_variation_distance": 0,
+            "mean_absolute_deviation": 0,
             "chi_square": 0,
             "top_deviation_digit": None,
+            "order_magnitude_count": 0,
+            "applicable": False,
+            "conformity": "样本不足",
+            "basis": "借方分录绝对额 ≥ 10",
         }
 
-    first_digits = np.floor(amounts / (10 ** np.floor(np.log10(amounts)))).astype(int)
+    first_digits = first_digit(amounts).dropna().astype(int)
     first_digits = first_digits[(first_digits >= 1) & (first_digits <= 9)]
     counts = first_digits.value_counts().sort_index()
     sample_size = int(counts.sum())
-    expected = {d: float(np.log10(1 + 1 / d)) for d in range(1, 10)}
     observed = {d: round(float(counts.get(d, 0) / sample_size), 4) for d in range(1, 10)} if sample_size else {}
     deviation = {d: round(observed.get(d, 0) - expected[d], 4) for d in range(1, 10)}
+    mad = float(sum(abs(value) for value in deviation.values()) / 9)
+    magnitude_count = int(np.floor(np.log10(amounts)).nunique())
+    applicable = sample_size >= 100 and magnitude_count >= 3
+    if not applicable:
+        conformity = "样本不足"
+    elif mad <= 0.006:
+        conformity = "高度符合"
+    elif mad <= 0.012:
+        conformity = "可接受"
+    elif mad <= 0.015:
+        conformity = "临界偏离"
+    else:
+        conformity = "明显偏离"
     expected_counts = {d: expected[d] * sample_size for d in range(1, 10)}
     chi_square = sum(
         ((counts.get(d, 0) - expected_counts[d]) ** 2) / expected_counts[d]
@@ -151,29 +180,36 @@ def _benford_first_digit(df: pd.DataFrame) -> dict:
         "expected": {d: round(v, 4) for d, v in expected.items()},
         "deviation": deviation,
         "total_variation_distance": round(float(0.5 * sum(abs(v) for v in deviation.values())), 4),
+        "mean_absolute_deviation": round(mad, 4),
         "chi_square": round(float(chi_square), 2),
         "top_deviation_digit": int(top_digit) if top_digit is not None else None,
+        "order_magnitude_count": magnitude_count,
+        "applicable": applicable,
+        "conformity": conformity,
+        "basis": "借方分录绝对额 ≥ 10",
     }
 
 
 def _temporal_patterns(df: pd.DataFrame) -> dict:
     """时间规律：月度、月末集中度、异常时段过账。"""
-    df = df.copy()
-    df["_month"] = df["过账日期"].dt.month
+    df = ensure_analysis_columns(df).copy()
     df["_dom"] = df["过账日期"].dt.day
     df["_dow"] = df["过账日期"].dt.dayofweek  # 0=Mon
 
-    monthly_count = df.groupby("_month").size()
-    monthly_amount = df.groupby("_month")["凭证货币价值"].apply(
-        lambda x: round(float(x.abs().sum()), 2)
+    monthly_count = df.groupby("_month")["凭证编号"].nunique()
+    monthly_amount = df[df["_dc"].eq("S")].groupby("_month")["_amount_abs"].apply(
+        lambda values: round(float(values.sum()), 2)
     )
 
-    # 月末集中度：每月最后 N 天的凭证占该月的比例
+    # 月末集中度：每月最后 5 天的凭证数占该月凭证数比例；Period 13 单独排除。
     month_end_ratios: dict[int, float] = {}
     for m, grp in df.groupby("_month"):
-        last_day = grp["过账日期"].dt.days_in_month
-        is_end = grp["过账日期"].dt.day > (last_day - 5)
-        month_end_ratios[int(m)] = round(float(is_end.sum() / len(grp)), 4) if len(grp) > 0 else 0
+        if int(m) == 13:
+            continue
+        vouchers = grp[["凭证编号", "过账日期"]].drop_duplicates("凭证编号")
+        last_day = vouchers["过账日期"].dt.days_in_month
+        is_end = vouchers["过账日期"].dt.day > (last_day - 5)
+        month_end_ratios[int(m)] = round(float(is_end.sum() / len(vouchers)), 4) if len(vouchers) > 0 else 0
 
     # 节假日/周末过账（向量化：先获取节假日集合，再用 isin 过滤）
     weekend_count = int((df["_dow"] >= 5).sum())
@@ -197,7 +233,7 @@ def _temporal_patterns(df: pd.DataFrame) -> dict:
 
     # 12月 vs 前11月均值（年末突击指标）
     dec_count = int(monthly_count.get(12, 0))
-    other_months = [int(v) for k, v in monthly_count.items() if k != 12]
+    other_months = [int(v) for k, v in monthly_count.items() if k not in (12, 13)]
     avg_other = sum(other_months) / len(other_months) if other_months else 0
 
     return {
