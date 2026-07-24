@@ -61,6 +61,10 @@ export function WorkspaceProvider({
           pinSelection(act.context);
         } else if (act.type === "invalidate_queries") {
           queryClient.invalidateQueries({ queryKey: act.queryKey });
+        } else if (act.type === "invalidate_project_analysis") {
+          queryClient.invalidateQueries({
+            predicate: (query) => query.queryKey.includes(act.project_id),
+          });
         }
       }
     },

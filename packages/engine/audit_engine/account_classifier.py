@@ -123,6 +123,7 @@ _PNL_EXCLUSIONS: tuple[str, ...] = (
     "制造费用",
     "营业外收入",
     "营业外支出",
+    "投资收益",
     "合同履约成本",
     "合同取得成本",
     "劳务成本",
@@ -228,6 +229,19 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
     if current_category != CAT_UNCATEGORIZED:
         return current_category
     return _PREFIX_CATEGORY_EXACT4.get(acct4, current_category)
+
+
+def uncategorized_reason(account_code: object, account_name: object) -> str:
+    """解释科目为何仍为未分类，供数据质量复核使用。"""
+    code = _as_text(account_code)
+    name = _as_text(account_name)
+    if not code and not name:
+        return "missing_identity"
+    if code[:4] in _PREFIX_FORCE_UNCATEGORIZED:
+        return "intentional_exclusion"
+    if any(marker in name for marker in _PNL_EXCLUSIONS):
+        return "intentional_exclusion"
+    return "needs_mapping"
 
 
 # 毛利成本口径排除：这些科目进存货/在产品，结转销售时才进 6401/6402。

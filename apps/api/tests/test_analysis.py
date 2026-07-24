@@ -102,6 +102,51 @@ def test_income_cost_analysis_api(tmp_path, monkeypatch) -> None:
     assert deleted.status_code == 200
     assert client.get(f"/projects/{pid}/candidates").json()["stats"]["groups"] == 0
 
+    quality = client.get(f"/projects/{pid}/analysis/quality")
+    assert quality.status_code == 200
+    assert "classification_revision" in quality.json()
+    assert "allowed_categories" in quality.json()
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+
+def test_quality_decision_api_rebuilds_classification(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+    store = get_store()
+    manifest = store.create_project("口径决策 API")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1"],
+        "过账日期": pd.to_datetime(["2024-01-01"]),
+        "借/贷标识": ["S"],
+        "凭证货币价值": [100.0],
+        "总账科目": ["999901"],
+        "总账科目：短文本": ["待分类"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    response = client.post(
+        f"/projects/{pid}/analysis/quality/decisions",
+        json={
+            "decisions": [{
+                "account_code": "999901",
+                "account_name": "待分类",
+                "decision": "map",
+                "category": "费用",
+                "rationale": "测试确认",
+            }],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recalculation"]["applied_count"] == 1
+    assert payload["years"]["2024"]["review_required_amount"] == 0
+    assert store.get_work_df(pid, 2024)["_acct_category"].eq("费用").all()
     get_store.cache_clear()
     get_pipeline.cache_clear()
 

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
-from audit_engine.account_classifier import apply_prefix_category, auto_classify, classify_dataframe
+from audit_engine.account_classifier import (
+    apply_prefix_category,
+    auto_classify,
+    classify_dataframe,
+    uncategorized_reason,
+)
 
 AMOUNT_MODE_SIGNED = "signed_raw"
 AMOUNT_MODE_DC_MULTIPLIER = "dc_multiplier"
@@ -267,12 +274,79 @@ def ensure_analysis_columns(
     return add_analysis_columns(work, category_overrides=category_overrides)
 
 
-def analysis_quality_summary(work: pd.DataFrame) -> dict[str, object]:
+QUALITY_REASON_LABELS = {
+    "needs_mapping": "待补充分类",
+    "missing_identity": "缺少科目身份",
+    "intentional_exclusion": "系统口径排除",
+    "confirmed_exclusion": "用户确认排除",
+    "deferred": "暂缓决策",
+}
+
+
+def analysis_quality_summary(
+    work: pd.DataFrame,
+    *,
+    classification_decisions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, object]:
     """返回会影响图表可信度的核心数据质量指标。"""
     work = ensure_analysis_columns(work)
     total_amount = float(work["_amount_abs"].sum())
-    unclassified_amount = float(
-        work.loc[work["_acct_category"].eq("未分类"), "_amount_abs"].sum()
+    decisions = classification_decisions or {}
+    unclassified = work.loc[work["_acct_category"].eq("未分类")].copy()
+    review_accounts: list[dict[str, object]] = []
+    reason_totals: dict[str, dict[str, float | int | str]] = {
+        key: {"label": label, "amount": 0.0, "row_count": 0, "account_count": 0}
+        for key, label in QUALITY_REASON_LABELS.items()
+    }
+    if not unclassified.empty:
+        grouped = (
+            unclassified.groupby(["_acct", "_account_name"], dropna=False)
+            .agg(amount=("_amount_abs", "sum"), row_count=("_acct", "size"))
+            .reset_index()
+            .sort_values("amount", ascending=False)
+        )
+        for _, row in grouped.iterrows():
+            code = str(row["_acct"]).strip()
+            name = str(row["_account_name"]).strip()
+            decision = decisions.get(code) if isinstance(decisions.get(code), dict) else {}
+            decision_kind = str((decision or {}).get("decision") or "")
+            if decision_kind == "exclude":
+                reason = "confirmed_exclusion"
+            elif decision_kind == "defer":
+                reason = "deferred"
+            else:
+                reason = uncategorized_reason(code, name)
+            amount = float(row["amount"])
+            row_count = int(row["row_count"])
+            reason_totals[reason]["amount"] = float(reason_totals[reason]["amount"]) + amount
+            reason_totals[reason]["row_count"] = int(reason_totals[reason]["row_count"]) + row_count
+            reason_totals[reason]["account_count"] = int(reason_totals[reason]["account_count"]) + 1
+            review_accounts.append({
+                "account_code": code,
+                "account_name": name,
+                "amount": amount,
+                "amount_ratio": amount / total_amount if total_amount else 0.0,
+                "row_count": row_count,
+                "reason": reason,
+                "reason_label": QUALITY_REASON_LABELS[reason],
+                "mapping_allowed": reason not in {"intentional_exclusion", "confirmed_exclusion"},
+                "decision": decision_kind or None,
+                "decision_category": (decision or {}).get("category"),
+                "rationale": str((decision or {}).get("rationale") or ""),
+            })
+    for summary in reason_totals.values():
+        summary["amount_ratio"] = (
+            float(summary["amount"]) / total_amount if total_amount else 0.0
+        )
+
+    unclassified_amount = float(unclassified["_amount_abs"].sum()) if not unclassified.empty else 0.0
+    review_required_amount = sum(
+        float(reason_totals[key]["amount"])
+        for key in ("needs_mapping", "missing_identity", "deferred")
+    )
+    excluded_amount = sum(
+        float(reason_totals[key]["amount"])
+        for key in ("intentional_exclusion", "confirmed_exclusion")
     )
     currencies = sorted({
         str(value)
@@ -287,6 +361,13 @@ def analysis_quality_summary(work: pd.DataFrame) -> dict[str, object]:
         "currency_basis": currency_basis,
         "currencies": currencies,
         "mixed_document_currency": currency_basis == "document" and len(currencies) > 1,
+        "total_absolute_entry_amount": total_amount,
         "unclassified_amount": unclassified_amount,
         "unclassified_amount_ratio": unclassified_amount / total_amount if total_amount else 0.0,
+        "review_required_amount": review_required_amount,
+        "review_required_amount_ratio": review_required_amount / total_amount if total_amount else 0.0,
+        "excluded_amount": excluded_amount,
+        "excluded_amount_ratio": excluded_amount / total_amount if total_amount else 0.0,
+        "reason_breakdown": reason_totals,
+        "review_accounts": review_accounts,
     }

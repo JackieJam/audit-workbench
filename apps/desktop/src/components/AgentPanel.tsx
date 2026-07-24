@@ -14,6 +14,11 @@ type ChatMessage = {
 
 const TOOL_LABELS: Record<string, string> = {
   get_project_overview: "项目概览",
+  query_journal: "序时账查询",
+  get_data_quality_review: "数据质量复核",
+  apply_classification_decisions: "应用分类决策",
+  get_evidence_inventory: "证据来源清单",
+  get_audit_case_summary: "审计事项摘要",
   get_rules_catalog: "规则目录",
   update_rule: "更新规则",
   toggle_rule: "启停规则",
@@ -180,7 +185,7 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
             </button>
           ) : null}
         </div>
-        <p className="muted">基于当前序时账与左侧选中范围 · 可对话打开左侧分析模块</p>
+        <p className="muted">中枢 Agent · 可查询序时账、解释画像、复核口径并编排疑点与抽样</p>
         {selectedProfile && (
           <p className="muted llm-active-chip">
             {selectedProfile.profile_name} · {selectedProfile.model}
@@ -202,7 +207,7 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
       <div className="agent-messages">
         {localMessages.length === 0 && (
           <p className="muted">
-            可从各分析模块点「AI 风险分析」，或直接提问：项目概览、规则改参、生成样本、跨年稽核…
+            可直接问具体科目、月份、客户、供应商或凭证，也可要求检查数据质量、证据缺口和疑点事项。
           </p>
         )}
         {localMessages.map((m, i) => (

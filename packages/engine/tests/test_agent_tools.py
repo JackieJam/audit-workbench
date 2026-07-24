@@ -36,6 +36,72 @@ def test_get_project_overview_tool(tmp_path, monkeypatch):
     assert out["total_rows"] == 2
 
 
+def test_query_journal_is_filtered_bounded_and_traceable(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store)
+
+    out = execute_tool(
+        store,
+        pid,
+        "query_journal",
+        {
+            "years": [2024],
+            "text_contains": "收入",
+            "group_by": "account",
+            "sample_limit": 5,
+        },
+    )
+
+    assert out["metrics"]["row_count"] == 1
+    assert out["metrics"]["voucher_count"] == 1
+    assert len(out["groups"]) == 1
+    assert len(out["sample_rows"]) == 1
+    assert out["provenance"]["data_version"]
+    assert out["provenance"]["classification_revision"]
+    assert out["provenance"]["query_spec"]["text_contains"] == "收入"
+
+
+def test_data_quality_review_separates_intentional_exclusions(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    manifest = store.create_project("质量复核")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1", "2", "3"],
+        "过账日期": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+        "借/贷标识": ["S", "S", "H"],
+        "凭证货币价值": [100.0, 200.0, 300.0],
+        "总账科目": ["500101", "999901", "611101"],
+        "总账科目：短文本": ["生产成本", "神秘科目", "投资收益"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    out = execute_tool(store, pid, "get_data_quality_review", {})
+    year = out["years"]["2024"]
+    reasons = {item["account_code"]: item["reason"] for item in year["review_accounts"]}
+    assert reasons["500101"] == "intentional_exclusion"
+    assert reasons["999901"] == "needs_mapping"
+    assert reasons["611101"] == "intentional_exclusion"
+    assert year["review_required_amount"] == 200.0
+    assert year["excluded_amount"] == 400.0
+
+
+def test_agent_classification_decision_tool_returns_invalidation(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store)
+    out = execute_tool(
+        store,
+        pid,
+        "apply_classification_decisions",
+        {"decisions": [{"account_code": "660201", "decision": "map", "category": "研发费用"}]},
+    )
+    assert out["ok"] is True
+    assert any(action["type"] == "invalidate_project_analysis" for action in out["ui_actions"])
+    assert store.load_state(pid)["account_category_overrides"]["660201"] == "研发费用"
+
+
 def test_get_rules_catalog_and_update_rule(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
     store = ProjectStore(root=tmp_path)

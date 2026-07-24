@@ -8,6 +8,7 @@ import { AnalysisProgressBar } from "@/components/AnalysisProgressBar";
 import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { BalanceSheetPanel } from "@/components/BalanceSheetPanel";
 import { CrossYearPanel } from "@/components/CrossYearPanel";
+import { DataQualityReview } from "@/components/DataQualityReview";
 import { ExpensePanel } from "@/components/ExpensePanel";
 import { IncomeCostPanel } from "@/components/IncomeCostPanel";
 import { OtherPnlPanel } from "@/components/OtherPnlPanel";
@@ -44,10 +45,10 @@ export function FinancePage({ project }: Props) {
   });
   const qualityWarnings = Object.entries(quality.data?.years ?? {}).flatMap(([year, item]) => {
     const warnings: { key: string; text: string }[] = [];
-    if (item.unclassified_amount_ratio > 0.05) {
+    if (item.review_required_amount_ratio > 0.05) {
       warnings.push({
         key: `${year}-unclassified`,
-        text: `${year}年未分类金额占比 ${(item.unclassified_amount_ratio * 100).toFixed(1)}%`,
+        text: `${year}年待决策金额占比 ${(item.review_required_amount_ratio * 100).toFixed(1)}%`,
       });
     }
     if (item.amount_sign_confidence < 0.2) {
@@ -61,6 +62,9 @@ export function FinancePage({ project }: Props) {
   const mixedCurrencyBlocked = Object.values(quality.data?.years ?? {}).some(
     (item) => item.mixed_document_currency,
   );
+  const hasQualityReview = Object.values(quality.data?.years ?? {}).some(
+    (item) => item.unclassified_amount > 0,
+  ) || Boolean(quality.data?.classification_decisions?.length);
 
   useEffect(() => {
     if (!project || (financeModule !== "profile" && financeModule !== "cross")) return;
@@ -102,26 +106,29 @@ export function FinancePage({ project }: Props) {
                 重试
               </button>
             </div>
-          ) : qualityWarnings.length > 0 ? (
+          ) : quality.data && (qualityWarnings.length > 0 || hasQualityReview) ? (
             <details className="data-quality-strip">
               <summary>
                 <span className="data-quality-strip__status" aria-hidden>!</span>
                 <span className="data-quality-strip__summary">
-                  <strong>数据质量需复核</strong>
-                  <span>{qualityWarnings.length} 项口径提示，图表未阻断</span>
+                  <strong>{qualityWarnings.length ? "数据质量需复核" : "数据口径已识别"}</strong>
+                  <span>
+                    {qualityWarnings.length
+                      ? `${qualityWarnings.length} 项待决策提示，图表未阻断`
+                      : "当前没有高占比待决策项"}
+                  </span>
                 </span>
                 <span className="data-quality-strip__action">查看口径</span>
               </summary>
               <div className="data-quality-strip__details">
-                <p>
-                  “未分类金额占比”按未归入财务分析类别的绝对发生额 ÷ 序时账绝对发生额计算，
-                  用于提示图表覆盖度，不代表财务报表缺失比例。
-                </p>
-                <ul>
-                  {qualityWarnings.map((warning) => (
-                    <li key={warning.key}>{warning.text}</li>
-                  ))}
-                </ul>
+                {qualityWarnings.length ? (
+                  <ul>
+                    {qualityWarnings.map((warning) => (
+                      <li key={warning.key}>{warning.text}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <DataQualityReview project={project} quality={quality.data} />
               </div>
             </details>
           ) : null}

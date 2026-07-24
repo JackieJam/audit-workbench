@@ -15,6 +15,10 @@ from audit_engine.store import ProjectStore
 
 SYSTEM_PROMPT = (
     "你是序时账审计分析专家助手。基于工具数据作答，不编造凭证与金额。"
+    "凡涉及具体金额、科目、客户、供应商、月份或凭证的问题，优先调用 query_journal，"
+    "并在答复中说明数据版本、筛选范围、命中行/凭证数与金额口径。"
+    "数据质量问题调用 get_data_quality_review；分类决策只能通过 apply_classification_decisions 并等待用户批准。"
+    "证据覆盖边界调用 get_evidence_inventory；疑点与结论的区分调用 get_audit_case_summary。"
     "用户左侧选中范围是优先分析对象。用中文简洁专业回复。"
     "能力指引："
     "1) 架构/模块 → list_analysis_modules、describe_agent_capabilities；"
@@ -40,6 +44,7 @@ MUTATING_TOOLS = {
     "toggle_rule",
     "apply_rule_tuning",
     "apply_module_insight_recommendations",
+    "apply_classification_decisions",
 }
 
 

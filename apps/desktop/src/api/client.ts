@@ -71,8 +71,57 @@ export type AnalysisQuality = {
   currency_basis: string;
   currencies: string[];
   mixed_document_currency: boolean;
+  total_absolute_entry_amount: number;
   unclassified_amount: number;
   unclassified_amount_ratio: number;
+  review_required_amount: number;
+  review_required_amount_ratio: number;
+  excluded_amount: number;
+  excluded_amount_ratio: number;
+  reason_breakdown: Record<string, {
+    label: string;
+    amount: number;
+    amount_ratio: number;
+    row_count: number;
+    account_count: number;
+  }>;
+  review_accounts: QualityReviewAccount[];
+};
+
+export type QualityReviewAccount = {
+  account_code: string;
+  account_name: string;
+  amount: number;
+  amount_ratio: number;
+  row_count: number;
+  reason: string;
+  reason_label: string;
+  mapping_allowed: boolean;
+  decision?: "exclude" | "defer" | null;
+  decision_category?: string | null;
+  rationale: string;
+};
+
+export type ClassificationDecision = {
+  account_code: string;
+  account_name?: string;
+  decision: "map" | "exclude" | "defer" | "reset";
+  category?: string | null;
+  rationale?: string;
+  decided_at?: string;
+};
+
+export type AnalysisQualityResponse = {
+  data_version: string;
+  classification_revision: string;
+  allowed_categories: string[];
+  classification_decisions: ClassificationDecision[];
+  years: Record<string, AnalysisQuality>;
+  recalculation?: {
+    applied_count: number;
+    classification_revision: string;
+    invalidated: string[];
+  };
 };
 
 export type MonthlyRow = {
@@ -125,7 +174,8 @@ export type AgentUiAction =
   | { type: "finance_module"; module: FinanceModuleId }
   | { type: "set_finance_year"; year: number }
   | { type: "pin_selection"; context: AuditSelection }
-  | { type: "invalidate_queries"; queryKey: unknown[] };
+  | { type: "invalidate_queries"; queryKey: unknown[] }
+  | { type: "invalidate_project_analysis"; project_id: string };
 
 export type AgentChatResponse = {
   reply: string;
@@ -332,8 +382,19 @@ export const api = {
   getInsightJobs: (projectId: string) =>
     request<InsightJobsResponse>(`/projects/${projectId}/analysis/modules/insight/jobs`),
   getAnalysisQuality: (projectId: string) =>
-    request<{ data_version: string; years: Record<string, AnalysisQuality> }>(
+    request<AnalysisQualityResponse>(
       `/projects/${projectId}/analysis/quality`,
+    ),
+  applyAnalysisQualityDecisions: (
+    projectId: string,
+    decisions: ClassificationDecision[],
+  ) =>
+    request<AnalysisQualityResponse>(
+      `/projects/${projectId}/analysis/quality/decisions`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decisions }),
+      },
     ),
 
   getModuleInsight: (projectId: string, moduleKey: string) =>

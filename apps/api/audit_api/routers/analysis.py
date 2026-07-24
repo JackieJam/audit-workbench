@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
+from audit_engine.account_classifier import ALL_CATEGORIES, CAT_UNCATEGORIZED
 from audit_engine.analysis.drilldown import customer_revenue_entries, monthly_income_cost_entries
 from audit_engine.analysis.income_cost import (
     customer_revenue_top,
@@ -16,6 +17,7 @@ from audit_engine.analysis.income_cost import (
 from audit_engine.data_columns import analysis_quality_summary
 from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from audit_api.deps import get_store
 
@@ -50,6 +52,38 @@ def _require_year(manifest_years: list[int], year: int) -> None:
         raise HTTPException(status_code=404, detail=f"项目中无 {year} 年序时账数据")
 
 
+class ClassificationDecision(BaseModel):
+    account_code: str = Field(..., min_length=1)
+    account_name: str = ""
+    decision: Literal["map", "exclude", "defer", "reset"]
+    category: str | None = None
+    rationale: str = Field("", max_length=500)
+
+
+class ClassificationDecisionBatch(BaseModel):
+    decisions: list[ClassificationDecision] = Field(..., min_length=1, max_length=100)
+
+
+def _quality_payload(store: ProjectStore, project_id: str) -> dict:
+    manifest = _manifest_or_404(store, project_id)
+    state = store.load_state(project_id)
+    decisions = state.get("account_classification_decisions") or {}
+    quality = {
+        str(year): analysis_quality_summary(
+            store.get_work_df(project_id, year),
+            classification_decisions=decisions if isinstance(decisions, dict) else {},
+        )
+        for year in manifest.years
+    }
+    return {
+        "data_version": store.current_data_version(project_id),
+        "classification_revision": store.current_classification_revision(project_id),
+        "allowed_categories": [category for category in ALL_CATEGORIES if category != CAT_UNCATEGORIZED],
+        "classification_decisions": list(decisions.values()) if isinstance(decisions, dict) else [],
+        "years": quality,
+    }
+
+
 @router.get("/{project_id}/analysis/modules/{module_key}/questions")
 def module_audit_questions(project_id: str, module_key: str, store: ProjectStore = Depends(get_store)) -> dict:
     try:
@@ -62,12 +96,25 @@ def module_audit_questions(project_id: str, module_key: str, store: ProjectStore
 
 @router.get("/{project_id}/analysis/quality")
 def analysis_quality(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
-    manifest = _manifest_or_404(store, project_id)
-    quality = {
-        str(year): analysis_quality_summary(store.get_work_df(project_id, year))
-        for year in manifest.years
-    }
-    return {"data_version": store.load_state(project_id).get("data_version", ""), "years": quality}
+    return _quality_payload(store, project_id)
+
+
+@router.post("/{project_id}/analysis/quality/decisions")
+def apply_analysis_quality_decisions(
+    project_id: str,
+    body: ClassificationDecisionBatch,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        result = store.apply_account_classification_decisions(
+            project_id,
+            [item.model_dump() for item in body.decisions],
+            actor="user",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**_quality_payload(store, project_id), "recalculation": result}
 
 
 @router.get("/{project_id}/analysis/income-cost/categories")

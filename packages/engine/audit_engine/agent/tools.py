@@ -7,11 +7,13 @@ from typing import Any
 
 import pandas as pd
 
+from audit_engine.account_classifier import ALL_CATEGORIES, CAT_UNCATEGORIZED
 from audit_engine.agent.audit_questions import (
     MODULE_KEY_TO_ID,
     load_module_questions,
     resolve_module_key,
 )
+from audit_engine.agent.journal_query import run_journal_query
 from audit_engine.agent.rule_memory import (
     feedback_summary,
     list_rule_feedback,
@@ -70,6 +72,11 @@ EDITABLE_RULE_KEYS = SAMPLING_RULE_KEYS + CROSS_YEAR_RULE_KEYS + ["max_sample_si
 
 TOOL_LABELS: dict[str, str] = {
     "get_project_overview": "项目概览",
+    "query_journal": "查询序时账",
+    "get_data_quality_review": "数据质量复核",
+    "apply_classification_decisions": "应用科目分类决策",
+    "get_evidence_inventory": "证据来源清单",
+    "get_audit_case_summary": "审计事项摘要",
     "query_drilldown": "钻取分录",
     "list_candidates": "疑点库列表",
     "add_to_candidate_pool": "加入疑点库",
@@ -143,6 +150,90 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_project_overview",
             "description": "获取项目年份、行数、列映射缺失、疑点库统计、财务摘要",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_journal",
+            "description": "按白名单条件查询全项目序时账，返回聚合、限量样本与可核验的数据版本/筛选口径；适合回答任意科目、摘要、客户、供应商、金额和期间问题",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "years": {"type": "array", "items": {"type": "integer"}},
+                    "months": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 13}},
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+                    "account_codes": {"type": "array", "items": {"type": "string"}},
+                    "account_name_contains": {"type": "string"},
+                    "category": {"type": "string"},
+                    "text_contains": {"type": "string"},
+                    "voucher_ids": {"type": "array", "items": {"type": "string"}},
+                    "debit_credit": {"type": "string", "enum": ["S", "H"]},
+                    "customer_contains": {"type": "string"},
+                    "supplier_contains": {"type": "string"},
+                    "min_absolute_amount": {"type": "number"},
+                    "max_absolute_amount": {"type": "number"},
+                    "group_by": {
+                        "type": "string",
+                        "enum": ["year", "month", "account", "category", "customer", "supplier", "debit_credit", "user"],
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "sample_limit": {"type": "integer", "minimum": 0, "maximum": 20},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_data_quality_review",
+            "description": "获取按年度、原因和科目拆分的数据质量复核清单，以及既有用户决策",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_classification_decisions",
+            "description": "批量应用科目归类、确认排除、暂缓或撤销决策；会使旧画像、规则命中、抽样和疑点结果失效，必须先由用户批准",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "decisions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "account_code": {"type": "string"},
+                                "account_name": {"type": "string"},
+                                "decision": {"type": "string", "enum": ["map", "exclude", "defer", "reset"]},
+                                "category": {"type": "string"},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": ["account_code", "decision"],
+                        },
+                    },
+                },
+                "required": ["decisions"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_evidence_inventory",
+            "description": "列出当前项目已接入与缺失的证据来源，明确序时账、科目余额表、财务报表、银行流水、发票合同等覆盖边界",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_audit_case_summary",
+            "description": "把疑点库按审计事项视角汇总为状态、凭证范围、来源选择器与证据缺口，避免把候选疑点直接当审计结论",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -484,6 +575,122 @@ def execute_tool(
             "financial_summary": financials_to_summary_text(financials) if financials else "",
             "financial_summary_error": fin_error,
             "data_quality": data_quality,
+            "provenance": {
+                "project_id": project_id,
+                "data_version": store.current_data_version(project_id),
+                "classification_revision": store.current_classification_revision(project_id),
+                "years": manifest.years,
+            },
+        }
+
+    if name == "query_journal":
+        return run_journal_query(store, project_id, arguments)
+
+    if name == "get_data_quality_review":
+        decisions = state.get("account_classification_decisions") or {}
+        years: dict[str, Any] = {}
+        for year in manifest.years:
+            summary = analysis_quality_summary(
+                store.get_work_df(project_id, year),
+                classification_decisions=decisions if isinstance(decisions, dict) else {},
+            )
+            summary["review_accounts"] = list(summary.get("review_accounts") or [])[:20]
+            years[str(year)] = summary
+        return {
+            "data_version": store.current_data_version(project_id),
+            "classification_revision": store.current_classification_revision(project_id),
+            "allowed_categories": [
+                category for category in ALL_CATEGORIES if category != CAT_UNCATEGORIZED
+            ],
+            "classification_decisions": list(decisions.values()) if isinstance(decisions, dict) else [],
+            "years": years,
+            "provenance": {
+                "denominator": "序时账逐行统一金额绝对值之和",
+                "review_required": "待补充分类 + 缺少科目身份 + 用户暂缓决策",
+                "excluded": "系统口径排除 + 用户确认排除",
+            },
+        }
+
+    if name == "apply_classification_decisions":
+        decisions = arguments.get("decisions")
+        if not isinstance(decisions, list) or not decisions:
+            return {"error": "decisions 须为非空数组"}
+        try:
+            result = store.apply_account_classification_decisions(
+                project_id,
+                [dict(item) for item in decisions if isinstance(item, dict)],
+                actor="agent-approved",
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return attach_ui_actions(
+            {"ok": True, **result},
+            [
+                {"type": "navigate_main", "tab": "finance"},
+                {"type": "invalidate_project_analysis", "project_id": project_id},
+            ],
+        )
+
+    if name == "get_evidence_inventory":
+        source_types = {source.type for source in manifest.sources}
+        expected = [
+            ("journal", "序时账", True),
+            ("trial_balance", "科目余额表", False),
+            ("financial_statement", "财务报表", False),
+            ("bank_statement", "银行流水/对账单", False),
+            ("invoice", "发票", False),
+            ("contract", "合同及订单", False),
+        ]
+        inventory = [
+            {
+                "source_type": source_type,
+                "label": label,
+                "status": "connected" if source_type in source_types else "missing",
+                "required_for_current_charts": required,
+            }
+            for source_type, label, required in expected
+        ]
+        return {
+            "sources": [source.to_dict() for source in manifest.sources],
+            "inventory": inventory,
+            "current_answer_boundary": (
+                "当前可核验回答基于序时账及其派生画像；未接入来源不能作为已取得的审计证据。"
+            ),
+            "data_version": store.current_data_version(project_id),
+        }
+
+    if name == "get_audit_case_summary":
+        pool = store.load_candidate_pool(project_id)
+        cases = [
+            {
+                "case_id": group.get("group_id"),
+                "title": group.get("title"),
+                "status": group.get("status", "候选"),
+                "source_module": group.get("source_module"),
+                "source_view": group.get("source_view"),
+                "reason": group.get("reason"),
+                "voucher_count": group.get("voucher_count"),
+                "row_count": group.get("row_count"),
+                "amount_total": group.get("amount_total"),
+                "selector": group.get("selector") or {},
+                "evidence_state": "仅序时账线索",
+                "evidence_gaps": ["管理层解释", "外部或业务单据佐证", "审计人员复核结论"],
+            }
+            for group in pool[:30]
+        ]
+        return {
+            "case_count": len(pool),
+            "stats": pool_stats(pool),
+            "cases": cases,
+            "status_definition": {
+                "候选": "自动或人工识别的待复核线索，不是审计结论",
+                "人工直入最终样本": "人工确认进入底稿抽样范围",
+                "排除": "人工判断不进入当前样本范围",
+            },
+            "provenance": {
+                "data_version": store.current_data_version(project_id),
+                "classification_revision": store.current_classification_revision(project_id),
+            },
         }
 
     if name == "query_drilldown":

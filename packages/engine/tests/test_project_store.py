@@ -108,3 +108,77 @@ def test_append_year_invalidates_derived_state_and_updates_version(store: Projec
     assert refreshed["data_version"] != first_version
     assert "profiles" not in refreshed
     assert refreshed["rules_config"] == {"max_sample_size": 20}
+
+
+def test_classification_decisions_invalidate_once_and_rebuild_work(store: ProjectStore) -> None:
+    manifest = store.create_project("分类决策")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1", "1"],
+        "过账日期": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+        "借/贷标识": ["S", "H"],
+        "凭证货币价值": [100.0, -100.0],
+        "总账科目": ["999901", "999902"],
+        "总账科目：短文本": ["待判断科目", "对方科目"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+    store.get_work_df(pid, 2024)
+    state = store.load_state(pid)
+    state["profiles"] = {"2024": {"old": True}}
+    state["candidate_pool"] = [{"group_id": "old"}]
+    store.save_state(pid, state)
+
+    result = store.apply_account_classification_decisions(
+        pid,
+        [
+            {"account_code": "999901", "decision": "map", "category": "费用"},
+            {"account_code": "999902", "decision": "defer"},
+        ],
+    )
+
+    refreshed = store.load_state(pid)
+    assert result["applied_count"] == 2
+    assert refreshed["account_category_overrides"]["999901"] == "费用"
+    assert refreshed["account_classification_decisions"]["999902"]["decision"] == "defer"
+    assert "profiles" not in refreshed
+    assert "candidate_pool" not in refreshed
+    rebuilt = store.get_work_df(pid, 2024)
+    mapped = rebuilt.loc[rebuilt["_acct"].eq("999901"), "_acct_category"]
+    assert mapped.eq("费用").all()
+
+
+def test_legacy_project_data_version_is_computed_from_raw_files(store: ProjectStore) -> None:
+    manifest = store.create_project("旧项目")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1"],
+        "过账日期": pd.to_datetime(["2024-01-01"]),
+        "借/贷标识": ["S"],
+        "凭证货币价值": [100.0],
+    })
+    store.save_journal_year(pid, 2024, frame)
+    state = store.load_state(pid)
+    state.pop("data_version", None)
+    store.save_state(pid, state)
+
+    assert store.current_data_version(pid)
+
+
+def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: ProjectStore) -> None:
+    manifest = store.create_project("排除口径")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1"],
+        "过账日期": pd.to_datetime(["2024-01-01"]),
+        "借/贷标识": ["H"],
+        "凭证货币价值": [100.0],
+        "总账科目": ["611101"],
+        "总账科目：短文本": ["投资收益"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    with pytest.raises(ValueError, match="不能映射"):
+        store.apply_account_classification_decisions(
+            pid,
+            [{"account_code": "611101", "decision": "map", "category": "收入"}],
+        )

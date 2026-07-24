@@ -87,10 +87,144 @@ class ProjectStore:
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def current_data_version(self, project_id: str) -> str:
+        """返回可核验的数据版本；旧项目缺字段时按原始 Parquet 即时计算。"""
+        cached = str(self.load_state(project_id).get("data_version") or "").strip()
+        if cached:
+            return cached
+        manifest = self.load_manifest(project_id)
+        return self._dataset_version(project_id, manifest.years) if manifest.years else ""
+
+    def current_classification_revision(self, project_id: str) -> str:
+        """返回分类口径版本；无人工决策也提供稳定基线指纹。"""
+        state = self.load_state(project_id)
+        cached = str(state.get("classification_revision") or "").strip()
+        if cached:
+            return cached
+        payload = {
+            "decisions": state.get("account_classification_decisions") or {},
+            "overrides": state.get("account_category_overrides") or {},
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
     def save_state(self, project_id: str, state: dict[str, Any]) -> None:
         pdir = self.project_dir(project_id)
         with file_lock(pdir / ".state.lock"):
             self._write_state(pdir, state)
+
+    def apply_account_classification_decisions(
+        self,
+        project_id: str,
+        decisions: list[dict[str, Any]],
+        *,
+        actor: str = "user",
+    ) -> dict[str, Any]:
+        """批量保存科目分类决策，并一次性失效所有受影响分析结果。"""
+        from audit_engine.account_classifier import (
+            ALL_CATEGORIES,
+            CAT_UNCATEGORIZED,
+            uncategorized_reason,
+        )
+
+        if not decisions:
+            raise ValueError("至少需要一项分类决策")
+        state = self.load_state(project_id)
+        stored = dict(state.get("account_classification_decisions") or {})
+        overrides = dict(state.get("account_category_overrides") or {})
+        now = datetime.now(UTC).isoformat()
+        applied: list[dict[str, Any]] = []
+        requested_codes = {
+            str(item.get("account_code") or "").strip()
+            for item in decisions
+            if str(item.get("account_code") or "").strip()
+        }
+        actual_names: dict[str, str] = {}
+        for year in self.load_manifest(project_id).years:
+            work = self.get_work_df(project_id, year)
+            if work.empty:
+                continue
+            matched = work.loc[work["_acct"].isin(requested_codes), ["_acct", "_account_name"]]
+            for code, names in matched.groupby("_acct")["_account_name"]:
+                actual_names[str(code)] = next(
+                    (str(name).strip() for name in names if str(name).strip()),
+                    "",
+                )
+        for item in decisions:
+            code = str(item.get("account_code") or "").strip()
+            decision = str(item.get("decision") or "").strip()
+            category = str(item.get("category") or "").strip()
+            if not code:
+                raise ValueError("科目编号不能为空")
+            if decision not in {"map", "exclude", "defer", "reset"}:
+                raise ValueError(f"不支持的决策类型：{decision}")
+            if decision == "map":
+                if category not in ALL_CATEGORIES or category == CAT_UNCATEGORIZED:
+                    raise ValueError(f"无效的目标分类：{category}")
+                if uncategorized_reason(code, actual_names.get(code, "")) == "intentional_exclusion":
+                    raise ValueError(f"科目 {code} 属于独立分析或系统排除口径，不能映射到通用分类")
+                overrides[code] = category
+            elif decision == "exclude":
+                overrides[code] = CAT_UNCATEGORIZED
+            else:
+                overrides.pop(code, None)
+
+            if decision == "reset":
+                stored.pop(code, None)
+                applied.append({"account_code": code, "decision": decision})
+            else:
+                record = {
+                    "account_code": code,
+                    "account_name": actual_names.get(code) or str(item.get("account_name") or "").strip(),
+                    "decision": decision,
+                    "category": category if decision == "map" else None,
+                    "rationale": str(item.get("rationale") or "").strip(),
+                    "actor": actor,
+                    "decided_at": now,
+                }
+                stored[code] = record
+                applied.append(record)
+
+        state["account_category_overrides"] = overrides
+        state["account_classification_decisions"] = stored
+        state = self._invalidate_analysis_state(
+            state,
+            now,
+            notification="科目分类口径已更新，旧分析结果已失效；系统将基于新口径重新计算。",
+        )
+        revision_seed = json.dumps(
+            {"decisions": stored, "overrides": overrides},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        state["classification_revision"] = hashlib.sha256(revision_seed.encode()).hexdigest()[:16]
+        events = list(state.get("classification_decision_events") or [])
+        events.append({
+            "at": now,
+            "actor": actor,
+            "decisions": applied,
+            "classification_revision": state["classification_revision"],
+        })
+        state["classification_decision_events"] = events[-200:]
+        self.save_state(project_id, state)
+
+        derived = self.project_dir(project_id) / "derived"
+        for path in derived.glob("work_v*.parquet"):
+            path.unlink(missing_ok=True)
+        return {
+            "applied_count": len(decisions),
+            "classification_revision": state["classification_revision"],
+            "invalidated": [
+                "profiles",
+                "financials",
+                "cross_year_findings",
+                "rule_results",
+                "samples",
+                "candidate_pool",
+                "module_insights",
+            ],
+        }
 
     def load_candidate_pool(self, project_id: str) -> list[dict[str, Any]]:
         pool = self.load_state(project_id).get("candidate_pool")
@@ -164,7 +298,12 @@ class ProjectStore:
         return manifest
 
     @staticmethod
-    def _invalidate_analysis_state(state: dict[str, Any], now: str) -> dict[str, Any]:
+    def _invalidate_analysis_state(
+        state: dict[str, Any],
+        now: str,
+        *,
+        notification: str = "项目数据已重新导入，旧分析结果与选中上下文已失效，请基于新数据重新分析。",
+    ) -> dict[str, Any]:
         """Drop every result derived from journal contents while preserving user configuration."""
         for key in (
             "profiles",
@@ -184,7 +323,7 @@ class ProjectStore:
             messages = list(thread.get("messages") or [])
             messages.append({
                 "role": "assistant",
-                "content": "项目数据已重新导入，旧分析结果与选中上下文已失效，请基于新数据重新分析。",
+                "content": notification,
                 "at": now,
             })
             thread["messages"] = messages[-40:]
