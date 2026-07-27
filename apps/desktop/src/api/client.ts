@@ -326,6 +326,9 @@ export type CrossYearFinding = {
 
 export type RuleSummary = { rule_name: string; count: number };
 
+/** 项目规则配置（与 config/default_rules.json 同构）。 */
+export type RulesConfig = Record<string, unknown>;
+
 export type SampleRow = {
   凭证编号: string;
   过账日期: string;
@@ -478,6 +481,19 @@ export const api = {
       `/projects/${projectId}/candidates/${groupId}`,
       { method: "PATCH", body: JSON.stringify({ status }) },
     ),
+  updateCandidate: (
+    projectId: string,
+    groupId: string,
+    body: { status?: string; reason?: string; tags?: string[]; title?: string },
+  ) =>
+    request<{ group: CandidateGroup; stats: CandidateStats }>(
+      `/projects/${projectId}/candidates/${groupId}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  getCandidateEntries: (projectId: string, groupId: string, limit = 200) =>
+    request<{ group_id: string; row_count: number; voucher_count: number; rows: Record<string, unknown>[] }>(
+      `/projects/${projectId}/candidates/${groupId}/entries?limit=${limit}`,
+    ),
   buildProfiles: (projectId: string) =>
     request<{ years: number[]; profiles: Record<string, YearProfile>; financials: Record<string, unknown> }>(
       `/projects/${projectId}/pipeline/profiles`,
@@ -494,6 +510,15 @@ export const api = {
     ),
   getCrossYear: (projectId: string) =>
     request<{ count: number; findings: CrossYearFinding[] }>(`/projects/${projectId}/pipeline/cross-year`),
+  getRules: (projectId: string) =>
+    request<RulesConfig>(`/projects/${projectId}/rules`),
+  putRules: (projectId: string, rules: RulesConfig) =>
+    request<RulesConfig>(`/projects/${projectId}/rules`, {
+      method: "PUT",
+      body: JSON.stringify(rules),
+    }),
+  getDefaultRules: (projectId: string) =>
+    request<RulesConfig>(`/projects/${projectId}/rules/defaults`),
   runRules: (projectId: string) =>
     request<{ rules: RuleSummary[]; total_hits: number }>(
       `/projects/${projectId}/pipeline/rules/run`,
@@ -551,6 +576,36 @@ export const api = {
     request<{ sample_rows: number; voucher_count: number; samples: SampleRow[] }>(
       `/projects/${projectId}/pipeline/samples`,
     ),
+  getVerifyStatus: (projectId: string) =>
+    request<{
+      summary: {
+        total: number;
+        confirmed: number;
+        high: number;
+        medium: number;
+        fallback: number;
+        rules: number;
+      };
+      has_judgments: boolean;
+    }>(`/projects/${projectId}/pipeline/verify`),
+  runVerify: (
+    projectId: string,
+    body?: { profile_id?: string; api_key?: string; max_verify?: number },
+  ) =>
+    request<{
+      summary: {
+        total: number;
+        confirmed: number;
+        high: number;
+        medium: number;
+        fallback: number;
+        rules: number;
+      };
+      judgments: Record<string, unknown[]>;
+    }>(`/projects/${projectId}/pipeline/verify`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
 
   expenseCrossYear: (projectId: string) =>
     request<{ years: number[]; rows: ExpenseRow[] }>(`/projects/${projectId}/analysis/expense/cross-year`),

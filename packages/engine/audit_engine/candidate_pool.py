@@ -92,11 +92,32 @@ def update_candidate_status(
     group_id: str,
     status: str,
 ) -> list[dict[str, Any]]:
+    return update_candidate_fields(pool, group_id, status=status)
+
+
+def update_candidate_fields(
+    pool: list[dict[str, Any]] | None,
+    group_id: str,
+    *,
+    status: str | None = None,
+    reason: str | None = None,
+    tags: list[str] | None = None,
+    title: str | None = None,
+) -> list[dict[str, Any]]:
+    """更新疑点组可变字段；未传入的字段保持原值。"""
     groups = list(pool or [])
     for group in groups:
-        if group.get("group_id") == group_id:
+        if group.get("group_id") != group_id:
+            continue
+        if status is not None:
             group["status"] = status
-            break
+        if reason is not None:
+            group["reason"] = reason
+        if tags is not None:
+            group["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+        if title is not None and str(title).strip():
+            group["title"] = str(title).strip()
+        break
     return groups
 
 

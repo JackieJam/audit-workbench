@@ -1208,6 +1208,97 @@ body.is-resizing-agent canvas {
   align-items: center;
 }
 
+.candidate-card.is-open {
+  border-color: var(--accent);
+}
+
+.candidate-card__toggle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1;
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.candidate-card__toggle h3 {
+  margin: 0;
+}
+
+.suspect-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.suspect-filters label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.suspect-filters select {
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.candidate-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.candidate-detail__edit {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.candidate-detail__edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.candidate-detail__wide {
+  grid-column: 1 / -1;
+}
+
+.candidate-detail__edit select,
+.candidate-detail__edit input,
+.candidate-detail__edit textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.candidate-detail__entries h4 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
 
 .module-tabs {
   display: flex;
@@ -1235,6 +1326,23 @@ body.is-resizing-agent canvas {
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.pipeline-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.pipeline-hint p {
+  margin: 0;
 }
 
 .metric-grid {
@@ -1483,6 +1591,133 @@ body.is-resizing-agent canvas {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
+}
+
+.rules-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.rules-panel__toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rules-panel__toolbar h3 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.rules-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.rules-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg);
+}
+
+.rules-card.is-disabled {
+  opacity: 0.55;
+}
+
+.rules-card--global h4 {
+  margin: 0 0 8px;
+}
+
+.rules-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.rules-card__header h4 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+}
+
+.rules-card__header p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.rules-card__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.rules-card__params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px 12px;
+}
+
+.rules-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.rules-panel__field--wide {
+  grid-column: 1 / -1;
+}
+
+.rules-panel__field input[type="number"],
+.rules-panel__field input[type="text"] {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.rules-panel__field input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.rules-card__rationale {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.rules-panel__skip {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
 }
 
 .sampling-controls a.btn-primary {

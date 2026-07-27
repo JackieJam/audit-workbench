@@ -42,3 +42,28 @@ def test_build_and_add_candidate_group() -> None:
     stats = pool_stats(pool)
     assert stats["groups"] == 1
     assert stats["active_vouchers"] == 2
+
+
+def test_update_candidate_fields() -> None:
+    from audit_engine.candidate_pool import update_candidate_fields
+
+    detail = pd.DataFrame({"凭证编号": ["A1"], "收入影响": [100.0]})
+    group = build_candidate_group(
+        title="测试组",
+        source_module="收入成本",
+        source_view="月度",
+        detail=detail,
+        selector={"year": 2024},
+        reason="旧理由",
+        tags=["旧"],
+    )
+    pool = update_candidate_fields(
+        [group],
+        group["group_id"],
+        status="排除",
+        reason="新理由",
+        tags=["a", "b"],
+    )
+    assert pool[0]["status"] == "排除"
+    assert pool[0]["reason"] == "新理由"
+    assert pool[0]["tags"] == ["a", "b"]

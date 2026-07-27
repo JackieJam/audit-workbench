@@ -84,6 +84,31 @@ def _rule_results_from_dict(data: list[dict[str, Any]]) -> list[RuleResult]:
     return results
 
 
+# 改这些键会影响跨年检测结果，保存规则时需清空已缓存 findings。
+_CROSS_YEAR_RULE_KEYS = frozenset({
+    "cross_year_accrual",
+    "cross_year_revenue",
+    "cross_year_detection",
+})
+
+
+def _cross_year_config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    for key in _CROSS_YEAR_RULE_KEYS:
+        if before.get(key) != after.get(key):
+            return True
+    return False
+
+
+def _invalidate_rule_derived_state(state: dict[str, Any], *, clear_cross_year: bool) -> dict[str, Any]:
+    """规则变更后清掉依赖规则配置的派生结果，避免界面参数与缓存结果不一致。"""
+    state["rule_results"] = []
+    state["samples"] = []
+    state["llm_judgments"] = {}
+    if clear_cross_year:
+        state["cross_year_findings"] = []
+    return state
+
+
 class AnalysisPipeline:
     def __init__(self, store: ProjectStore) -> None:
         self._store = store
@@ -94,9 +119,15 @@ class AnalysisPipeline:
 
     def save_rules(self, project_id: str, rules: dict) -> dict:
         state = self._store.load_state(project_id)
+        previous = merge_rules_config(None, state.get("rules_config"))
+        merged = merge_rules_config(None, rules)
         state["rules_config"] = rules
+        _invalidate_rule_derived_state(
+            state,
+            clear_cross_year=_cross_year_config_changed(previous, merged),
+        )
         self._store.save_state(project_id, state)
-        return rules
+        return merged
 
     def build_profiles(self, project_id: str) -> dict[int, dict]:
         manifest = self._store.load_manifest(project_id)
@@ -244,6 +275,8 @@ class AnalysisPipeline:
         }
 
     def export_excel(self, project_id: str) -> tuple[bytes, dict]:
+        from audit_engine.llm_verifier import judgments_from_state
+
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
         rules = self.load_rules(project_id)
@@ -266,9 +299,75 @@ class AnalysisPipeline:
         return generate_report_bytes(
             unified,
             rule_results,
-            llm_judgments={},
+            llm_judgments=judgments_from_state(state.get("llm_judgments")),
             max_sample_size=int(rules.get("max_sample_size", 50)),
             manual_final_samples=manual_final,
             explicit_samples=list(state.get("samples") or []) if "samples" in state else None,
             rules_config=rules,
         )
+
+    def verify_with_llm(
+        self,
+        project_id: str,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str,
+        max_verify: int = 50,
+    ) -> dict[str, Any]:
+        from audit_engine.llm_verifier import (
+            judgments_to_state,
+            summarize_judgments,
+            verify_with_llm,
+        )
+
+        manifest = self._store.load_manifest(project_id)
+        state = self._store.load_state(project_id)
+        rules = self.load_rules(project_id)
+        frames = []
+        for year in manifest.years:
+            df = self._store.get_work_df(project_id, year)
+            if not df.empty:
+                if "_year" not in df.columns:
+                    df = df.copy()
+                    df["_year"] = year
+                frames.append(df)
+        unified = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if unified.empty:
+            raise ValueError("项目无序时账数据")
+
+        rule_results = _rule_results_from_dict(state.get("rule_results") or [])
+        if not rule_results:
+            cross_raw = state.get("cross_year_findings") or []
+            cross_findings = [
+                CrossYearFinding(
+                    category=str(f.get("category", "")),
+                    description=str(f.get("description", "")),
+                    years_involved=list(f.get("years_involved", [])),
+                    voucher_ids=[str(v) for v in f.get("voucher_ids", [])],
+                    amount=float(f.get("amount", 0)),
+                    severity=str(f.get("severity", "中")),
+                    evidence=dict(f.get("evidence", {})),
+                )
+                for f in cross_raw
+            ]
+            rule_results = run_all_rules(unified, rules, cross_year_findings=cross_findings or None)
+            state["rule_results"] = _rule_results_to_dict(rule_results)
+
+        if not any(rr.hits for rr in rule_results):
+            state["llm_judgments"] = {}
+            self._store.save_state(project_id, state)
+            return {"summary": summarize_judgments({}), "judgments": {}}
+
+        judgments = verify_with_llm(
+            unified,
+            rule_results,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            max_verify=max_verify,
+        )
+        serialized = judgments_to_state(judgments)
+        state["llm_judgments"] = serialized
+        self._store.save_state(project_id, state)
+        return {"summary": summarize_judgments(judgments), "judgments": serialized}

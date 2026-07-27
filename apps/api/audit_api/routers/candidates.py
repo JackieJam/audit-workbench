@@ -4,20 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 from audit_engine.analysis.drilldown import resolve_drilldown
 from audit_engine.candidate_pool import (
     add_candidate_group,
     build_candidate_group,
     pool_stats,
     remove_candidate_group,
-    update_candidate_status,
+    update_candidate_fields,
 )
 from audit_engine.store import ProjectStore
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from audit_api.deps import get_store
-from audit_api.routers.analysis import _manifest_or_404
+from audit_api.routers.analysis import _df_records, _manifest_or_404
 
 router = APIRouter(prefix="/projects", tags=["candidates"])
 
@@ -32,8 +33,18 @@ class AddCandidateRequest(BaseModel):
     voucher_ids: list[str] | None = None
 
 
-class UpdateCandidateStatusRequest(BaseModel):
-    status: str = Field(..., pattern="^(候选|人工直入最终样本|排除)$")
+class UpdateCandidateRequest(BaseModel):
+    status: str | None = Field(None, pattern="^(候选|人工直入最终样本|排除)$")
+    reason: str | None = None
+    tags: list[str] | None = None
+    title: str | None = None
+
+
+def _find_group(pool: list[dict[str, Any]], group_id: str) -> dict[str, Any]:
+    group = next((g for g in pool if g.get("group_id") == group_id), None)
+    if group is None:
+        raise HTTPException(status_code=404, detail=f"疑点组不存在: {group_id}")
+    return group
 
 
 @router.get("/{project_id}/candidates")
@@ -95,6 +106,49 @@ def add_candidate(
     return {"group": group, "stats": pool_stats(pool)}
 
 
+@router.get("/{project_id}/candidates/{group_id}/entries")
+def get_candidate_entries(
+    project_id: str,
+    group_id: str,
+    limit: int = Query(200, ge=1, le=2000),
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    """按疑点组已锁定的 voucher_ids 回看分录明细。"""
+    manifest = _manifest_or_404(store, project_id)
+    pool = store.load_candidate_pool(project_id)
+    group = _find_group(pool, group_id)
+    vids = {str(v) for v in group.get("voucher_ids") or [] if str(v)}
+    if not vids:
+        return {"group_id": group_id, "row_count": 0, "rows": [], "voucher_count": 0}
+
+    selector = group.get("selector") or {}
+    year = selector.get("year")
+    years = [int(year)] if year is not None else list(manifest.years)
+    frames: list[pd.DataFrame] = []
+    for y in years:
+        if y not in manifest.years:
+            continue
+        work = store.get_work_df(project_id, y)
+        if work.empty or "凭证编号" not in work.columns:
+            continue
+        subset = work[work["凭证编号"].astype(str).isin(vids)].copy()
+        if not subset.empty:
+            frames.append(subset)
+
+    if not frames:
+        return {"group_id": group_id, "row_count": 0, "rows": [], "voucher_count": len(vids)}
+
+    detail = pd.concat(frames, ignore_index=True)
+    if len(detail) > limit:
+        detail = detail.head(limit)
+    return {
+        "group_id": group_id,
+        "row_count": len(detail),
+        "voucher_count": len(vids),
+        "rows": _df_records(detail),
+    }
+
+
 @router.delete("/{project_id}/candidates/{group_id}")
 def delete_candidate(
     project_id: str,
@@ -108,14 +162,25 @@ def delete_candidate(
 
 
 @router.patch("/{project_id}/candidates/{group_id}")
-def patch_candidate_status(
+def patch_candidate(
     project_id: str,
     group_id: str,
-    body: UpdateCandidateStatusRequest,
+    body: UpdateCandidateRequest,
     store: ProjectStore = Depends(get_store),
 ) -> dict:
     _manifest_or_404(store, project_id)
-    pool = update_candidate_status(store.load_candidate_pool(project_id), group_id, body.status)
+    pool = store.load_candidate_pool(project_id)
+    _find_group(pool, group_id)
+    if body.status is None and body.reason is None and body.tags is None and body.title is None:
+        raise HTTPException(status_code=400, detail="至少提供 status / reason / tags / title 之一")
+    pool = update_candidate_fields(
+        pool,
+        group_id,
+        status=body.status,
+        reason=body.reason,
+        tags=body.tags,
+        title=body.title,
+    )
     store.save_candidate_pool(project_id, pool)
     group = next((g for g in pool if g.get("group_id") == group_id), None)
     return {"group": group, "stats": pool_stats(pool)}

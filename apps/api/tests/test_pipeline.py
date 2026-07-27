@@ -121,3 +121,39 @@ def test_pipeline_profiles_rules_samples_export(tmp_path, monkeypatch) -> None:
 
     get_store.cache_clear()
     get_pipeline.cache_clear()
+
+
+def test_put_rules_invalidates_derived_results(tmp_path, monkeypatch) -> None:
+    pid = _ingest_two_years(tmp_path, monkeypatch)
+
+    assert client.post(f"/projects/{pid}/pipeline/rules/run").status_code == 200
+    assert client.post(f"/projects/{pid}/pipeline/cross-year").status_code == 200
+    assert client.post(
+        f"/projects/{pid}/pipeline/samples",
+        json={"method": "by_rule", "size": 10},
+    ).status_code == 200
+
+    before = client.get(f"/projects/{pid}/rules").json()
+    assert before["splitting"]["enabled"] is True
+    assert client.get(f"/projects/{pid}/pipeline/rules/results").json()["total_hits"] >= 0
+    assert client.get(f"/projects/{pid}/pipeline/cross-year").json()["count"] >= 0
+    assert client.get(f"/projects/{pid}/pipeline/samples").json()["sample_rows"] >= 0
+
+    before["splitting"] = {**before["splitting"], "enabled": False}
+    before["cross_year_accrual"] = {
+        **before["cross_year_accrual"],
+        "coverage_threshold": 0.55,
+    }
+    put = client.put(f"/projects/{pid}/rules", json=before)
+    assert put.status_code == 200
+    assert put.json()["splitting"]["enabled"] is False
+
+    store = get_store()
+    state = store.load_state(pid)
+    assert state.get("rule_results") == []
+    assert state.get("samples") == []
+    assert state.get("cross_year_findings") == []
+    assert state.get("llm_judgments") == {}
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()

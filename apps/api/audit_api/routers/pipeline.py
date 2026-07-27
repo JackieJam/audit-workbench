@@ -9,7 +9,7 @@ from urllib.parse import quote
 from audit_engine.pipeline import AnalysisPipeline
 from audit_engine.rules_config import default_rules_config
 from audit_engine.store import ProjectStore
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,12 @@ class SampleRequest(BaseModel):
     method: str = Field("by_rule", pattern="^(by_rule|random|all|by_account_weight|monetary_unit|stratified)$")
     size: int | None = Field(None, ge=1, le=500)
     seed: int = 42
+
+
+class VerifyRequest(BaseModel):
+    profile_id: str = ""
+    api_key: str = ""
+    max_verify: int = Field(50, ge=1, le=200)
 
 
 @router.get("/{project_id}/rules")
@@ -148,6 +154,55 @@ def get_samples(project_id: str, store: ProjectStore = Depends(get_store)) -> di
         "voucher_count": voucher_count,
         "samples": samples,
     }
+
+
+@router.get("/{project_id}/pipeline/verify")
+def get_verify_status(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
+    from audit_engine.llm_verifier import judgments_from_state, summarize_judgments
+
+    _manifest_or_404(store, project_id)
+    judgments = judgments_from_state(store.load_state(project_id).get("llm_judgments"))
+    return {"summary": summarize_judgments(judgments), "has_judgments": bool(judgments)}
+
+
+@router.post("/{project_id}/pipeline/verify")
+def run_verify(
+    project_id: str,
+    body: VerifyRequest | None = None,
+    store: ProjectStore = Depends(get_store),
+    pipeline: AnalysisPipeline = Depends(get_pipeline),
+    x_llm_api_key: str | None = Header(default=None, alias="X-LLM-Api-Key"),
+    x_llm_profile_id: str | None = Header(default=None, alias="X-LLM-Profile-Id"),
+) -> dict:
+    from audit_engine.llm_runtime import resolve_llm_runtime
+
+    manifest = _manifest_or_404(store, project_id)
+    if not manifest.years:
+        raise HTTPException(status_code=400, detail="项目无序时账数据")
+
+    req = body or VerifyRequest()
+    profile_id = (req.profile_id or x_llm_profile_id or "").strip() or None
+    api_key = (req.api_key or x_llm_api_key or "").strip() or None
+    runtime = resolve_llm_runtime(profile_id=profile_id, manual_key=api_key)
+    if not runtime.api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="未配置 LLM API Key。请在「大模型」页签保存方案并填入 Key，或设置 DEEPSEEK_API_KEY",
+        )
+
+    try:
+        result = pipeline.verify_with_llm(
+            project_id,
+            api_key=runtime.api_key,
+            model=runtime.model,
+            base_url=runtime.base_url,
+            max_verify=req.max_verify,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM 核验失败：{exc}") from exc
+    return result
 
 
 @router.get("/{project_id}/pipeline/export")

@@ -63,7 +63,7 @@ packages/engine  audit_engine（无 UI 依赖）
 |------|------|
 | M0 | Monorepo、ProjectStore、/health、/projects、React 三页壳（完成） |
 | M1 | ingest + 收入成本模块完整交互（完成） |
-| **M2（当前）** | 全模块、疑点、抽样、Agent 与财务语义加固（完成核心能力） |
+| **M2（当前）** | 可替代 Streamlit：规则 UI、疑点工作台、LLM 核验进 Excel（闭合） |
 | M3 | Tauri 打包、Key 管理 |
 
 ## 环境变量

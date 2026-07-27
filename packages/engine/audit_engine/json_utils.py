@@ -29,3 +29,17 @@ def parse_json_dict(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("LLM 返回不是 JSON 对象")
     return data
+
+
+def parse_json_list(text: str) -> list[Any]:
+    text = extract_json(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            raise ValueError(f"无法解析 JSON 数组：{text[:200]}") from None
+        data = json.loads(match.group())
+    if not isinstance(data, list):
+        raise ValueError("LLM 返回不是 JSON 数组")
+    return data

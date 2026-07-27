@@ -11,7 +11,7 @@
 apps/desktop/          React + Tauri 壳
 apps/api/audit_api/    FastAPI 路由（薄编排层）
 packages/engine/       分析内核 + ProjectStore
-config/                audit_questions、default_rules（待迁入）
+config/                audit_questions、default_rules（已接入）
 ```
 
 ## 运行
