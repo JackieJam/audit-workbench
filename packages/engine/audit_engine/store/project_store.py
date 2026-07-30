@@ -327,6 +327,9 @@ class ProjectStore:
         from audit_engine.account_classifier import (
             ALL_CATEGORIES,
             CAT_UNCATEGORIZED,
+            OTHER_PNL_CATEGORIES,
+            apply_prefix_category,
+            auto_classify,
             uncategorized_reason,
         )
 
@@ -365,6 +368,18 @@ class ProjectStore:
                 if decision == "map":
                     if category not in ALL_CATEGORIES or category == CAT_UNCATEGORIZED:
                         raise ValueError(f"无效的目标分类：{category}")
+                    automatic_category = apply_prefix_category(
+                        code,
+                        auto_classify(actual_names.get(code, "")),
+                    )
+                    if (
+                        automatic_category in OTHER_PNL_CATEGORIES
+                        and category != automatic_category
+                    ):
+                        raise ValueError(
+                            f"科目 {code} 已归入独立分类“{automatic_category}”，"
+                            "不能映射到经营收入、成本或费用口径"
+                        )
                     if (
                         uncategorized_reason(code, actual_names.get(code, ""))
                         == "intentional_exclusion"
@@ -698,8 +713,8 @@ class ProjectStore:
 
     def get_work_df(self, project_id: str, year: int) -> pd.DataFrame:
         """Load journal year and build analysis-ready work frame (cached in derived/)."""
-        # v3: 毛利成本排除生产成本；分类器变更需换文件名以失效旧缓存
-        work_version = 4
+        # v5: 投资收益和营业外收支改为独立分类；换文件名以失效旧分类缓存
+        work_version = 5
         pdir = self.project_dir(project_id)
         derived = pdir / "derived" / f"work_v{work_version}_{year}.parquet"
         journal = pdir / "raw" / "years" / f"{year}.parquet"

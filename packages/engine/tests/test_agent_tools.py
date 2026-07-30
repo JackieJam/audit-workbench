@@ -168,12 +168,24 @@ def test_data_quality_review_separates_intentional_exclusions(tmp_path, monkeypa
     manifest = store.create_project("质量复核")
     pid = manifest.project_id
     frame = pd.DataFrame({
-        "凭证编号": ["1", "2", "3"],
-        "过账日期": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
-        "借/贷标识": ["S", "S", "H"],
-        "凭证货币价值": [100.0, 200.0, 300.0],
-        "总账科目": ["500101", "999901", "611101"],
-        "总账科目：短文本": ["生产成本", "神秘科目", "投资收益"],
+        "凭证编号": ["1", "2", "3", "4", "5"],
+        "过账日期": pd.to_datetime([
+            "2024-01-01",
+            "2024-02-01",
+            "2024-03-01",
+            "2024-04-01",
+            "2024-05-01",
+        ]),
+        "借/贷标识": ["S", "S", "H", "H", "S"],
+        "凭证货币价值": [100.0, 200.0, 300.0, 400.0, 500.0],
+        "总账科目": ["500101", "999901", "611101", "630101", "671101"],
+        "总账科目：短文本": [
+            "生产成本",
+            "神秘科目",
+            "投资收益",
+            "营业外收入",
+            "营业外支出",
+        ],
     })
     store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
 
@@ -182,9 +194,10 @@ def test_data_quality_review_separates_intentional_exclusions(tmp_path, monkeypa
     reasons = {item["account_code"]: item["reason"] for item in year["review_accounts"]}
     assert reasons["500101"] == "intentional_exclusion"
     assert reasons["999901"] == "needs_mapping"
-    assert reasons["611101"] == "intentional_exclusion"
+    assert {"611101", "630101", "671101"}.isdisjoint(reasons)
     assert year["review_required_amount"] == 200.0
-    assert year["excluded_amount"] == 400.0
+    assert year["excluded_amount"] == 100.0
+    assert {"投资收益", "营业外收入", "营业外支出"}.issubset(out["allowed_categories"])
 
 
 def test_agent_classification_decision_tool_returns_invalidation(tmp_path, monkeypatch):

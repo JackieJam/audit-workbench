@@ -337,8 +337,8 @@ def test_legacy_project_data_version_is_computed_from_raw_files(store: ProjectSt
     assert store.current_data_version(pid)
 
 
-def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: ProjectStore) -> None:
-    manifest = store.create_project("排除口径")
+def test_other_pnl_category_cannot_be_remapped_into_operating_category(store: ProjectStore) -> None:
+    manifest = store.create_project("独立损益口径")
     pid = manifest.project_id
     frame = pd.DataFrame({
         "凭证编号": ["1"],
@@ -350,8 +350,28 @@ def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: Pro
     })
     store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
 
-    with pytest.raises(ValueError, match="不能映射"):
+    with pytest.raises(ValueError, match="不能映射到经营收入、成本或费用口径"):
         store.apply_account_classification_decisions(
             pid,
             [{"account_code": "611101", "decision": "map", "category": "收入"}],
+        )
+
+
+def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: ProjectStore) -> None:
+    manifest = store.create_project("排除口径")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["1"],
+        "过账日期": pd.to_datetime(["2024-01-01"]),
+        "借/贷标识": ["S"],
+        "凭证货币价值": [100.0],
+        "总账科目": ["500101"],
+        "总账科目：短文本": ["生产成本"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    with pytest.raises(ValueError, match="不能映射"):
+        store.apply_account_classification_decisions(
+            pid,
+            [{"account_code": "500101", "decision": "map", "category": "成本"}],
         )

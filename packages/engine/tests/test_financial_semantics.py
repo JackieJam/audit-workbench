@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from audit_engine.account_classifier import CAT_EMPLOYEE_PAYABLE, auto_classify
+from audit_engine.account_classifier import (
+    CAT_EMPLOYEE_PAYABLE,
+    CAT_INVESTMENT_INCOME,
+    CAT_NON_OPERATING_EXPENSE,
+    CAT_NON_OPERATING_INCOME,
+    auto_classify,
+)
 from audit_engine.analysis.adjustment import adjustment_summary
 from audit_engine.analysis.balance_sheet import category_month_entries, category_monthly_movement
 from audit_engine.analysis.drilldown import customer_revenue_entries
@@ -102,6 +108,75 @@ def test_other_pnl_chart_and_drilldown_reconcile() -> None:
     assert march["营业外支出"] == 10
     assert march["净影响"] == 60
     assert other_pnl_entries(work, month=3, metric="investment_income")["投资收益"].sum() == 50
+
+
+def test_other_pnl_has_distinct_categories_and_accepts_manual_mapping() -> None:
+    assert auto_classify("投资收益") == CAT_INVESTMENT_INCOME
+    assert auto_classify("营业外收入") == CAT_NON_OPERATING_INCOME
+    assert auto_classify("营业外支出") == CAT_NON_OPERATING_EXPENSE
+
+    raw = pd.DataFrame([
+        {
+            "凭证编号": "X1",
+            "过账日期": pd.Timestamp("2024-03-03"),
+            "过账期间": 3,
+            "借/贷标识": "S",
+            "凭证货币价值": 12,
+            "总账科目": "999901",
+            "总账科目：长文本": "特殊损失",
+        },
+    ])
+    work = add_analysis_columns(
+        raw,
+        category_overrides={"999901": CAT_NON_OPERATING_EXPENSE},
+    )
+
+    march = monthly_other_pnl(work).query("月份 == 3").iloc[0]
+    assert march["营业外支出"] == 12
+    detail = other_pnl_entries(work, month=3, metric="non_operating_expense")
+    assert detail["营业外支出"].sum() == 12
+
+
+def test_other_pnl_standard_prefixes_cannot_leak_into_operating_charts() -> None:
+    work = _work([
+        {
+            "凭证编号": "N1",
+            "过账日期": "2024-03-01",
+            "借/贷标识": "H",
+            "凭证货币价值": 20,
+            "总账科目": "630101",
+            "总账科目：长文本": "其他收入",
+        },
+        {
+            "凭证编号": "X1",
+            "过账日期": "2024-03-02",
+            "借/贷标识": "S",
+            "凭证货币价值": 10,
+            "总账科目": "671101",
+            "总账科目：长文本": "其他费用",
+        },
+        {
+            "凭证编号": "I1",
+            "过账日期": "2024-03-03",
+            "借/贷标识": "H",
+            "凭证货币价值": 30,
+            "总账科目": "611101",
+            "总账科目：长文本": "投资业务收入",
+        },
+    ])
+
+    assert work["_acct_category"].tolist() == [
+        CAT_NON_OPERATING_INCOME,
+        CAT_NON_OPERATING_EXPENSE,
+        CAT_INVESTMENT_INCOME,
+    ]
+    operating = monthly_revenue_cost(work)
+    assert operating["净收入"].sum() == 0
+    assert operating["净成本"].sum() == 0
+    march = monthly_other_pnl(work).query("月份 == 3").iloc[0]
+    assert march["营业外收入"] == 20
+    assert march["营业外支出"] == 10
+    assert march["投资收益"] == 30
 
 
 def test_multi_customer_voucher_is_not_silently_guessed() -> None:

@@ -106,6 +106,9 @@ def test_income_cost_analysis_api(tmp_path, monkeypatch) -> None:
     assert quality.status_code == 200
     assert "classification_revision" in quality.json()
     assert "allowed_categories" in quality.json()
+    assert {"投资收益", "营业外收入", "营业外支出"}.issubset(
+        quality.json()["allowed_categories"]
+    )
 
     get_store.cache_clear()
     get_pipeline.cache_clear()

@@ -28,6 +28,9 @@ CAT_EXPENSE = "费用"
 CAT_RD_EXPENSE = "研发费用"
 CAT_FINANCIAL_EXPENSE = "财务费用"
 CAT_TAX_SURCHARGE = "税金及附加"
+CAT_INVESTMENT_INCOME = "投资收益"
+CAT_NON_OPERATING_INCOME = "营业外收入"
+CAT_NON_OPERATING_EXPENSE = "营业外支出"
 CAT_AR = "应收"
 CAT_OTHER_RECEIVABLE = "其他应收"
 CAT_AP = "应付"
@@ -54,6 +57,9 @@ ALL_CATEGORIES: tuple[str, ...] = (
     CAT_RD_EXPENSE,
     CAT_FINANCIAL_EXPENSE,
     CAT_TAX_SURCHARGE,
+    CAT_INVESTMENT_INCOME,
+    CAT_NON_OPERATING_INCOME,
+    CAT_NON_OPERATING_EXPENSE,
     CAT_AR,
     CAT_OTHER_RECEIVABLE,
     CAT_AP,
@@ -71,6 +77,12 @@ ALL_CATEGORIES: tuple[str, ...] = (
     CAT_BOND_PAYABLE,
     CAT_DIVIDEND_PAYABLE,
     CAT_UNCATEGORIZED,
+)
+
+OTHER_PNL_CATEGORIES: tuple[str, ...] = (
+    CAT_INVESTMENT_INCOME,
+    CAT_NON_OPERATING_INCOME,
+    CAT_NON_OPERATING_EXPENSE,
 )
 
 # ── 资产负债页：类别 -> 大类（资产/负债/权益）──
@@ -116,14 +128,11 @@ class _Rule:
     keywords: tuple[str, ...]
 
 
-# 这些名称含「收入/成本/费用」但不应进入经营损益口径（毛利/期间费用）。
-# 命中后直接「未分类」，由 profiler 按科目前缀（5001/6301/6711 等）单独统计。
+# 这些成本、费用名称不应进入经营损益口径（毛利/期间费用）。
+# 命中后直接「未分类」，由生产/存货等专门口径处理。
 _PNL_EXCLUSIONS: tuple[str, ...] = (
     "生产成本",
     "制造费用",
-    "营业外收入",
-    "营业外支出",
-    "投资收益",
     "合同履约成本",
     "合同取得成本",
     "劳务成本",
@@ -148,6 +157,11 @@ _PREFIX_CATEGORY_EXACT4: dict[str, str] = {
     "6602": CAT_EXPENSE,
     "6603": CAT_FINANCIAL_EXPENSE,
     "6604": CAT_RD_EXPENSE,
+}
+_PREFIX_FORCE_CATEGORY_EXACT4: dict[str, str] = {
+    "6111": CAT_INVESTMENT_INCOME,
+    "6301": CAT_NON_OPERATING_INCOME,
+    "6711": CAT_NON_OPERATING_EXPENSE,
 }
 _AP_ACCRUAL_CODE_PREFIX = "220204"
 
@@ -176,6 +190,9 @@ _PRIORITY_RULES: tuple[_Rule, ...] = (
     _Rule(CAT_TAX_SURCHARGE, ("税金及附加",)),
     _Rule(CAT_RD_EXPENSE, ("研发",)),
     _Rule(CAT_FINANCIAL_EXPENSE, ("财务费用", "汇兑损益")),
+    _Rule(CAT_INVESTMENT_INCOME, ("投资收益",)),
+    _Rule(CAT_NON_OPERATING_INCOME, ("营业外收入",)),
+    _Rule(CAT_NON_OPERATING_EXPENSE, ("营业外支出",)),
     _Rule(CAT_REVENUE, ("收入",)),
     _Rule(CAT_COST, ("成本",)),
     _Rule(CAT_EXPENSE, ("费用",)),
@@ -191,7 +208,8 @@ def auto_classify(account_name: str | None) -> str:
     """按科目名称自动分类。
 
     - 名称为空、None、NaN → "未分类"
-    - 生产成本/营业外等排除项 → "未分类"（避免污染毛利与期间费用）
+    - 生产成本等排除项 → "未分类"（避免污染毛利与期间费用）
+    - 投资收益、营业外收支 → 各自独立分类（不进入经营收入/成本/费用）
     - 不命中任一关键词 → "未分类"
     """
     if account_name is None:
@@ -213,6 +231,7 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
 
     - 220204* 一律视为应付暂估（即使名称只写「应付账款」）
     - 5001/8142/8143 强制未分类（生产成本/制造费用分摊，不进毛利与期间费用）
+    - 6111/6301/6711 强制进入投资收益/营业外收支独立口径
     - 标准损益前缀仅在当前为「未分类」时补全，不覆盖名称已判定的类别
     """
     if account_code is None or (isinstance(account_code, float) and pd.isna(account_code)):
@@ -226,6 +245,8 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
     acct4 = code[:4]
     if acct4 in _PREFIX_FORCE_UNCATEGORIZED:
         return CAT_UNCATEGORIZED
+    if acct4 in _PREFIX_FORCE_CATEGORY_EXACT4:
+        return _PREFIX_FORCE_CATEGORY_EXACT4[acct4]
     if current_category != CAT_UNCATEGORIZED:
         return current_category
     return _PREFIX_CATEGORY_EXACT4.get(acct4, current_category)
@@ -303,21 +324,36 @@ def investment_income_mask(work: pd.DataFrame) -> pd.Series:
     """投资收益口径：标准前缀优先，兼容非标准科目名称。"""
     code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
     name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
-    return code4.eq("6111") | name.str.contains("投资收益", na=False)
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    return (
+        category.eq(CAT_INVESTMENT_INCOME)
+        | code4.eq("6111")
+        | name.str.contains("投资收益", na=False)
+    )
 
 
 def non_operating_income_mask(work: pd.DataFrame) -> pd.Series:
     """营业外收入口径。"""
     code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
     name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
-    return code4.eq("6301") | name.str.contains("营业外收入", na=False)
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    return (
+        category.eq(CAT_NON_OPERATING_INCOME)
+        | code4.eq("6301")
+        | name.str.contains("营业外收入", na=False)
+    )
 
 
 def non_operating_expense_mask(work: pd.DataFrame) -> pd.Series:
     """营业外支出口径。"""
     code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
     name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
-    return code4.eq("6711") | name.str.contains("营业外支出", na=False)
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    return (
+        category.eq(CAT_NON_OPERATING_EXPENSE)
+        | code4.eq("6711")
+        | name.str.contains("营业外支出", na=False)
+    )
 
 
 def classify_dataframe(
