@@ -23,6 +23,7 @@ from audit_engine.agent.rule_ops import merge_rules_from_state, patch_rule
 from audit_engine.agent.rule_tuning import apply_rule_tuning_suggestion, suggest_rule_tuning
 from audit_engine.agent.ui_actions import attach_ui_actions, finance_module, navigate_main
 from audit_engine.analysis.drilldown import resolve_drilldown
+from audit_engine.audit_case import AuditCaseService
 from audit_engine.candidate_pool import add_candidate_group, build_candidate_group, pool_stats
 from audit_engine.data_columns import analysis_quality_summary
 from audit_engine.experience.column_aliases import learned_column_aliases
@@ -78,6 +79,8 @@ TOOL_LABELS: dict[str, str] = {
     "apply_classification_decisions": "应用科目分类决策",
     "get_evidence_inventory": "证据来源清单",
     "get_audit_case_summary": "审计事项摘要",
+    "get_audit_case_detail": "审计事项详情",
+    "manage_audit_case": "推进审计事项",
     "query_drilldown": "钻取分录",
     "list_candidates": "疑点库列表",
     "add_to_candidate_pool": "加入疑点库",
@@ -121,6 +124,13 @@ def _suspects_nav_actions(project_id: str) -> list[dict[str, Any]]:
     return [
         navigate_main("suspects"),
         {"type": "invalidate_queries", "queryKey": ["candidates", project_id]},
+    ]
+
+
+def _cases_nav_actions(project_id: str) -> list[dict[str, Any]]:
+    return [
+        navigate_main("cases"),
+        {"type": "invalidate_queries", "queryKey": ["audit-cases", project_id]},
     ]
 
 
@@ -171,6 +181,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "category": {"type": "string"},
                     "text_contains": {"type": "string"},
                     "voucher_ids": {"type": "array", "items": {"type": "string"}},
+                    "voucher_keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "按公司代码+会计年度+凭证编号组成的稳定凭证键精确筛选",
+                    },
                     "debit_credit": {"type": "string", "enum": ["S", "H"]},
                     "currencies": {
                         "type": "array",
@@ -258,6 +273,69 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "get_audit_case_summary",
             "description": "把疑点库按审计事项视角汇总为状态、凭证范围、来源选择器与证据缺口，避免把候选疑点直接当审计结论",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_audit_case_detail",
+            "description": "读取单个审计事项的认定、证据、程序、结论、版本、就绪阻断项与完整性校验；任何推进操作前应先调用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string"},
+                },
+                "required": ["case_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_audit_case",
+            "description": (
+                "在用户批准后推进审计事项。action 支持 create_from_candidate、promote、"
+                "update_case、add_assertion、update_assertion、add_evidence、update_evidence、"
+                "add_procedure、update_procedure、set_conclusion、review、signoff、close。"
+                "已有案件操作必须提供 get_audit_case_detail 返回的 expected_version；"
+                "业务字段放入 payload，证据必须提供可回查 source_ref；形成结论、复核、"
+                "签署和关闭都必须由用户明确提供真实 actor，且签署 actor 必须是独立复核人"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "create_from_candidate",
+                            "promote",
+                            "update_case",
+                            "add_assertion",
+                            "update_assertion",
+                            "add_evidence",
+                            "update_evidence",
+                            "add_procedure",
+                            "update_procedure",
+                            "set_conclusion",
+                            "review",
+                            "signoff",
+                            "close",
+                        ],
+                    },
+                    "case_id": {"type": "string"},
+                    "group_id": {"type": "string"},
+                    "expected_version": {"type": "integer", "minimum": 1},
+                    "actor": {
+                        "type": "string",
+                        "description": "真实执行人；签署时必须由用户明确提供独立复核人",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "对应服务字段；例如 assertion_id/evidence_id/procedure_id、source_ref、status、summary、note",
+                    },
+                },
+                "required": ["action"],
+            },
         },
     },
     {
@@ -412,12 +490,46 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "extract_samples",
-            "description": "按规则命中或疑点库生成抽样底稿样本",
+            "description": "按版本化抽样计划，从完整总体或风险信号总体生成可重放底稿；不得把风险定向样本表述为统计代表性样本",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "method": {"type": "string", "enum": ["by_rule", "random", "all"], "description": "抽样方法"},
-                    "size": {"type": "integer", "description": "样本量上限，默认读 max_sample_size"},
+                    "plan_name": {"type": "string"},
+                    "population_scope": {
+                        "type": "string",
+                        "enum": ["full_population", "risk_signals"],
+                    },
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["risk_directed", "random", "monetary_unit", "stratified", "unpredictable"],
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["by_rule", "random", "monetary_unit", "stratified"],
+                    },
+                    "size": {"type": "integer", "minimum": 1, "maximum": 500},
+                    "seed": {"type": "integer"},
+                    "years": {"type": "array", "items": {"type": "integer"}},
+                    "coverage_constraints": {
+                        "type": "object",
+                        "properties": {
+                            "min_per_month": {"type": "integer", "minimum": 1},
+                            "min_per_account_category": {"type": "integer", "minimum": 1},
+                            "max_same_risk_signal_ratio": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 1,
+                            },
+                        },
+                    },
+                    "stratify_by": {
+                        "type": "string",
+                        "enum": ["account_category", "month", "voucher_type"],
+                    },
+                    "stratify_mode": {
+                        "type": "string",
+                        "enum": ["proportional", "equal"],
+                    },
                 },
                 "required": [],
             },
@@ -706,37 +818,256 @@ def execute_tool(
 
     if name == "get_audit_case_summary":
         pool = store.load_candidate_pool(project_id)
+        case_result = AuditCaseService(store).list_cases(project_id)
+        readiness_by_id = case_result.get("readiness") or {}
         cases = [
             {
-                "case_id": group.get("group_id"),
-                "title": group.get("title"),
-                "status": group.get("status", "候选"),
-                "source_module": group.get("source_module"),
-                "source_view": group.get("source_view"),
-                "reason": group.get("reason"),
-                "voucher_count": group.get("voucher_count"),
-                "row_count": group.get("row_count"),
-                "amount_total": group.get("amount_total"),
-                "selector": group.get("selector") or {},
-                "evidence_state": "仅序时账线索",
-                "evidence_gaps": ["管理层解释", "外部或业务单据佐证", "审计人员复核结论"],
+                "case_id": case.get("case_id"),
+                "title": case.get("title"),
+                "kind": case.get("kind"),
+                "status": case.get("status"),
+                "risk_summary": case.get("risk_summary") or case.get("risk_domain"),
+                "materiality": case.get("materiality", "unassessed"),
+                "assertion_count": len(case.get("assertions") or []),
+                "active_evidence_count": sum(
+                    1
+                    for evidence in case.get("evidence_refs") or []
+                    if evidence.get("status") in {"active", "verified"}
+                ),
+                "stale_evidence_count": sum(
+                    1
+                    for evidence in case.get("evidence_refs") or []
+                    if evidence.get("status") == "stale"
+                ),
+                "procedure_count": len(case.get("procedures") or []),
+                "has_conclusion": bool(case.get("conclusion")),
+                "source_candidate_group_id": case.get("source_candidate_group_id"),
+                "version_scope": case.get("version_scope") or {},
+                "version": case.get("version"),
+                "readiness": readiness_by_id.get(str(case.get("case_id") or "")) or {},
             }
-            for group in pool[:30]
+            for case in case_result.get("cases", [])[:30]
         ]
         return {
-            "case_count": len(pool),
-            "stats": pool_stats(pool),
+            "case_count": case_result.get("count", len(cases)),
+            "candidate_proposal_count": len(pool),
+            "candidate_stats": pool_stats(pool),
             "cases": cases,
-            "status_definition": {
-                "候选": "自动或人工识别的待复核线索，不是审计结论",
-                "人工直入最终样本": "人工确认进入底稿抽样范围",
-                "排除": "人工判断不进入当前样本范围",
-            },
-            "provenance": {
-                "data_version": store.current_data_version(project_id),
-                "classification_revision": store.current_classification_revision(project_id),
-            },
+            "current_scope": case_result.get("current_scope") or {},
+            "evidence_boundary": (
+                "候选疑点不是审计结论；仅已写入案件、绑定来源并完成程序/复核的事项可形成结论。"
+            ),
+            "next_step": (
+                "尚无正式案件，可从疑点创建案件草稿。"
+                if not cases and pool
+                else "检查过期证据、未完成程序和待复核结论。"
+            ),
         }
+
+    if name == "get_audit_case_detail":
+        case_id = str(arguments.get("case_id") or "").strip()
+        if not case_id:
+            return {"error": "case_id 不能为空"}
+        try:
+            detail = AuditCaseService(store).get_case(project_id, case_id)
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc.args[0] if isinstance(exc, KeyError) else exc)}
+        return {
+            **detail,
+            "events": AuditCaseService(store).list_events(project_id, case_id)[-30:],
+            "boundary": "完整性校验用于发现本地状态不一致；它不替代外部不可篡改存证。",
+        }
+
+    if name == "manage_audit_case":
+        action = str(arguments.get("action") or "").strip()
+        case_id = str(arguments.get("case_id") or "").strip()
+        group_id = str(arguments.get("group_id") or "").strip()
+        payload = arguments.get("payload") or {}
+        if not isinstance(payload, dict):
+            return {"error": "payload 必须是对象"}
+        expected_version = arguments.get("expected_version")
+        expected = int(expected_version) if expected_version is not None else None
+        explicit_actor = str(arguments.get("actor") or "").strip()
+        actor = explicit_actor or "agent-preparer"
+        if action in {"set_conclusion", "review", "signoff", "close"} and not explicit_actor:
+            return {
+                "error": (
+                    f"{action} 必须由用户明确提供 actor（真实姓名或工号）；"
+                    "Agent 不能代填结论编制人、复核人或归档责任人"
+                )
+            }
+        service = AuditCaseService(store)
+        try:
+            if action == "create_from_candidate":
+                if not group_id:
+                    return {"error": "create_from_candidate 需要 group_id"}
+                result = service.create_from_candidate(
+                    project_id,
+                    group_id,
+                    formal=bool(payload.get("formal")),
+                    title=str(payload.get("title") or ""),
+                    risk_statement=str(payload.get("risk_statement") or ""),
+                    financial_statement_assertions=list(
+                        payload.get("financial_statement_assertions") or []
+                    ),
+                    materiality=str(payload.get("materiality") or "unassessed"),
+                    owner=str(payload.get("owner") or ""),
+                    actor=actor,
+                    expected_version=expected,
+                )
+            else:
+                if not case_id:
+                    return {"error": f"{action or '该操作'} 需要 case_id"}
+                if expected is None:
+                    return {
+                        "error": (
+                            "已有案件操作必须提供 expected_version；"
+                            "请先调用 get_audit_case_detail 获取当前版本"
+                        )
+                    }
+                if action == "promote":
+                    result = service.promote_case(
+                        project_id,
+                        case_id,
+                        actor=actor,
+                        comment=str(payload.get("comment") or ""),
+                        expected_version=expected,
+                    )
+                elif action == "update_case":
+                    result = service.update_case(
+                        project_id,
+                        case_id,
+                        title=payload.get("title"),
+                        risk_summary=payload.get("risk_summary"),
+                        materiality=payload.get("materiality"),
+                        owner=payload.get("owner"),
+                        status=payload.get("status"),
+                        actor=actor,
+                        note=str(payload.get("note") or ""),
+                        expected_version=expected,
+                    )
+                elif action == "add_assertion":
+                    result = service.add_assertion(
+                        project_id,
+                        case_id,
+                        title=str(payload.get("title") or ""),
+                        risk_statement=str(payload.get("risk_statement") or ""),
+                        financial_statement_assertions=list(
+                            payload.get("financial_statement_assertions") or []
+                        ),
+                        affected_accounts=list(payload.get("affected_accounts") or []),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "update_assertion":
+                    result = service.update_assertion(
+                        project_id,
+                        case_id,
+                        str(payload.get("assertion_id") or ""),
+                        status=payload.get("status"),
+                        title=payload.get("title"),
+                        risk_statement=payload.get("risk_statement"),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "add_evidence":
+                    result = service.add_evidence(
+                        project_id,
+                        case_id,
+                        source_type=str(payload.get("source_type") or ""),
+                        source_ref=dict(payload.get("source_ref") or {}),
+                        description=str(payload.get("description") or ""),
+                        status=str(payload.get("status") or "active"),
+                        assertion_ids=payload.get("assertion_ids"),
+                        procedure_id=str(payload.get("procedure_id") or ""),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "update_evidence":
+                    result = service.update_evidence(
+                        project_id,
+                        case_id,
+                        str(payload.get("evidence_id") or ""),
+                        status=payload.get("status"),
+                        description=payload.get("description"),
+                        source_ref=payload.get("source_ref"),
+                        assertion_ids=payload.get("assertion_ids"),
+                        procedure_id=payload.get("procedure_id"),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "add_procedure":
+                    result = service.add_procedure(
+                        project_id,
+                        case_id,
+                        title=str(payload.get("title") or ""),
+                        description=str(payload.get("description") or ""),
+                        assertion_ids=payload.get("assertion_ids"),
+                        status=str(payload.get("status") or "planned"),
+                        result=str(payload.get("result") or ""),
+                        performed_by=str(payload.get("performed_by") or ""),
+                        performed_at=str(payload.get("performed_at") or ""),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "update_procedure":
+                    result = service.update_procedure(
+                        project_id,
+                        case_id,
+                        str(payload.get("procedure_id") or ""),
+                        title=payload.get("title"),
+                        description=payload.get("description"),
+                        assertion_ids=payload.get("assertion_ids"),
+                        status=payload.get("status"),
+                        result=payload.get("result"),
+                        performed_by=payload.get("performed_by"),
+                        performed_at=payload.get("performed_at"),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action == "set_conclusion":
+                    result = service.set_conclusion(
+                        project_id,
+                        case_id,
+                        outcome=str(payload.get("outcome") or ""),
+                        summary=str(payload.get("summary") or ""),
+                        basis_evidence_ids=payload.get("basis_evidence_ids"),
+                        procedure_ids=payload.get("procedure_ids"),
+                        unresolved_assertion_ids=payload.get(
+                            "unresolved_assertion_ids"
+                        ),
+                        override_reason=str(payload.get("override_reason") or ""),
+                        misstatement_amount=payload.get("misstatement_amount"),
+                        currency=str(payload.get("currency") or ""),
+                        actor=actor,
+                        expected_version=expected,
+                    )
+                elif action in {"review", "signoff"}:
+                    result = service.record_review(
+                        project_id,
+                        case_id,
+                        action=action,
+                        actor=actor,
+                        note=str(payload.get("note") or ""),
+                        expected_version=expected,
+                    )
+                elif action == "close":
+                    result = service.update_case(
+                        project_id,
+                        case_id,
+                        status="closed",
+                        actor=actor,
+                        note=str(payload.get("note") or ""),
+                        expected_version=expected,
+                    )
+                else:
+                    return {"error": f"不支持的审计事项操作：{action}"}
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc.args[0] if isinstance(exc, KeyError) else exc)}
+        return attach_ui_actions(
+            {"ok": True, "action": action, **result},
+            _cases_nav_actions(project_id),
+        )
 
     if name == "query_drilldown":
         selector = arguments.get("selector") or {}
@@ -938,9 +1269,31 @@ def execute_tool(
         method = str(arguments.get("method") or "by_rule")
         size = arguments.get("size")
         size_int = int(size) if size is not None else None
+        plan = {
+            key: arguments[key]
+            for key in (
+                "plan_name",
+                "population_scope",
+                "strategy",
+                "method",
+                "size",
+                "seed",
+                "years",
+                "coverage_constraints",
+                "stratify_by",
+                "stratify_mode",
+            )
+            if key in arguments and arguments[key] is not None
+        }
         pipeline = AnalysisPipeline(store)
         try:
-            out = pipeline.extract_samples(project_id, method=method, size=size_int)
+            out = pipeline.extract_samples(
+                project_id,
+                method=method,
+                size=size_int,
+                seed=int(arguments.get("seed") or 42),
+                plan=plan,
+            )
         except Exception as exc:
             return {"error": str(exc)}
         return attach_ui_actions(

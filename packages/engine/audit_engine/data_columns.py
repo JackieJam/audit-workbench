@@ -15,6 +15,288 @@ from audit_engine.account_classifier import (
 
 AMOUNT_MODE_SIGNED = "signed_raw"
 AMOUNT_MODE_DC_MULTIPLIER = "dc_multiplier"
+VOUCHER_KEY_COLUMN = "_voucher_key"
+LINE_KEY_COLUMN = "_line_key"
+
+_MISSING_COMPANY = "__NO_COMPANY__"
+_MISSING_YEAR = "__NO_YEAR__"
+
+
+def _identity_text(values: pd.Series) -> pd.Series:
+    """Normalize identifier text without turning missing values into the string ``nan``."""
+    text = values.astype("string").fillna("").str.strip()
+    text = text.mask(text.str.lower().isin({"nan", "none", "<na>", "nat"}), "")
+    return text.str.replace(r"\.0$", "", regex=True)
+
+
+def _identity_year(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Return (year, source), preferring fiscal year over derived/posting year."""
+    year = pd.Series("", index=df.index, dtype="string")
+    source = pd.Series("missing", index=df.index, dtype="string")
+
+    for column, label in (("会计年度", "fiscal_year"), ("_year", "derived_year")):
+        if column not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[column], errors="coerce").round().astype("Int64")
+        candidate = numeric.astype("string").fillna("")
+        fill = year.eq("") & candidate.ne("")
+        year.loc[fill] = candidate.loc[fill]
+        source.loc[fill] = label
+
+    if "过账日期" in df.columns:
+        posting_year = pd.to_datetime(df["过账日期"], errors="coerce").dt.year.astype("Int64")
+        candidate = posting_year.astype("string").fillna("")
+        fill = year.eq("") & candidate.ne("")
+        year.loc[fill] = candidate.loc[fill]
+        source.loc[fill] = "posting_date"
+    return year, source
+
+
+def ensure_voucher_identity(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach stable voucher and line identities.
+
+    Voucher numbers are only unique inside a company and fiscal year.  Missing
+    company code is an explicit degradation.  Missing year is more severe: the
+    key falls back to a row-scoped token so rows can never silently merge across
+    years.
+    """
+    if df.empty:
+        out = df.copy()
+        for column in (
+            VOUCHER_KEY_COLUMN,
+            LINE_KEY_COLUMN,
+            "_voucher_key_basis",
+            "_voucher_year_source",
+            "_voucher_identity_quality",
+        ):
+            if column not in out.columns:
+                out[column] = pd.Series(dtype="string")
+        return out
+
+    out = df.copy()
+    row_number = pd.Series(range(len(out)), index=out.index, dtype="int64")
+    voucher = (
+        _identity_text(out["凭证编号"])
+        if "凭证编号" in out.columns
+        else pd.Series("", index=out.index, dtype="string")
+    )
+    company = (
+        _identity_text(out["公司代码"])
+        if "公司代码" in out.columns
+        else pd.Series("", index=out.index, dtype="string")
+    )
+    year, year_source = _identity_year(out)
+
+    missing_voucher = voucher.eq("")
+    missing_year = year.eq("")
+    safe_voucher = voucher.mask(missing_voucher, "__ROW_" + row_number.astype(str))
+    safe_company = company.mask(company.eq(""), _MISSING_COMPANY)
+    # A row-scoped missing-year token deliberately prevents accidental grouping.
+    safe_year = year.mask(missing_year, _MISSING_YEAR + "_ROW_" + row_number.astype(str))
+
+    generated_key = (
+        "VK|"
+        + safe_company.str.replace("|", r"\|", regex=False)
+        + "|"
+        + safe_year.str.replace("|", r"\|", regex=False)
+        + "|"
+        + safe_voucher.str.replace("|", r"\|", regex=False)
+    )
+    if VOUCHER_KEY_COLUMN in out.columns:
+        existing = _identity_text(out[VOUCHER_KEY_COLUMN])
+        out[VOUCHER_KEY_COLUMN] = existing.where(existing.ne(""), generated_key)
+    else:
+        out[VOUCHER_KEY_COLUMN] = generated_key
+
+    basis = pd.Series("company_fiscal_year_voucher", index=out.index, dtype="string")
+    basis.loc[company.eq("")] = "fiscal_year_voucher"
+    basis.loc[year_source.eq("posting_date") & company.ne("")] = "company_posting_year_voucher"
+    basis.loc[year_source.eq("posting_date") & company.eq("")] = "posting_year_voucher"
+    basis.loc[missing_year] = "row_fallback_missing_year"
+    basis.loc[missing_voucher] = "row_fallback_missing_voucher"
+    out["_voucher_key_basis"] = basis
+    out["_voucher_year_source"] = year_source
+
+    quality = pd.Series("complete", index=out.index, dtype="string")
+    quality.loc[company.eq("")] = "missing_company"
+    quality.loc[missing_year] = "missing_year"
+    quality.loc[missing_voucher] = "missing_voucher"
+    out["_voucher_identity_quality"] = quality
+
+    signature_columns = [
+        column
+        for column in (
+            VOUCHER_KEY_COLUMN,
+            "_source_asset_id",
+            "_source_file_hash",
+            "_source_file",
+            "_source_sheet",
+            "_source_row",
+            "过账日期",
+            "凭证日期",
+            "总账科目",
+            "借/贷标识",
+            "公司代码货币价值",
+            "凭证货币价值",
+            "文本",
+            "页数",
+        )
+        if column in out.columns
+    ]
+    signature = out[signature_columns].copy()
+    for column in signature.columns:
+        signature[column] = signature[column].astype("string").fillna("")
+    row_hash = pd.util.hash_pandas_object(signature, index=False).astype("uint64")
+    hash_text = row_hash.map(lambda value: f"{int(value):016x}")
+    occurrence = (
+        pd.DataFrame({"voucher": out[VOUCHER_KEY_COLUMN], "hash": hash_text}, index=out.index)
+        .groupby(["voucher", "hash"], sort=False, dropna=False)
+        .cumcount()
+        .astype(str)
+    )
+    generated_line_key = out[VOUCHER_KEY_COLUMN] + "|L|" + hash_text + "|" + occurrence
+    if LINE_KEY_COLUMN in out.columns:
+        existing_line = _identity_text(out[LINE_KEY_COLUMN])
+        out[LINE_KEY_COLUMN] = existing_line.where(existing_line.ne(""), generated_line_key)
+    else:
+        out[LINE_KEY_COLUMN] = generated_line_key
+    return out
+
+
+def _usable_amount_column(df: pd.DataFrame) -> str | None:
+    """Choose one amount basis; never select an entirely empty placeholder column."""
+    for column in ("公司代码货币价值", "凭证货币价值"):
+        if column not in df.columns:
+            continue
+        if pd.to_numeric(df[column], errors="coerce").notna().any():
+            return column
+    return None
+
+
+def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
+    """Describe the minimum input gate for formal journal rule analysis."""
+    total = int(len(df))
+    issues: list[dict[str, Any]] = []
+    if total == 0:
+        return {"status": "blocked", "row_count": 0, "usable_rows": 0, "issues": [
+            {"code": "empty_population", "severity": "blocking", "message": "审计总体为空"},
+        ]}
+
+    voucher = (
+        _identity_text(df["凭证编号"])
+        if "凭证编号" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    year, _ = _identity_year(df)
+    posting_date = (
+        pd.to_datetime(df["过账日期"], errors="coerce")
+        if "过账日期" in df.columns
+        else pd.Series(pd.NaT, index=df.index)
+    )
+    dc = (
+        df["借/贷标识"].astype("string").fillna("").str.strip()
+        if "借/贷标识" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    amount_col = _usable_amount_column(df)
+    amount_valid = (
+        pd.to_numeric(df[amount_col], errors="coerce").notna()
+        if amount_col
+        else pd.Series(False, index=df.index)
+    )
+    masks = {
+        "voucher": voucher.ne(""),
+        "year": year.ne(""),
+        "posting_date": posting_date.notna(),
+        "dc": dc.isin(["S", "H"]),
+        "amount": amount_valid,
+        "account": (
+            _identity_text(df["总账科目"]).ne("")
+            if "总账科目" in df.columns
+            else pd.Series(False, index=df.index)
+        ),
+    }
+    labels = {
+        "voucher": ("missing_voucher_id", "凭证编号"),
+        "year": ("missing_year_source", "会计年度或可解析过账日期"),
+        "posting_date": ("missing_posting_date", "可解析过账日期"),
+        "dc": ("missing_debit_credit", "借/贷标识（S/H）"),
+        "amount": ("missing_usable_amount", "可用金额"),
+        "account": ("missing_account", "总账科目"),
+    }
+    for key, mask in masks.items():
+        missing_count = int((~mask).sum())
+        code, label = labels[key]
+        if int(mask.sum()) == 0:
+            issues.append({
+                "code": code,
+                "severity": "blocking",
+                "message": f"缺少{label}，正式规则分析已阻断",
+                "row_count": missing_count,
+            })
+        elif missing_count:
+            issues.append({
+                "code": code,
+                "severity": "warning",
+                "message": f"{missing_count} 行缺少{label}，已从正式规则总体排除",
+                "row_count": missing_count,
+            })
+
+    if "公司代码" not in df.columns or _identity_text(
+        df.get("公司代码", pd.Series("", index=df.index))
+    ).eq("").any():
+        issues.append({
+            "code": "missing_company_code",
+            "severity": "warning",
+            "message": "公司代码缺失的行使用显式占位符降级，无法区分同年度多主体同号凭证",
+        })
+
+    if amount_col == "凭证货币价值" and "凭证货币代码" in df.columns:
+        currencies = {
+            str(value).strip().upper()
+            for value in df.loc[amount_valid, "凭证货币代码"].dropna()
+            if str(value).strip() and str(value).strip().lower() not in {"nan", "none"}
+        }
+        if len(currencies) > 1:
+            issues.append({
+                "code": "mixed_document_currencies",
+                "severity": "blocking",
+                "message": f"检测到多种凭证币 {sorted(currencies)} 且未使用本位币金额，禁止合并规则分析",
+            })
+
+    usable = masks["voucher"] & masks["year"] & masks["dc"] & masks["amount"]
+    usable &= masks["posting_date"] & masks["account"]
+    blocked = any(issue["severity"] == "blocking" for issue in issues)
+    status = "blocked" if blocked else ("degraded" if issues else "ready")
+    return {
+        "status": status,
+        "row_count": total,
+        "usable_rows": int(usable.sum()),
+        "amount_column": amount_col,
+        "issues": issues,
+    }
+
+
+def prepare_rule_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Apply the formal input gate and return only auditable rows."""
+    quality = audit_input_quality(df)
+    if quality["status"] == "blocked":
+        messages = "；".join(str(item["message"]) for item in quality["issues"] if item["severity"] == "blocking")
+        raise ValueError(messages or "规则分析输入不满足最低字段门禁")
+    normalized = df.copy()
+    normalized["过账日期"] = pd.to_datetime(
+        normalized["过账日期"], errors="coerce"
+    )
+    work = ensure_analysis_columns(normalized)
+    usable = (
+        _identity_text(work["凭证编号"]).ne("")
+        & _identity_year(work)[0].ne("")
+        & pd.to_datetime(work["过账日期"], errors="coerce").notna()
+        & work["借/贷标识"].astype("string").fillna("").str.strip().isin(["S", "H"])
+        & work["_amount_available"].fillna(False).astype(bool)
+        & _identity_text(work["总账科目"]).ne("")
+    )
+    return work.loc[usable].copy(), quality
 
 
 def infer_amount_sign_mode(
@@ -104,13 +386,10 @@ def _propagate_unique_party(
 ) -> tuple[pd.Series, pd.Series]:
     """同凭证只有一个明确主体时，把主体安全地补到收入/暂估等对应行。"""
     original = display.fillna("未维护").astype(str)
-    if "凭证编号" not in df.columns:
+    if VOUCHER_KEY_COLUMN not in df.columns and "凭证编号" not in df.columns:
         return original, pd.Series("line", index=df.index)
 
-    group_cols = ["凭证编号"]
-    for col in ("公司代码", "会计年度"):
-        if col in df.columns and df[col].astype(str).str.strip().ne("").any():
-            group_cols.insert(0, col)
+    group_cols = [VOUCHER_KEY_COLUMN] if VOUCHER_KEY_COLUMN in df.columns else ["凭证编号"]
 
     valid = original.ne("未维护") & original.str.strip().ne("")
     unique_by_group = (
@@ -156,7 +435,7 @@ def add_analysis_columns(
     *,
     category_overrides: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    out = df.copy()
+    out = ensure_voucher_identity(df)
     out["_acct"] = out["总账科目"].astype(str).str.strip()
     out["_acct4"] = out["_acct"].str[:4]
     out["_month"] = out["过账日期"].dt.month
@@ -164,30 +443,39 @@ def add_analysis_columns(
         p13 = pd.to_numeric(out["过账期间"], errors="coerce").eq(13)
         out["_is_period13"] = p13
         out.loc[p13, "_month"] = 13
-    amount_col = "公司代码货币价值" if "公司代码货币价值" in out.columns else "凭证货币价值"
+    amount_col = _usable_amount_column(out)
+    if amount_col is None:
+        raise ValueError("缺少可用金额：公司代码货币价值与凭证货币价值均无有效数值")
     out["_dc"] = out["借/贷标识"].astype(str).str.strip()
-    voucher_ids = out["凭证编号"] if "凭证编号" in out.columns else None
-    amount_mode, amount_confidence = infer_amount_sign_mode(out[amount_col], out["_dc"], voucher_ids)
-    out["_amount_raw"] = normalize_signed_amount(
+    voucher_ids = out[VOUCHER_KEY_COLUMN]
+    numeric_amount = pd.to_numeric(out[amount_col], errors="coerce")
+    out["_amount_available"] = numeric_amount.notna()
+    amount_mode, amount_confidence = infer_amount_sign_mode(numeric_amount, out["_dc"], voucher_ids)
+    normalized_amount = normalize_signed_amount(
         out[amount_col],
         out["_dc"],
         voucher_ids,
         mode=amount_mode,
     )
+    out["_amount_raw"] = normalized_amount.where(out["_amount_available"])
     out["_amount_sign_mode"] = amount_mode
     out["_amount_sign_confidence"] = amount_confidence
     out["_amount_source"] = amount_col
     if amount_col == "公司代码货币价值":
         out["_currency_basis"] = "company"
+        out["_amount_basis"] = "company_currency"
         out["_amount_currency"] = _safe_text(out, "公司代码货币代码").replace("", "未维护")
     else:
         out["_currency_basis"] = "document"
+        out["_amount_basis"] = "document_currency"
         out["_amount_currency"] = _safe_text(out, "凭证货币代码").replace("", "未维护")
     out["_amount_abs"] = out["_amount_raw"].abs()
     out["_debit_amount"] = out["_amount_raw"].where(out["_dc"] == "S", 0)
     out["_credit_amount"] = out["_amount_raw"].where(out["_dc"] == "H", 0)
     out["_debit_abs"] = out["_amount_abs"].where(out["_dc"] == "S", 0)
     out["_credit_abs"] = out["_amount_abs"].where(out["_dc"] == "H", 0)
+    for column in ("_debit_amount", "_credit_amount", "_debit_abs", "_credit_abs"):
+        out[column] = out[column].where(out["_amount_available"])
     out["_pnl_effect"] = -out["_amount_raw"]
 
     account_text = _account_text_col(out)
@@ -246,6 +534,7 @@ REQUIRED_ANALYSIS_COLUMNS = {
     "_acct", "_acct4", "_acct_category", "_month", "_amount_raw", "_amount_abs", "_dc",
     "_debit_amount", "_credit_amount", "_account_name", "_pnl_category", "_customer_display",
     "_amount_source", "_amount_sign_mode", "_currency_basis", "_amount_currency", "_customer_source", "_vendor_source",
+    "_amount_basis", "_amount_available", VOUCHER_KEY_COLUMN, LINE_KEY_COLUMN,
 }
 
 

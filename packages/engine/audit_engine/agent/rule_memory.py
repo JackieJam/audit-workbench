@@ -33,8 +33,6 @@ def record_rule_feedback(
     if not rid:
         raise ValueError("rule_id 不能为空")
 
-    state = store.load_state(project_id)
-    items = list(state.get("rule_feedback") or [])
     entry = {
         "feedback_id": f"rf_{uuid.uuid4().hex[:10]}",
         "rule_id": rid,
@@ -44,9 +42,13 @@ def record_rule_feedback(
         "at": datetime.now().isoformat(timespec="seconds"),
         "source": "agent",
     }
-    items.append(entry)
-    state["rule_feedback"] = items[-200:]
-    store.save_state(project_id, state)
+
+    def update(state: dict[str, Any]) -> None:
+        items = list(state.get("rule_feedback") or [])
+        items.append(entry)
+        state["rule_feedback"] = items[-200:]
+
+    store.update_state(project_id, update)
     return entry
 
 

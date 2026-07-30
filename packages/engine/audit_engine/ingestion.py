@@ -367,8 +367,33 @@ def _read_header_only(src) -> pd.DataFrame:
 
 def _read_single_file(src, mapping: dict[str, str]) -> pd.DataFrame:
     """读取单个文件并应用列映射，返回标准化后的 DataFrame。"""
-    df = pd.read_excel(src, engine="openpyxl")
-    df = df.dropna(how="all")
+    if hasattr(src, "seek"):
+        src.seek(0)
+    try:
+        with pd.ExcelFile(src, engine="openpyxl") as workbook:
+            sheet_name = workbook.sheet_names[0]
+            df = pd.read_excel(workbook, sheet_name=sheet_name)
+    finally:
+        if hasattr(src, "seek"):
+            src.seek(0)
+
+    original_columns = list(df.columns)
+    df["_source_row"] = pd.Series(
+        range(2, len(df) + 2),
+        index=df.index,
+        dtype="Int64",
+    )
+    if original_columns:
+        df = df[df[original_columns].notna().any(axis=1)].copy()
+
+    source_asset = getattr(src, "_audit_source_asset", None)
+    source_asset = source_asset if isinstance(source_asset, dict) else {}
+    df["_source_asset_id"] = str(source_asset.get("asset_id") or "")
+    df["_source_file_hash"] = str(source_asset.get("sha256") or "")
+    df["_source_file"] = str(
+        source_asset.get("original_name") or _source_label(src)
+    )
+    df["_source_sheet"] = str(sheet_name)
 
     df = _apply_mapping(df, mapping)
 
@@ -595,13 +620,17 @@ def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     - 多文件场景下，若同一行被两个文件都包含（边界期间重叠），合并后去掉一份
     - 单文件场景下，绝对不能因为"伪相似"折叠同一凭证内的多条分录
 
-    策略：仅当**整行所有列值完全一致**时才视为重复。这是最保守的策略，
-    宁可保留少量真实重复，也不能因去重错误丢失业务数据。
+    策略：来源坐标不参与业务行相等判断；其余列完全一致时视为重复，并保留
+    第一份来源坐标。这样既延续原有财务去重语义，也不会因文件名/行号不同而
+    让重叠期间的相同行失去去重能力。
     """
     if df.empty:
         return df
     before = len(df)
-    df = df.drop_duplicates()
+    comparison_columns = [
+        column for column in df.columns if not column.startswith("_source_")
+    ]
+    df = df.drop_duplicates(subset=comparison_columns or None)
     removed = before - len(df)
     if removed > 0:
         import warnings

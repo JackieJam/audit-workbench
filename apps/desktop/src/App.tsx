@@ -4,6 +4,7 @@ import {
   ChartLineUp,
   ClipboardText,
   Detective,
+  FolderOpen,
   Moon,
   Plus,
   ShieldCheck,
@@ -16,6 +17,7 @@ import { api } from "@/api/client";
 import { UploadPanel } from "@/components/UploadPanel";
 import { FinancePage } from "@/pages/FinancePage";
 import { SuspectsPage } from "@/pages/SuspectsPage";
+import { AuditCasesPage } from "@/pages/AuditCasesPage";
 import { SamplingPage } from "@/pages/SamplingPage";
 import { AgentPanel } from "@/components/AgentPanel";
 import { EmptyState } from "@/components/EmptyState";
@@ -27,11 +29,12 @@ import { LlmSettingsPanel } from "@/components/LlmSettingsPanel";
 import { useAgentPanelWidth } from "@/hooks/useAgentPanelWidth";
 import type { ProjectSummary } from "@/api/client";
 
-type Tab = "finance" | "suspects" | "sampling" | "llm";
+type Tab = "finance" | "suspects" | "cases" | "sampling" | "llm";
 
 const TABS: { id: Tab; label: string; icon: Icon }[] = [
   { id: "finance", label: "财务画像", icon: ChartLineUp },
   { id: "suspects", label: "疑点工作台", icon: Detective },
+  { id: "cases", label: "审计事项", icon: FolderOpen },
   { id: "sampling", label: "抽样底稿", icon: ClipboardText },
   { id: "llm", label: "大模型", icon: Sparkle },
 ];
@@ -116,8 +119,15 @@ function AppWorkspace({
       pinSelection({
         label: "抽样底稿",
         source_module: "抽样底稿",
-        source_view: "规则命中、样本与导出",
+        source_view: "总体、风险信号、抽样计划与底稿",
         selector: { kind: "workspace_overview", workspace: "sampling" },
+      });
+    } else if (tab === "cases") {
+      pinSelection({
+        label: "审计事项",
+        source_module: "审计事项",
+        source_view: "认定、证据、程序、结论与状态历史",
+        selector: { kind: "workspace_overview", workspace: "cases" },
       });
     }
   }, [pinSelection, pinnedContext, selected?.project_id, tab]);
@@ -138,6 +148,7 @@ function AppWorkspace({
             <FinancePage project={selected} />
           </div>
           {tab === "suspects" && <SuspectsPage project={selected} />}
+          {tab === "cases" && <AuditCasesPage project={selected} />}
           {tab === "sampling" && <SamplingPage project={selected} />}
         </main>
         {!collapsed ? (

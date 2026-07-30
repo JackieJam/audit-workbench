@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from audit_engine.data_columns import LINE_KEY_COLUMN, VOUCHER_KEY_COLUMN
 from audit_engine.store import ProjectStore
 
 GROUP_FIELDS = {
@@ -98,6 +99,13 @@ def run_journal_query(
     voucher_ids = {str(value).strip() for value in arguments.get("voucher_ids") or [] if str(value).strip()}
     if voucher_ids:
         source = source[source.get("凭证编号", "").astype(str).isin(voucher_ids)]
+    voucher_keys = {
+        str(value).strip()
+        for value in arguments.get("voucher_keys") or []
+        if str(value).strip()
+    }
+    if voucher_keys:
+        source = source[source[VOUCHER_KEY_COLUMN].astype(str).isin(voucher_keys)]
 
     source = source[_contains(source["_account_name"], arguments.get("account_name_contains"))]
     source = source[_contains(source["_combined_text"], arguments.get("text_contains"))]
@@ -141,7 +149,10 @@ def run_journal_query(
         source = source[source["_amount_abs"] <= float(max_amount)]
 
     matched_rows = int(len(source))
-    voucher_series = source.get("凭证编号", pd.Series("", index=source.index)).fillna("").astype(str)
+    voucher_series = source.get(
+        VOUCHER_KEY_COLUMN,
+        source.get("凭证编号", pd.Series("", index=source.index)),
+    ).fillna("").astype(str)
     matched_currencies = sorted({
         str(value).strip()
         for value in source.get("_amount_currency", pd.Series("", index=source.index)).dropna().astype(str)
@@ -171,7 +182,7 @@ def run_journal_query(
             .groupby("_group", dropna=False)
             .agg(
                 row_count=("_amount_abs", "size"),
-                voucher_count=("凭证编号", "nunique"),
+                voucher_count=(VOUCHER_KEY_COLUMN, "nunique"),
                 absolute_entry_amount=("_amount_abs", "sum"),
                 normalized_signed_amount=("_amount_raw", "sum"),
                 debit_absolute_amount=("_debit_abs", "sum"),
@@ -187,6 +198,8 @@ def run_journal_query(
     sample_limit = max(0, min(int(arguments.get("sample_limit") or 10), 20))
     sample_columns = [
         "_query_year",
+        VOUCHER_KEY_COLUMN,
+        LINE_KEY_COLUMN,
         "凭证编号",
         "过账日期",
         "行项目",
@@ -200,6 +213,11 @@ def run_journal_query(
         "_customer_display",
         "_vendor_display",
         "_combined_text",
+        "_source_asset_id",
+        "_source_file_hash",
+        "_source_file",
+        "_source_sheet",
+        "_source_row",
     ]
     sample_columns = [column for column in sample_columns if column in source.columns]
     sample = source.sort_values("_amount_abs", ascending=False)[sample_columns].rename(columns={
@@ -212,6 +230,13 @@ def run_journal_query(
         "_customer_display": "客户",
         "_vendor_display": "供应商",
         "_combined_text": "摘要",
+        VOUCHER_KEY_COLUMN: "凭证键",
+        LINE_KEY_COLUMN: "行键",
+        "_source_asset_id": "来源资产ID",
+        "_source_file_hash": "来源文件哈希",
+        "_source_file": "来源文件",
+        "_source_sheet": "工作表",
+        "_source_row": "原始行号",
     })
 
     query_spec = {
@@ -236,7 +261,7 @@ def run_journal_query(
             "metric_definitions": {
                 "absolute_entry_amount": "逐行统一金额绝对值之和；同一凭证借贷两侧均计入",
                 "normalized_signed_amount": "结合金额正负与借贷标识识别后的方向金额之和",
-                "voucher_count": "匹配范围内非空凭证编号去重数",
+                "voucher_count": "按公司代码、会计年度、凭证编号组成的稳定凭证键去重数",
                 "currency_safety": (
                     "金额指标仅在单一币种内可加总；多币种查询仅返回各币种分组金额，"
                     "总体金额字段为空，不执行隐式汇率折算"

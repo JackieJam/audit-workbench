@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from audit_engine.data_columns import VOUCHER_KEY_COLUMN, ensure_voucher_identity
 from audit_engine.rule_engine import RuleHit, RuleResult
 
 HEADER_FONT = Font(bold=True, size=10, color="FFFFFF")
@@ -82,17 +83,14 @@ def generate_report(
     from audit_engine.routine_filter import prioritize_voucher_ids_for_export
 
     # ── 构建凭证维度的合并视图 ──
+    work = ensure_voucher_identity(df)
     judgment_lookup = _build_judgment_lookup(llm_judgments)
-    hit_lookup = _build_hit_lookup(rule_results)
+    hit_lookup = _build_hit_lookup(rule_results, work)
     hit_vids = set(hit_lookup.keys())
 
     if explicit_samples is not None:
         confirmed_vids = prioritize_voucher_ids_for_export(
-            [
-                str(sample.get("凭证编号", "")).strip()
-                for sample in explicit_samples
-                if str(sample.get("凭证编号", "")).strip()
-            ],
+            _sample_identity_tokens(explicit_samples, work),
             hit_voucher_ids=hit_vids,
             max_size=max_sample_size,
         )
@@ -104,12 +102,12 @@ def generate_report(
             reverse=True,
         )
         confirmed_vids = []
-        for vid in confirmed_primary_vids:
-            sample_vids = [vid]
-            for hit in hit_lookup.get(vid, []):
-                sample_vids.extend(_hit_voucher_ids(hit))
-            for sample_vid in sample_vids:
-                sample_vid = str(sample_vid)
+        for display_id in confirmed_primary_vids:
+            sample_vids = _resolve_display_keys(work, display_id)
+            for primary_key in list(sample_vids):
+                for hit in hit_lookup.get(primary_key, []):
+                    sample_vids.extend(_hit_voucher_keys(hit, work))
+            for sample_vid in dict.fromkeys(sample_vids):
                 if sample_vid and sample_vid not in confirmed_vids:
                     confirmed_vids.append(sample_vid)
                 if len(confirmed_vids) >= max_sample_size:
@@ -121,7 +119,7 @@ def generate_report(
         voucher_priority: dict[str, int] = {}
         for rr in rule_results:
             for hit in rr.hits:
-                for vid in _hit_voucher_ids(hit):
+                for vid in _hit_voucher_keys(hit, work):
                     voucher_priority[vid] = max(voucher_priority.get(vid, 0), hit.priority)
         confirmed_vids = sorted(
             voucher_priority.keys(),
@@ -131,10 +129,10 @@ def generate_report(
 
     wb = Workbook()
     _write_sample_sheet(
-        wb, df, confirmed_vids, hit_lookup, judgment_lookup, rules_config=rules_config,
+        wb, work, confirmed_vids, hit_lookup, judgment_lookup, rules_config=rules_config,
     )
     if manual_final_samples:
-        _write_manual_final_sheet(wb, df, manual_final_samples)
+        _write_manual_final_sheet(wb, work, manual_final_samples)
     _write_stats_sheet(wb, rule_results, llm_judgments)
     _write_rules_sheet(wb, rule_results)
 
@@ -144,7 +142,7 @@ def generate_report(
         vid
         for rr in rule_results
         for h in rr.hits
-        for vid in _hit_voucher_ids(h)
+        for vid in _hit_voucher_keys(h, work)
     })
     return {
         "output_path": output_path,
@@ -157,7 +155,7 @@ def generate_report(
         "manual_final_vouchers": len({
             str(vid)
             for group in manual_final_samples or []
-            for vid in group.get("voucher_ids", [])
+            for vid in (group.get("voucher_keys") or group.get("voucher_ids", []))
         }),
     }
 
@@ -175,19 +173,101 @@ def _build_judgment_lookup(llm_judgments: dict) -> dict[str, Any]:
     return lookup
 
 
-def _build_hit_lookup(rule_results: list[RuleResult]) -> dict[str, list[RuleHit]]:
+def _resolve_display_keys(
+    df: pd.DataFrame,
+    voucher_id: object,
+    *,
+    year: object = None,
+    company: object = None,
+) -> list[str]:
+    display = str(voucher_id or "").strip()
+    if not display or df.empty or "凭证编号" not in df.columns:
+        return []
+    rows = df[df["凭证编号"].astype(str).eq(display)]
+    if year not in {None, ""} and not rows.empty:
+        year_values = pd.Series(pd.NA, index=rows.index, dtype="Int64")
+        for column in ("会计年度", "_year"):
+            if column in rows.columns:
+                year_values = year_values.fillna(
+                    pd.to_numeric(rows[column], errors="coerce").astype("Int64")
+                )
+        if "过账日期" in rows.columns:
+            year_values = year_values.fillna(
+                pd.to_datetime(rows["过账日期"], errors="coerce").dt.year.astype("Int64")
+            )
+        rows = rows[year_values.eq(int(year))]
+    company_text = str(company or "").strip()
+    if company_text and "公司代码" in rows.columns:
+        rows = rows[rows["公司代码"].astype(str).eq(company_text)]
+    return list(dict.fromkeys(rows[VOUCHER_KEY_COLUMN].dropna().astype(str)))
+
+
+def _sample_identity_tokens(
+    samples: list[dict],
+    df: pd.DataFrame,
+) -> list[str]:
+    available_keys = set(df[VOUCHER_KEY_COLUMN].dropna().astype(str))
+    tokens: list[str] = []
+    for sample in samples:
+        key = str(
+            sample.get("_voucher_key")
+            or sample.get("凭证唯一键")
+            or sample.get("凭证键")
+            or ""
+        ).strip()
+        if key and key in available_keys:
+            tokens.append(key)
+            continue
+        tokens.extend(
+            _resolve_display_keys(
+                df,
+                sample.get("凭证编号"),
+                year=sample.get("会计年度", sample.get("年份")),
+                company=sample.get("公司代码"),
+            )
+        )
+    return list(dict.fromkeys(tokens))
+
+
+def _build_hit_lookup(
+    rule_results: list[RuleResult],
+    df: pd.DataFrame,
+) -> dict[str, list[RuleHit]]:
     lookup: dict = {}
     for rr in rule_results:
         for hit in rr.hits:
-            for vid in _hit_voucher_ids(hit):
+            for vid in _hit_voucher_keys(hit, df):
                 lookup.setdefault(vid, []).append(hit)
     return lookup
 
 
-def _hit_voucher_ids(hit) -> list[str]:
-    ids = [str(hit.voucher_id)]
-    ids.extend(str(vid) for vid in getattr(hit, "related_voucher_ids", ()) or ())
-    return [vid for vid in dict.fromkeys(ids) if vid]
+def _hit_voucher_keys(hit, df: pd.DataFrame) -> list[str]:
+    keys: list[str] = []
+    primary_key = str(getattr(hit, "voucher_key", "") or "").strip()
+    if primary_key:
+        keys.append(primary_key)
+    else:
+        keys.extend(
+            _resolve_display_keys(
+                df,
+                getattr(hit, "voucher_id", ""),
+                year=getattr(hit, "year", None),
+            )
+        )
+
+    related_ids = list(getattr(hit, "related_voucher_ids", ()) or ())
+    related_keys = list(getattr(hit, "related_voucher_keys", ()) or ())
+    for index, related_id in enumerate(related_ids):
+        related_key = (
+            str(related_keys[index]).strip()
+            if index < len(related_keys)
+            else ""
+        )
+        if related_key:
+            keys.append(related_key)
+        else:
+            keys.extend(_resolve_display_keys(df, related_id))
+    return [key for key in dict.fromkeys(keys) if key]
 
 
 def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rules_config=None):
@@ -197,7 +277,7 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
     ws.title = "样本清单"
     voucher_rows_map = {
         str(vid): grp
-        for vid, grp in df.groupby(df["凭证编号"].astype(str), sort=False)
+        for vid, grp in df.groupby(VOUCHER_KEY_COLUMN, sort=False)
     }
 
     headers = [c for c, _ in SAMPLE_COLS]
@@ -214,12 +294,17 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
         ws.column_dimensions[get_column_letter(i)].width = w
 
     row_num = 2
-    for seq, vid in enumerate(confirmed_vids, 1):
-        voucher_rows = voucher_rows_map.get(vid)
+    for seq, voucher_key in enumerate(confirmed_vids, 1):
+        voucher_rows = voucher_rows_map.get(voucher_key)
         if voucher_rows is None:
             voucher_rows = df.iloc[0:0]
-        hits = hit_lookup.get(vid, [])
-        judgment = judgment_lookup.get(vid)
+        hits = hit_lookup.get(voucher_key, [])
+        display_id = (
+            str(voucher_rows["凭证编号"].iloc[0])
+            if "凭证编号" in voucher_rows.columns and not voucher_rows.empty
+            else str(voucher_key)
+        )
+        judgment = judgment_lookup.get(display_id)
         voucher_rows = filter_export_voucher_rows(
             voucher_rows,
             rules_config,
@@ -235,15 +320,25 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
         relation_evidences = " | ".join(dict.fromkeys(
             h.relation_evidence for h in hits if h.relation_evidence
         ))
-        year = hits[0].year if hits and hits[0].year else (
-            int(voucher_rows["_year"].iloc[0]) if "_year" in voucher_rows.columns and not voucher_rows.empty else ""
-        )
+        if hits and hits[0].year:
+            year = hits[0].year
+        else:
+            year = ""
+            for year_column in ("会计年度", "_year"):
+                if year_column not in voucher_rows.columns or voucher_rows.empty:
+                    continue
+                year_value = pd.to_numeric(
+                    voucher_rows[year_column].iloc[0], errors="coerce"
+                )
+                if pd.notna(year_value):
+                    year = int(year_value)
+                    break
 
         for _, row in voucher_rows.iterrows():
             amt = row.get("_amount_raw", row.get("凭证货币价值"))
             values = [
                 seq,
-                vid,
+                display_id,
                 group_ids,
                 related_vouchers,
                 year,
@@ -302,10 +397,23 @@ def _write_manual_final_sheet(wb, df, manual_final_samples):
 
     row_num = 2
     for group in manual_final_samples:
-        voucher_ids = {str(vid) for vid in group.get("voucher_ids", [])}
-        if not voucher_ids:
+        voucher_keys = {
+            str(value)
+            for value in group.get("voucher_keys", [])
+            if str(value).strip()
+        }
+        if not voucher_keys:
+            for voucher_id in group.get("voucher_ids", []):
+                voucher_keys.update(
+                    _resolve_display_keys(
+                        df,
+                        voucher_id,
+                        year=(group.get("selector") or {}).get("year"),
+                    )
+                )
+        if not voucher_keys:
             continue
-        rows = df[df["凭证编号"].astype(str).isin(voucher_ids)]
+        rows = df[df[VOUCHER_KEY_COLUMN].astype(str).isin(voucher_keys)]
         for _, row in rows.iterrows():
             values = [
                 group.get("title", ""),
@@ -353,7 +461,10 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
     total_hits = total_confirmed = total_high = total_med = 0
 
     for row_idx, rr in enumerate(rule_results, 2):
-        voucher_count = len({h.voucher_id for h in rr.hits})
+        voucher_count = len({
+            str(getattr(h, "voucher_key", "") or h.voucher_id)
+            for h in rr.hits
+        })
         judgments = llm_judgments.get(rr.rule_name, [])
         confirmed = len(judgments)
         high = sum(1 for j in judgments if j.risk_level == "高")
@@ -381,8 +492,11 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
 def _write_rules_sheet(wb, rule_results):
     """规则命中明细：每条 RuleHit 一行，供追溯。"""
     ws = wb.create_sheet("命中明细")
-    headers = ["规则名称", "规则类型", "凭证编号", "组合ID", "关联凭证", "优先级", "触发证据", "组合证据"]
-    widths = [18, 24, 14, 24, 28, 8, 60, 70]
+    headers = [
+        "规则名称", "规则类型", "凭证编号", "组合ID", "关联凭证", "优先级",
+        "触发证据", "组合证据", "凭证唯一键", "关联凭证唯一键",
+    ]
+    widths = [18, 24, 14, 24, 28, 8, 60, 70, 40, 55]
 
     for col_idx, (h, w) in enumerate(zip(headers, widths, strict=True), 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
@@ -405,6 +519,8 @@ def _write_rules_sheet(wb, rule_results):
                     hit.priority,
                     hit.evidence,
                     hit.relation_evidence,
+                    getattr(hit, "voucher_key", "") or "",
+                    " | ".join(getattr(hit, "related_voucher_keys", ()) or ()),
                 ],
                 1,
             ):

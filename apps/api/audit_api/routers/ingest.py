@@ -16,6 +16,7 @@ from audit_engine.ingestion import (
     load_files,
     summarize_years,
 )
+from audit_engine.source_assets import SourceAsset, build_source_asset, persist_source_asset
 from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -93,8 +94,26 @@ async def _read_uploads(files: list[UploadFile]) -> list[io.BytesIO]:
             raise HTTPException(status_code=400, detail=f"文件为空：{f.filename}")
         buf = io.BytesIO(data)
         buf.name = f.filename or "upload.xlsx"  # type: ignore[attr-defined]
+        buf._audit_source_asset = build_source_asset(buf.name, data).to_dict()  # type: ignore[attr-defined]
         buffers.append(buf)
     return buffers
+
+
+def _persist_upload_assets(
+    store: ProjectStore,
+    project_id: str,
+    buffers: list[io.BytesIO],
+) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    project_dir = store.project_dir(project_id)
+    for buffer in buffers:
+        raw = getattr(buffer, "_audit_source_asset", None)
+        if not isinstance(raw, dict):
+            continue
+        asset = SourceAsset.from_dict(raw)
+        persist_source_asset(project_dir, asset, buffer.getvalue())
+        assets.append(asset.to_dict())
+    return assets
 
 
 @router.post("/{project_id}/ingest/detect", response_model=DetectResponse)
@@ -147,7 +166,7 @@ async def commit_ingest(
         raise HTTPException(status_code=400, detail="未能从文件中识别出任何年度数据")
 
     year_summary_raw = summarize_years(_df)
-    aliases_recorded = record_column_mappings(mapping)
+    source_assets = _persist_upload_assets(store, project_id, buffers)
 
     manifest = store.ingest_journal(
         project_id,
@@ -155,7 +174,14 @@ async def commit_ingest(
         column_mapping=mapping,
         missing_columns=missing,
         year_summary=year_summary_raw,
+        source_assets=source_assets,
     )
+    # 只有项目数据提交成功后才学习映射，失败导入不得污染全局别名。
+    try:
+        aliases_recorded = record_column_mappings(mapping)
+    except (OSError, json.JSONDecodeError):
+        # 别名学习是辅助能力，不能让已成功提交的数据被误报为导入失败。
+        aliases_recorded = 0
 
     return IngestResponse(
         project_id=manifest.project_id,

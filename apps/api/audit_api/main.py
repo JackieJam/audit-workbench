@@ -12,6 +12,7 @@ from audit_api.routers import (
     agent,
     analysis,
     analysis_modules,
+    audit_cases,
     candidates,
     health,
     ingest,
@@ -19,6 +20,7 @@ from audit_api.routers import (
     llm_insight,
     pipeline,
     projects,
+    sources,
 )
 
 
@@ -57,11 +59,13 @@ app.include_router(projects.router)
 app.include_router(ingest.router)
 app.include_router(analysis.router)
 app.include_router(analysis_modules.router)
+app.include_router(audit_cases.router)
 app.include_router(candidates.router)
 app.include_router(llm_insight.router)
 app.include_router(pipeline.router)
 app.include_router(agent.router)
 app.include_router(llm_config.router)
+app.include_router(sources.router)
 
 # 确保 reload 子进程在首批请求前即安装 access log 过滤器
 configure_access_logging()

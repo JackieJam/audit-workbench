@@ -66,6 +66,51 @@ def test_query_journal_is_filtered_bounded_and_traceable(tmp_path, monkeypatch):
     assert out["provenance"]["query_spec"]["text_contains"] == "收入"
 
 
+def test_query_journal_counts_and_filters_stable_voucher_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    pid = store.create_project("跨年同号查询").project_id
+
+    def year_frame(year: int) -> pd.DataFrame:
+        return pd.DataFrame({
+            "公司代码": ["1000", "1000"],
+            "会计年度": [year, year],
+            "凭证编号": ["1001", "1001"],
+            "过账日期": pd.to_datetime([f"{year}-01-01", f"{year}-01-01"]),
+            "借/贷标识": ["S", "H"],
+            "凭证货币价值": [100.0, 100.0],
+            "总账科目": ["112201", "600101"],
+            "文本": [f"{year}应收", f"{year}收入"],
+        })
+
+    store.ingest_journal(
+        pid,
+        {2023: year_frame(2023), 2024: year_frame(2024)},
+        column_mapping={},
+        missing_columns=[],
+        year_summary=[],
+    )
+    all_rows = execute_tool(
+        store,
+        pid,
+        "query_journal",
+        {"years": [2023, 2024], "sample_limit": 20},
+    )
+    assert all_rows["metrics"]["voucher_count"] == 2
+    voucher_keys = {row["凭证键"] for row in all_rows["sample_rows"]}
+    assert len(voucher_keys) == 2
+
+    selected_key = next(key for key in voucher_keys if "|2024|" in key)
+    selected = execute_tool(
+        store,
+        pid,
+        "query_journal",
+        {"voucher_keys": [selected_key], "sample_limit": 20},
+    )
+    assert selected["metrics"]["voucher_count"] == 1
+    assert {row["年度"] for row in selected["sample_rows"]} == {2024}
+
+
 def test_agent_can_compare_and_select_document_currency(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
     store = ProjectStore(root=tmp_path)
@@ -206,12 +251,205 @@ def test_describe_capabilities_and_column_status(tmp_path, monkeypatch):
     assert "record_rule_feedback" in names
     assert "run_module_insight" in names
     assert "suggest_rule_tuning" in names
+    assert "get_audit_case_detail" in names
+    assert "manage_audit_case" in names
     assert "ERP 科目主数据与系统配置" in caps["evidence_boundary"]["not_connected"]
     assert caps["execution_contract"]["truth_source"] == "tool_calls.result 与后台 job_id/status"
 
     col = execute_tool(store, pid, "get_column_mapping_status", {})
     assert "missing_columns" in col
     assert "learned_alias_count" in col
+
+
+def test_agent_can_drive_audit_case_with_readiness_and_approval_contract(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store, "Agent 审计事项")
+    work = store.get_work_df(pid, 2024)
+    voucher_key = str(work["_voucher_key"].iat[0])
+
+    def add_candidate(state: dict) -> None:
+        state["candidate_pool"] = [{
+            "group_id": "cand_agent",
+            "title": "费用发生认定异常",
+            "reason": "费用凭证需核验原始依据",
+            "source_module": "费用",
+            "source_view": "费用结构",
+            "selector": {"kind": "expense", "year": 2024},
+            "voucher_ids": ["1"],
+            "voucher_keys": [voucher_key],
+            "row_count": 1,
+            "voucher_count": 1,
+        }]
+
+    store.update_state(pid, add_candidate)
+    created = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "create_from_candidate",
+            "group_id": "cand_agent",
+            "actor": "preparer-a",
+            "payload": {"formal": True},
+        },
+    )
+    assert created["ok"] is True
+    case_id = created["case"]["case_id"]
+    assertion_id = created["case"]["assertions"][0]["assertion_id"]
+    assert created["readiness"]["ready"] is False
+
+    missing_version = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "add_evidence",
+            "case_id": case_id,
+            "payload": {},
+        },
+    )
+    assert "expected_version" in missing_version["error"]
+
+    evidence = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "add_evidence",
+            "case_id": case_id,
+            "expected_version": 1,
+            "actor": "preparer-a",
+            "payload": {
+                "source_type": "journal",
+                "source_ref": {"voucher_key": voucher_key},
+                "description": "已回查序时账",
+                "status": "verified",
+                "assertion_ids": [assertion_id],
+            },
+        },
+    )
+    evidence_id = evidence["case"]["evidence_refs"][-1]["evidence_id"]
+    procedure = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "add_procedure",
+            "case_id": case_id,
+            "expected_version": 2,
+            "actor": "preparer-a",
+            "payload": {
+                "title": "检查原始凭证",
+                "description": "核对合同与审批",
+                "assertion_ids": [assertion_id],
+                "status": "completed",
+                "result": "核对一致",
+                "performed_by": "preparer-a",
+            },
+        },
+    )
+    procedure_id = procedure["case"]["procedures"][-1]["procedure_id"]
+    assertion = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "update_assertion",
+            "case_id": case_id,
+            "expected_version": 3,
+            "actor": "preparer-a",
+            "payload": {
+                "assertion_id": assertion_id,
+                "status": "supported",
+            },
+        },
+    )
+    assert assertion["readiness"]["ready"] is True
+    no_conclusion_actor = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "set_conclusion",
+            "case_id": case_id,
+            "expected_version": 4,
+            "payload": {
+                "outcome": "no_exception",
+                "summary": "未发现例外",
+                "basis_evidence_ids": [evidence_id],
+                "procedure_ids": [procedure_id],
+            },
+        },
+    )
+    assert "明确提供 actor" in no_conclusion_actor["error"]
+    conclusion = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "set_conclusion",
+            "case_id": case_id,
+            "expected_version": 4,
+            "actor": "preparer-a",
+            "payload": {
+                "outcome": "no_exception",
+                "summary": "未发现例外",
+                "basis_evidence_ids": [evidence_id],
+                "procedure_ids": [procedure_id],
+            },
+        },
+    )
+    assert conclusion["case"]["status"] == "concluded"
+    no_actor = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "signoff",
+            "case_id": case_id,
+            "expected_version": 5,
+            "payload": {"note": "复核通过"},
+        },
+    )
+    assert "明确提供 actor" in no_actor["error"]
+    signed = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "signoff",
+            "case_id": case_id,
+            "expected_version": 5,
+            "actor": "reviewer-b",
+            "payload": {"note": "证据链完整，复核通过"},
+        },
+    )
+    assert signed["case"]["signoffs"][-1]["status"] == "active"
+    closed = execute_tool(
+        store,
+        pid,
+        "manage_audit_case",
+        {
+            "action": "close",
+            "case_id": case_id,
+            "expected_version": 6,
+            "actor": "reviewer-b",
+            "payload": {"note": "完成归档"},
+        },
+    )
+    assert closed["case"]["status"] == "closed"
+    detail = execute_tool(
+        store,
+        pid,
+        "get_audit_case_detail",
+        {"case_id": case_id},
+    )
+    assert detail["integrity"]["valid"] is True
+    assert detail["case"]["version"] == 7
 
 
 def test_update_rule_rejects_unknown(tmp_path, monkeypatch):

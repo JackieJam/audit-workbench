@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useState, type ReactNo
 import { useQueryClient } from "@tanstack/react-query";
 import type { AgentUiAction, AuditSelection } from "@/api/client";
 
-export type MainTab = "finance" | "suspects" | "sampling";
+export type MainTab = "finance" | "suspects" | "cases" | "sampling";
 export type FinanceModule =
   | "income"
   | "expense"

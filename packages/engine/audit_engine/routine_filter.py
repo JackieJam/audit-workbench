@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 
 from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
+from audit_engine.data_columns import VOUCHER_KEY_COLUMN, ensure_voucher_identity
 
 # selector.expense_category → 受保护的 routine category（钻取该费用类时不过滤）
 _SELECTOR_PROTECTS: dict[str, set[str]] = {
@@ -154,7 +155,7 @@ def routine_line_mask(
         mask |= account.str.contains(always_acct, na=False, regex=True)
 
     # 金额为 0
-    for amount_col in ("凭证货币价值", "公司代码货币价值", "_amount_raw"):
+    for amount_col in ("_amount_raw", "公司代码货币价值", "凭证货币价值"):
         if amount_col in df.columns:
             mask |= pd.to_numeric(df[amount_col], errors="coerce").fillna(0).abs() == 0
             break
@@ -203,20 +204,23 @@ def pure_routine_voucher_ids(
     purpose: str = "candidates",
     selector: dict | None = None,
     threshold: float = 0.8,
+    stable: bool = False,
 ) -> set[str]:
-    """噪声行占比 ≥ threshold 的凭证号。"""
+    """噪声行占比 ≥ threshold 的凭证；stable=True 时返回稳定凭证键。"""
     if df.empty or "凭证编号" not in df.columns:
         return set()
     re_cfg = routine_exclusion_cfg(cfg)
     if not re_cfg.get("drop_pure_routine_vouchers", True):
         return set()
 
-    mask = routine_line_mask(df, cfg, purpose=purpose, selector=selector)
+    work = ensure_voucher_identity(df) if stable else df
+    mask = routine_line_mask(work, cfg, purpose=purpose, selector=selector)
+    voucher_column = VOUCHER_KEY_COLUMN if stable else "凭证编号"
     tmp = pd.DataFrame({
-        "凭证编号": df["凭证编号"].astype(str),
+        "凭证": work[voucher_column].astype(str),
         "noise": mask.astype(int),
     })
-    stats = tmp.groupby("凭证编号", sort=False)["noise"].agg(["sum", "count"])
+    stats = tmp.groupby("凭证", sort=False)["noise"].agg(["sum", "count"])
     ratio = stats["sum"] / stats["count"].clip(lower=1)
     return set(ratio[ratio >= threshold].index.astype(str))
 
@@ -235,18 +239,25 @@ def prepare_candidate_detail(
     if not re_cfg.get("enabled", True):
         return detail
 
-    kept, _ = apply_routine_exclusion(detail, cfg, purpose="candidates", selector=selector)
+    work = ensure_voucher_identity(detail)
+    kept, _ = apply_routine_exclusion(work, cfg, purpose="candidates", selector=selector)
     if kept.empty:
         return kept
 
-    pure_ids = pure_routine_voucher_ids(detail, cfg, purpose="candidates", selector=selector)
-    if pure_ids and "凭证编号" in kept.columns:
-        kept = kept[~kept["凭证编号"].astype(str).isin(pure_ids)].copy()
+    pure_ids = pure_routine_voucher_ids(
+        work,
+        cfg,
+        purpose="candidates",
+        selector=selector,
+        stable=True,
+    )
+    if pure_ids:
+        kept = kept[~kept[VOUCHER_KEY_COLUMN].astype(str).isin(pure_ids)].copy()
     if kept.empty:
         return kept
 
     max_vouchers = int(re_cfg.get("max_vouchers_per_candidate_group") or 50)
-    if max_vouchers > 0 and "凭证编号" in kept.columns:
+    if max_vouchers > 0:
         amount_col = next(
             (c for c in ("_amount_abs", "费用发生额", "收入影响", "金额", "凭证货币价值", "公司代码货币价值")
              if c in kept.columns),
@@ -254,20 +265,25 @@ def prepare_candidate_detail(
         )
         if amount_col:
             ranked = (
-                kept.assign(_vid=kept["凭证编号"].astype(str), _amt=pd.to_numeric(kept[amount_col], errors="coerce").abs().fillna(0))
+                kept.assign(
+                    _vid=kept[VOUCHER_KEY_COLUMN].astype(str),
+                    _amt=pd.to_numeric(
+                        kept[amount_col], errors="coerce"
+                    ).abs().fillna(0),
+                )
                 .groupby("_vid", sort=False)["_amt"]
                 .sum()
                 .sort_values(ascending=False)
             )
         else:
             ranked = (
-                kept.assign(_vid=kept["凭证编号"].astype(str))
+                kept.assign(_vid=kept[VOUCHER_KEY_COLUMN].astype(str))
                 .groupby("_vid", sort=False)
                 .size()
                 .sort_values(ascending=False)
             )
         keep_vids = set(ranked.head(max_vouchers).index.astype(str))
-        kept = kept[kept["凭证编号"].astype(str).isin(keep_vids)].copy()
+        kept = kept[kept[VOUCHER_KEY_COLUMN].astype(str).isin(keep_vids)].copy()
 
     return kept
 

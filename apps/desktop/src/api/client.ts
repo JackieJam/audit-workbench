@@ -180,7 +180,7 @@ export type FinanceModuleId =
   | "cross";
 
 export type AgentUiAction =
-  | { type: "navigate_main"; tab: "finance" | "suspects" | "sampling" }
+  | { type: "navigate_main"; tab: "finance" | "suspects" | "cases" | "sampling" }
   | { type: "finance_module"; module: FinanceModuleId }
   | { type: "set_finance_year"; year: number }
   | { type: "pin_selection"; context: AuditSelection }
@@ -354,7 +354,293 @@ export type SampleRow = {
   贷方金额: number;
   来源模块: string;
   是否为人工直入: boolean;
+  抽样总体?: string;
+  风险分数?: number;
+  入样理由?: string;
+  抽中概率?: number;
 };
+
+export type SamplingPopulationScope = "full_population" | "risk_signals";
+
+export type SamplingStrategy =
+  | "risk_directed"
+  | "random"
+  | "monetary_unit"
+  | "stratified"
+  | "unpredictable";
+
+export type SamplingCoverageConstraints = {
+  min_per_month?: number;
+  min_per_account_category?: number;
+  max_same_risk_signal_ratio?: number;
+};
+
+/**
+ * 抽样计划写入契约。
+ * method 为旧抽样端点的传输字段；其余字段用于受信抽样计划与可重放底稿。
+ */
+export type SamplingPlanRequest = {
+  plan_name?: string;
+  population_scope: SamplingPopulationScope;
+  strategy: SamplingStrategy;
+  method: "by_rule" | "random" | "monetary_unit" | "stratified";
+  size: number;
+  seed: number;
+  years?: number[];
+  coverage_constraints: SamplingCoverageConstraints;
+  stratify_by?: "account_category" | "month" | "voucher_type";
+  stratify_mode?: "proportional" | "equal";
+  unpredictable?: boolean;
+};
+
+export type SamplingPopulationSnapshot = {
+  population_id?: string;
+  data_version?: string;
+  classification_revision?: string;
+  analysis_scope_revision?: string;
+  currency_scope?: {
+    selected_currency?: string | null;
+    currencies?: string[];
+    basis?: string;
+  };
+  rule_version?: string;
+  population_membership_revision?: string;
+  years?: number[];
+  row_count: number;
+  voucher_count: number;
+  amount_absolute?: number | null;
+  amount_basis?: string;
+  dimension_counts?: Record<string, Record<string, number>>;
+};
+
+export type SamplingCoverageCheck = {
+  id: string;
+  label: string;
+  target: string | number;
+  actual?: string | number;
+  status: "met" | "unmet" | "unknown";
+};
+
+export type SamplingSelectionTrace = {
+  selection_id?: string;
+  strategy: SamplingStrategy;
+  seed?: number;
+  generated_at?: string;
+  reproducible?: boolean;
+  inclusion_probability_available?: boolean;
+  uniform_inclusion_probability?: number | null;
+  statistical_projection_allowed?: boolean;
+  projection_boundary?: string;
+  coverage_checks?: SamplingCoverageCheck[];
+  selected_voucher_count?: number;
+  selected_voucher_keys?: string[];
+  selected_voucher_keys_digest?: string;
+};
+
+export type SamplesResponse = {
+  method?: string;
+  sample_rows: number;
+  voucher_count: number;
+  samples: SampleRow[];
+  requested_plan?: SamplingPlanRequest;
+  population_snapshot?: SamplingPopulationSnapshot;
+  selection_trace?: SamplingSelectionTrace;
+};
+
+export type AuditCaseStatus =
+  | "draft"
+  | "planned"
+  | "in_progress"
+  | "pending_evidence"
+  | "concluded"
+  | "closed";
+
+export type AuditAssertion = {
+  assertion_id: string;
+  name: string;
+  rationale?: string;
+  status?: "open" | "supported" | "exception";
+  title?: string;
+  risk_statement?: string;
+  financial_statement_assertions?: string[];
+  affected_accounts?: string[];
+  created_by?: string;
+  created_at?: string;
+};
+
+export type EvidenceRef = {
+  evidence_id: string;
+  evidence_type:
+    | "source_coordinate"
+    | "risk_signal"
+    | "attachment"
+    | "management_explanation"
+    | "counter_evidence";
+  title: string;
+  status: "active" | "missing" | "requested" | "verified" | "stale";
+  locator?: Record<string, unknown>;
+  note?: string;
+  source_type?: string;
+  source_ref?: AuditEvidenceSourceRef;
+  description?: string;
+  stale_reason?: string;
+  stale_at?: string;
+  assertion_ids?: string[];
+  procedure_id?: string;
+  scope?: CaseSnapshot;
+  created_by?: string;
+  created_at?: string;
+};
+
+export type AuditProcedure = {
+  procedure_id: string;
+  title: string;
+  status: "planned" | "in_progress" | "completed" | "not_applicable";
+  description?: string;
+  owner?: string;
+  result?: string;
+  assertion_ids?: string[];
+  performed_by?: string;
+  performed_at?: string;
+  created_by?: string;
+  created_at?: string;
+};
+
+export type AuditConclusion = {
+  outcome:
+    | "pending"
+    | "no_exception"
+    | "reasonable_exception"
+    | "exception"
+    | "finding"
+    | "insufficient_evidence"
+    | "control_deficiency"
+    | "misstatement"
+    | "scope_limitation";
+  summary?: string;
+  misstatement_amount?: number;
+  currency?: string;
+  concluded_by?: string;
+  concluded_at?: string;
+  basis_evidence_ids?: string[];
+  procedure_ids?: string[];
+  unresolved_assertion_ids?: string[];
+  override_reason?: string;
+  status?: "active" | "stale";
+  stale_reason?: string;
+  stale_at?: string;
+};
+
+export type CaseSnapshot = {
+  data_version?: string;
+  ingest_run_id?: string;
+  classification_revision?: string;
+  analysis_scope_revision?: string;
+  currency_scope?: string;
+  rule_version?: string;
+  rule_revision?: string;
+  rule_run_id?: string;
+  engine_revision?: string;
+  result_hash?: string;
+  years?: number[];
+};
+
+export type AuditCaseReadiness = {
+  ready: boolean;
+  blockers: Array<{
+    code: string;
+    message: string;
+    assertion_ids?: string[];
+    hard?: boolean;
+  }>;
+  assertion_count: number;
+  verified_evidence_count: number;
+  completed_procedure_count: number;
+  unresolved_assertion_ids: string[];
+  stale_evidence_ids: string[];
+  pending_evidence_ids: string[];
+  evidence_coverage?: Record<string, string[]>;
+  procedure_coverage?: Record<string, string[]>;
+};
+
+export type AuditCaseIntegrity = {
+  valid: boolean;
+  checks: Record<string, boolean>;
+  errors: Array<Record<string, unknown>>;
+  event_count: number;
+  snapshot_count: number;
+  head_hash?: string;
+};
+
+export type CaseEvent = {
+  event_id: string;
+  event_type: "created" | "updated" | "stale" | "status_changed" | "concluded" | "reviewed";
+  at: string;
+  actor?: string;
+  note?: string;
+  from_status?: AuditCaseStatus;
+  to_status?: AuditCaseStatus;
+  canonical_event_type?: string;
+  case_id?: string;
+  case_version?: number;
+  payload?: Record<string, unknown>;
+  prev_hash?: string;
+  event_hash?: string;
+};
+
+export type AuditCase = {
+  case_id: string;
+  title: string;
+  risk: string;
+  materiality: "unassessed" | "low" | "medium" | "high";
+  owner?: string;
+  status: AuditCaseStatus;
+  kind?: "proposal" | "case";
+  risk_domain?: string;
+  tags?: string[];
+  version?: number;
+  source_candidate_ids: string[];
+  source_candidate_group_id?: string;
+  assertions: AuditAssertion[];
+  evidence: EvidenceRef[];
+  procedures: AuditProcedure[];
+  conclusion: AuditConclusion;
+  snapshot: CaseSnapshot;
+  events: CaseEvent[];
+  readiness: AuditCaseReadiness;
+  integrity: AuditCaseIntegrity;
+  signoffs?: Array<{
+    signoff_id: string;
+    actor: string;
+    note: string;
+    signed_at: string;
+    status: "active" | "stale";
+    stale_reason?: string;
+  }>;
+  created_at: string;
+  updated_at: string;
+  created_by?: string;
+};
+
+export type AuditCaseListResponse = {
+  cases: AuditCase[];
+  count: number;
+  schema_version?: number;
+  current_scope?: CaseSnapshot;
+};
+
+export type AuditEvidenceSourceRef = {
+  source_asset_id?: string;
+  file_hash?: string;
+  sheet?: string;
+  source_row?: number | null;
+  source_column?: string;
+  voucher_key?: string;
+  line_key?: string;
+  locator?: Record<string, unknown>;
+};
+
+export type AuditCaseMutationResponse = AuditCase;
 
 
 export type ExpenseRow = { 年份: number; 费用类别: string; 金额: number; 占比: number };
@@ -562,9 +848,9 @@ export const api = {
     request<{ rules: RuleSummary[]; total_hits: number }>(`/projects/${projectId}/pipeline/rules/results`),
   extractSamples: (
     projectId: string,
-    body: { method?: string; size?: number; seed?: number },
+    body: SamplingPlanRequest,
   ) =>
-    request<{ method: string; sample_rows: number; voucher_count: number; samples: SampleRow[] }>(
+    request<SamplesResponse>(
       `/projects/${projectId}/pipeline/samples`,
       { method: "POST", body: JSON.stringify(body) },
     ),
@@ -607,9 +893,202 @@ export const api = {
     ),
 
   getSamples: (projectId: string) =>
-    request<{ sample_rows: number; voucher_count: number; samples: SampleRow[] }>(
+    request<SamplesResponse>(
       `/projects/${projectId}/pipeline/samples`,
     ),
+  listAuditCases: (projectId: string) =>
+    request<AuditCaseListResponse>(`/projects/${projectId}/audit-cases`),
+  sourceDownloadUrl: (projectId: string, assetId: string) =>
+    `${base}/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(assetId)}/download`,
+  getAuditCase: (projectId: string, caseId: string) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}`,
+    ),
+  createAuditCaseFromCandidate: (
+    projectId: string,
+    groupId: string,
+    body: {
+      formal?: boolean;
+      title?: string;
+      risk?: string;
+      financial_statement_assertions?: string[];
+      materiality?: AuditCase["materiality"];
+      owner?: string;
+      actor?: string;
+      expected_version?: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/from-candidate/${encodeURIComponent(groupId)}`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  promoteAuditCase: (
+    projectId: string,
+    caseId: string,
+    body: { actor?: string; comment?: string; expected_version: number },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/promote`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  updateAuditCase: (
+    projectId: string,
+    caseId: string,
+    patch: Partial<Pick<AuditCase, "title" | "risk" | "materiality" | "owner" | "status">> & {
+      actor?: string;
+      note?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(`/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  addAuditCaseAssertion: (
+    projectId: string,
+    caseId: string,
+    body: {
+      title: string;
+      risk_statement: string;
+      financial_statement_assertions?: string[];
+      affected_accounts?: string[];
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/assertions`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  updateAuditCaseAssertion: (
+    projectId: string,
+    caseId: string,
+    assertionId: string,
+    body: {
+      status?: AuditAssertion["status"];
+      title?: string;
+      risk_statement?: string;
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/assertions/${encodeURIComponent(assertionId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  addAuditCaseEvidence: (
+    projectId: string,
+    caseId: string,
+    body: {
+      source_type: string;
+      source_ref: AuditEvidenceSourceRef;
+      description?: string;
+      status?: EvidenceRef["status"];
+      assertion_ids?: string[];
+      procedure_id?: string;
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/evidence`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  updateAuditCaseEvidence: (
+    projectId: string,
+    caseId: string,
+    evidenceId: string,
+    body: {
+      status?: EvidenceRef["status"];
+      description?: string;
+      source_ref?: AuditEvidenceSourceRef;
+      assertion_ids?: string[];
+      procedure_id?: string;
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/evidence/${encodeURIComponent(evidenceId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  addAuditCaseProcedure: (
+    projectId: string,
+    caseId: string,
+    body: {
+      title: string;
+      description: string;
+      assertion_ids?: string[];
+      status?: "planned" | "in_progress" | "completed" | "not_applicable";
+      result?: string;
+      performed_by?: string;
+      performed_at?: string;
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/procedures`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  updateAuditCaseProcedure: (
+    projectId: string,
+    caseId: string,
+    procedureId: string,
+    body: {
+      title?: string;
+      description?: string;
+      assertion_ids?: string[];
+      status?: "planned" | "in_progress" | "completed" | "not_applicable";
+      result?: string;
+      performed_by?: string;
+      performed_at?: string;
+      actor?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/procedures/${encodeURIComponent(procedureId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  setAuditCaseConclusion: (
+    projectId: string,
+    caseId: string,
+    body: {
+      outcome: Exclude<AuditConclusion["outcome"], "pending">;
+      summary: string;
+      basis_evidence_ids?: string[];
+      procedure_ids?: string[];
+      unresolved_assertion_ids?: string[];
+      override_reason?: string;
+      misstatement_amount?: number;
+      currency?: string;
+      actor: string;
+      expected_version: number;
+    },
+  ) =>
+    request<AuditCaseMutationResponse>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/conclusion`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  appendAuditCaseEvent: (
+    projectId: string,
+    caseId: string,
+    event: {
+      event_type: "review" | "reviewed" | "signoff" | "signed_off";
+      actor: string;
+      note?: string;
+      expected_version: number;
+    },
+  ) =>
+    request<{
+      case: AuditCaseMutationResponse;
+      event: CaseEvent;
+      integrity: { valid: boolean; event_count: number; head_hash?: string };
+    }>(
+      `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}/events`,
+      { method: "POST", body: JSON.stringify(event) },
+    ).then((result) => result.case),
   getVerifyStatus: (projectId: string) =>
     request<{
       summary: {

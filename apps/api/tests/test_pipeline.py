@@ -85,6 +85,21 @@ def test_pipeline_profiles_rules_samples_export(tmp_path, monkeypatch) -> None:
 
     rules = client.post(f"/projects/{pid}/pipeline/rules/run")
     assert rules.status_code == 200
+    rule_context = rules.json()["rule_run_context"]
+    assert rule_context["rule_run_id"].startswith("rr_")
+    assert len(rule_context["result_hash"]) == 64
+    assert rule_context["ingest_run_id"].startswith("ing_")
+    assert rule_context["engine_revision"]
+    assert rule_context["rules_snapshot"]
+    assert rule_context["result_artifact"].endswith(".json.gz")
+    store = get_store()
+    state = store.load_state(pid)
+    assert all(not block["hits"] for block in state["rule_results"])
+    artifact = store.project_dir(pid) / rule_context["result_artifact"]
+    assert artifact.exists()
+    full_results = store.load_rule_run_results(pid, state=state)
+    assert sum(len(block["hits"]) for block in full_results) == rule_context["complete_hit_count"]
+    assert all(len(block["hits"]) <= 20 for block in rules.json()["results"])
 
     cross = client.post(f"/projects/{pid}/pipeline/cross-year")
     assert cross.status_code == 200
@@ -123,6 +138,52 @@ def test_pipeline_profiles_rules_samples_export(tmp_path, monkeypatch) -> None:
     get_pipeline.cache_clear()
 
 
+def test_versioned_full_population_random_sample_is_replayable(tmp_path, monkeypatch) -> None:
+    pid = _ingest_two_years(tmp_path, monkeypatch)
+    body = {
+        "plan_name": "完整总体随机测试",
+        "population_scope": "full_population",
+        "strategy": "random",
+        "method": "random",
+        "size": 2,
+        "seed": 20260730,
+        "years": [2023, 2024],
+        "coverage_constraints": {},
+    }
+
+    first = client.post(f"/projects/{pid}/pipeline/samples", json=body)
+    second = client.post(f"/projects/{pid}/pipeline/samples", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    payload = first.json()
+    assert payload["requested_plan"]["population_scope"] == "full_population"
+    assert payload["population_snapshot"]["voucher_count"] == 2
+    assert payload["population_snapshot"]["population_membership_revision"]
+    assert payload["population_snapshot"]["ingest_run_id"].startswith("ing_")
+    assert payload["population_snapshot"]["engine_revision"]
+    assert payload["selection_trace"]["selection_id"] == second.json()["selection_trace"]["selection_id"]
+    assert payload["selection_trace"]["inclusion_probability_available"] is True
+    assert payload["selection_trace"]["statistical_projection_allowed"] is True
+    assert payload["selection_trace"]["uniform_inclusion_probability"] == 1.0
+    assert payload["selection_trace"]["selected_voucher_keys"] == [
+        "VK|__NO_COMPANY__|2023|2023001",
+        "VK|__NO_COMPANY__|2024|2024001",
+    ]
+    assert len(payload["selection_trace"]["selected_voucher_keys_digest"]) == 64
+    assert {row["_voucher_key"] for row in payload["samples"]} == {
+        "VK|__NO_COMPANY__|2023|2023001",
+        "VK|__NO_COMPANY__|2024|2024001",
+    }
+
+    cached = client.get(f"/projects/{pid}/pipeline/samples")
+    assert cached.status_code == 200
+    assert cached.json()["selection_trace"]["selection_id"] == payload["selection_trace"]["selection_id"]
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+
 def test_put_rules_invalidates_derived_results(tmp_path, monkeypatch) -> None:
     pid = _ingest_two_years(tmp_path, monkeypatch)
 
@@ -151,9 +212,72 @@ def test_put_rules_invalidates_derived_results(tmp_path, monkeypatch) -> None:
     store = get_store()
     state = store.load_state(pid)
     assert state.get("rule_results") == []
+    assert "rule_run_context" not in state
     assert state.get("samples") == []
+    assert "sampling_plan" not in state
     assert state.get("cross_year_findings") == []
     assert state.get("llm_judgments") == {}
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+
+def test_sampling_rejects_tampered_rule_fact_artifact(tmp_path, monkeypatch) -> None:
+    pid = _ingest_two_years(tmp_path, monkeypatch)
+    assert client.post(f"/projects/{pid}/pipeline/rules/run").status_code == 200
+    store = get_store()
+    state = store.load_state(pid)
+    artifact = store.project_dir(pid) / state["rule_run_context"]["result_artifact"]
+    artifact.write_bytes(b"not-a-gzip-rule-result")
+
+    response = client.post(
+        f"/projects/{pid}/pipeline/samples",
+        json={
+            "population_scope": "risk_signals",
+            "strategy": "risk_directed",
+            "method": "by_rule",
+            "size": 10,
+        },
+    )
+    assert response.status_code == 400
+    assert "规则结果事实文件损坏" in response.json()["detail"]
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+
+def test_sampling_rejects_unsupported_or_unmet_explicit_constraints(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pid = _ingest_two_years(tmp_path, monkeypatch)
+
+    unsupported = client.post(
+        f"/projects/{pid}/pipeline/samples",
+        json={
+            "population_scope": "full_population",
+            "strategy": "random",
+            "method": "random",
+            "size": 2,
+            "coverage_constraints": {"max_same_risk_signal_ratio": 0.5},
+        },
+    )
+    assert unsupported.status_code == 400
+    assert "仅适用于风险定向抽样" in unsupported.json()["detail"]
+
+    infeasible = client.post(
+        f"/projects/{pid}/pipeline/samples",
+        json={
+            "population_scope": "full_population",
+            "strategy": "random",
+            "method": "random",
+            "size": 2,
+            "coverage_constraints": {"min_per_month": 2},
+        },
+    )
+    assert infeasible.status_code == 400
+    assert "覆盖约束不可满足" in infeasible.json()["detail"]
+    assert "sampling_plan" not in get_store().load_state(pid)
 
     get_store.cache_clear()
     get_pipeline.cache_clear()

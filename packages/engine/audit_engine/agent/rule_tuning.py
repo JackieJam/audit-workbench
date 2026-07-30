@@ -155,9 +155,10 @@ def suggest_rule_tuning(
             "confidence": "high" if (false_pos or miss) else "medium",
         })
 
-    state = store.load_state(project_id)
-    state["rule_tuning_suggestions"] = suggestions
-    store.save_state(project_id, state)
+    def update(latest: dict[str, Any]) -> None:
+        latest["rule_tuning_suggestions"] = suggestions
+
+    store.update_state(project_id, update)
     return {"count": len(suggestions), "suggestions": suggestions}
 
 

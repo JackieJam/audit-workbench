@@ -21,7 +21,12 @@ from audit_engine.account_classifier import (
     CAT_COST,
     CAT_REVENUE,
 )
-from audit_engine.data_columns import ensure_category
+from audit_engine.data_columns import (
+    VOUCHER_KEY_COLUMN,
+    ensure_category,
+    ensure_voucher_identity,
+    prepare_rule_dataframe,
+)
 from audit_engine.data_columns import pnl_category as _pnl_category
 
 
@@ -36,6 +41,11 @@ class RuleHit:
     group_id: str | None = None
     related_voucher_ids: tuple[str, ...] = ()
     relation_evidence: str = ""
+    voucher_key: str | None = None
+    related_voucher_keys: tuple[str, ...] = ()
+    sample_eligible: bool = True
+    risk_score: float | None = None
+    risk_factors: tuple[str, ...] = ()
 
 
 @dataclass
@@ -89,6 +99,50 @@ def _is_round(amount: float, threshold: float) -> bool:
     return abs_amt >= threshold and abs_amt == int(abs_amt) and int(abs_amt) % 10_000 == 0
 
 
+def _voucher_column(df: pd.DataFrame) -> str:
+    return VOUCHER_KEY_COLUMN if VOUCHER_KEY_COLUMN in df.columns else "凭证编号"
+
+
+def _display_voucher_id(rows: pd.DataFrame, fallback: Any = "") -> str:
+    if "凭证编号" in rows.columns:
+        values = rows["凭证编号"].dropna().astype(str).str.strip()
+        values = values[~values.str.lower().isin({"", "nan", "none", "<na>"})]
+        if not values.empty:
+            return str(values.iloc[0])
+    return str(fallback)
+
+
+def _voucher_year(rows: pd.DataFrame) -> int | None:
+    for column in ("会计年度", "_year"):
+        if column not in rows.columns:
+            continue
+        values = pd.to_numeric(rows[column], errors="coerce").dropna()
+        if not values.empty:
+            return int(values.iloc[0])
+    if "过账日期" in rows.columns:
+        dates = pd.to_datetime(rows["过账日期"], errors="coerce").dropna()
+        if not dates.empty:
+            return int(dates.iloc[0].year)
+    return None
+
+
+def _amount_abs(df: pd.DataFrame) -> pd.Series:
+    if "_amount_abs" in df.columns:
+        return pd.to_numeric(df["_amount_abs"], errors="coerce")
+    return pd.to_numeric(df["凭证货币价值"], errors="coerce").abs()
+
+
+def _amount_raw(df: pd.DataFrame) -> pd.Series:
+    if "_amount_raw" in df.columns:
+        return pd.to_numeric(df["_amount_raw"], errors="coerce")
+    return pd.to_numeric(df["凭证货币价值"], errors="coerce")
+
+
+def rule_hit_identity(hit: RuleHit) -> str:
+    """Stable identity for selection; old serialized hits fall back to voucher number."""
+    return str(hit.voucher_key or hit.voucher_id).strip()
+
+
 def _clean_fact_text(values: pd.Series) -> pd.Series:
     cleaned = values.astype("string").str.strip()
     return cleaned.mask(cleaned.str.lower().isin(["", "nan", "未维护"]))
@@ -119,48 +173,49 @@ def _build_trade_voucher_facts(
 
     收入/成本判定基于 _acct_category（自动分类），不再依赖前缀清单。
     """
-    work = ensure_category(df).copy()
+    work = ensure_voucher_identity(ensure_category(df)).copy()
     work["凭证编号"] = work["凭证编号"].astype(str)
+    voucher_col = _voucher_column(work)
     work["_acct4"] = work["总账科目"].astype(str).str[:4]
     work["_dc"] = work["借/贷标识"].astype(str).str.strip()
-    work["_amount_abs"] = pd.to_numeric(work["凭证货币价值"], errors="coerce").fillna(0).abs()
+    work["_rule_amount_abs"] = _amount_abs(work).fillna(0)
 
     income_mask = work["_acct_category"].eq(CAT_REVENUE) & (work["_dc"] == "H")
     cost_mask = work["_acct_category"].eq(CAT_COST) & (work["_dc"] == "S")
 
-    trade_ids = set(work.loc[income_mask | cost_mask, "凭证编号"])
+    trade_ids = set(work.loc[income_mask | cost_mask, voucher_col])
     if not trade_ids:
         return pd.DataFrame()
 
-    income_amount = work.loc[income_mask].groupby("凭证编号")["_amount_abs"].sum()
-    cost_amount = work.loc[cost_mask].groupby("凭证编号")["_amount_abs"].sum()
+    income_amount = work.loc[income_mask].groupby(voucher_col)["_rule_amount_abs"].sum()
+    cost_amount = work.loc[cost_mask].groupby(voucher_col)["_rule_amount_abs"].sum()
     income_lines = {
         str(vid): tuple(indices.tolist())
-        for vid, indices in work.loc[income_mask].groupby("凭证编号").groups.items()
+        for vid, indices in work.loc[income_mask].groupby(voucher_col).groups.items()
     }
     cost_lines = {
         str(vid): tuple(indices.tolist())
-        for vid, indices in work.loc[cost_mask].groupby("凭证编号").groups.items()
+        for vid, indices in work.loc[cost_mask].groupby(voucher_col).groups.items()
     }
 
     source_columns = [
-        "凭证编号", "过账日期", "_acct4", "_year", "总账科目：长文本",
+        voucher_col, "凭证编号", "过账日期", "_acct4", "_year", "会计年度", "公司代码", "总账科目：长文本",
         "凭证抬头摘要", "文本", "客户", "客户科目：姓名 1", "供应商编号",
         "供应商科目：名称 1", "用户名", "凭证类型",
     ]
-    source = work.loc[work["凭证编号"].isin(trade_ids), [
+    source = work.loc[work[voucher_col].isin(trade_ids), [
         col for col in source_columns if col in work.columns
     ]].copy()
     for col in source_columns:
         if col not in source.columns:
             source[col] = pd.NA
     for col in source_columns:
-        if col not in {"凭证编号", "过账日期", "_year"}:
+        if col not in {voucher_col, "凭证编号", "过账日期", "_year", "会计年度"}:
             source[col] = _clean_fact_text(source[col])
 
-    grouped = source.groupby("凭证编号", sort=False)
+    grouped = source.groupby(voucher_col, sort=False)
     facts = grouped.first().reset_index()
-    facts["date"] = facts["凭证编号"].map(grouped["过账日期"].min())
+    facts["date"] = facts[voucher_col].map(grouped["过账日期"].min())
     all_lines = {
         str(vid): tuple(indices.tolist())
         for vid, indices in grouped.groups.items()
@@ -191,18 +246,27 @@ def _build_trade_voucher_facts(
         _pnl_category("" if pd.isna(code) else str(code), "" if pd.isna(name) else str(name))
         for code, name in zip(facts["_acct4"], facts["总账科目：长文本"], strict=True)
     ]
-    facts["revenue_amount"] = facts["凭证编号"].map(income_amount).fillna(0.0).astype(float)
-    facts["cost_amount"] = facts["凭证编号"].map(cost_amount).fillna(0.0).astype(float)
+    facts["revenue_amount"] = facts[voucher_col].map(income_amount).fillna(0.0).astype(float)
+    facts["cost_amount"] = facts[voucher_col].map(cost_amount).fillna(0.0).astype(float)
     def tuple_or_empty(value: Any) -> tuple[int, ...]:
         return value if isinstance(value, tuple) else ()
 
-    facts["income_line_indices"] = facts["凭证编号"].map(income_lines).map(tuple_or_empty)
-    facts["cost_line_indices"] = facts["凭证编号"].map(cost_lines).map(tuple_or_empty)
-    facts["all_line_indices"] = facts["凭证编号"].map(all_lines).map(tuple_or_empty)
-    facts["voucher_id"] = facts["凭证编号"]
-    facts["year"] = pd.to_numeric(facts["_year"], errors="coerce").fillna(facts["date"].dt.year)
+    facts["income_line_indices"] = facts[voucher_col].map(income_lines).map(tuple_or_empty)
+    facts["cost_line_indices"] = facts[voucher_col].map(cost_lines).map(tuple_or_empty)
+    facts["all_line_indices"] = facts[voucher_col].map(all_lines).map(tuple_or_empty)
+    facts["voucher_key"] = facts[voucher_col].astype(str)
+    facts["voucher_id"] = facts["凭证编号"].astype(str)
+    fiscal_year = pd.to_numeric(
+        facts["会计年度"] if "会计年度" in facts.columns else pd.Series(index=facts.index, dtype=float),
+        errors="coerce",
+    )
+    derived_year = pd.to_numeric(
+        facts["_year"] if "_year" in facts.columns else pd.Series(index=facts.index, dtype=float),
+        errors="coerce",
+    )
+    facts["year"] = fiscal_year.fillna(derived_year).fillna(facts["date"].dt.year)
     return facts[[
-        "voucher_id", "date", "year", "text", "terms", "customer", "vendor", "user",
+        "voucher_key", "voucher_id", "date", "year", "text", "terms", "customer", "vendor", "user",
         "voucher_type", "category", "revenue_amount", "cost_amount", "income_line_indices",
         "cost_line_indices", "all_line_indices",
     ]]
@@ -272,6 +336,7 @@ def _score_trade_relation(rev: pd.Series, cost: pd.Series, window_days: int) -> 
 # ─────────────────────────────────────────────
 
 def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
+    df = ensure_voucher_identity(df)
     c = cfg.get("splitting", {})
     max_single: float = c.get("max_single_amount", 100_000)
     min_total: float = c.get("min_total", 500_000)
@@ -282,12 +347,13 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
     if not c.get("enabled", True):
         return result
 
-    amounts = pd.to_numeric(df["凭证货币价值"], errors="coerce").fillna(0).abs()
+    amounts = _amount_abs(df).fillna(0)
     mask = df["供应商编号"].notna() & amounts.gt(0) & amounts.lt(max_single)
     pay = pd.DataFrame({
         "_vendor": df.loc[mask, "供应商编号"].astype(str).to_numpy(dtype=object),
         "_date": pd.to_datetime(df.loc[mask, "过账日期"], errors="coerce").to_numpy(),
         "_abs": amounts.loc[mask].to_numpy(dtype=float),
+        "_vkey": df.loc[mask, VOUCHER_KEY_COLUMN].astype(str).to_numpy(dtype=object),
         "_vid": df.loc[mask, "凭证编号"].astype(str).to_numpy(dtype=object),
         "_line": df.index.to_numpy()[mask.to_numpy()],
     })
@@ -312,25 +378,31 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
         ).div(day_stats["mean"]) <= 0.15
     ]
     day_groups = day_grouped.indices
+    vkeys = pay["_vkey"].to_numpy(dtype=object)
     vids = pay["_vid"].to_numpy(dtype=object)
     lines = pay["_line"].to_numpy()
     for (vendor, day), stats in day_stats.iterrows():
         positions = day_groups.get((vendor, day))
         if positions is None:
             continue
+        group_vkeys = vkeys[positions]
         group_vids = vids[positions]
-        for vid in pd.unique(group_vids):
-            if vid not in flagged:
-                flagged.add(vid)
+        for vkey in pd.unique(group_vkeys):
+            if vkey not in flagged:
+                flagged.add(vkey)
+                voucher_mask = group_vkeys == vkey
+                vid = str(group_vids[voucher_mask][0])
                 result.hits.append(RuleHit(
                     voucher_id=vid,
+                    voucher_key=str(vkey),
                     rule_type="化整为零(同日拆分)",
                     evidence=(
                         f"供应商{vendor}同日{int(stats['size'])}笔金额相似"
                         f"（均值{stats['mean']:,.0f}，差异≤15%），合计{stats['sum']:,.0f}"
                     ),
-                    line_indices=tuple(lines[positions][group_vids == vid].tolist()),
+                    line_indices=tuple(lines[positions][voucher_mask].tolist()),
                     priority=5,
+                    year=_voucher_year(df[df[VOUCHER_KEY_COLUMN].eq(vkey)]),
                 ))
 
     # 维度2：窗口期内金额高度相似（差异≤10%）
@@ -344,6 +416,7 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
         order = positions[np.argsort(dates[positions], kind="stable")]
         vendor_dates = dates[order]
         vendor_amounts = abs_values[order]
+        vendor_vkeys = vkeys[order]
         vendor_vids = vids[order]
         seen_windows = np.zeros(len(order), dtype=bool)
         right = 0
@@ -365,17 +438,22 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
             variance = float(np.max(np.abs(amts - mean_amt) / mean_amt))
             if variance <= 0.10:
                 seen_windows[left:right] = True
+                window_vkeys = vendor_vkeys[left:right]
                 window_vids = vendor_vids[left:right]
                 window_lines = lines[order[left:right]]
-                for vid in pd.unique(window_vids):
-                    if vid not in flagged:
-                        flagged.add(vid)
+                for vkey in pd.unique(window_vkeys):
+                    if vkey not in flagged:
+                        flagged.add(vkey)
+                        voucher_mask = window_vkeys == vkey
+                        vid = str(window_vids[voucher_mask][0])
                         result.hits.append(RuleHit(
                             voucher_id=vid,
+                            voucher_key=str(vkey),
                             rule_type="化整为零(窗口相似)",
                             evidence=f"供应商{vendor}在{window_days}天内{right - left}笔金额相似（差异≤10%）",
-                            line_indices=tuple(window_lines[window_vids == vid].tolist()),
+                            line_indices=tuple(window_lines[voucher_mask].tolist()),
                             priority=4,
+                            year=_voucher_year(df[df[VOUCHER_KEY_COLUMN].eq(vkey)]),
                         ))
     return result
 
@@ -385,6 +463,8 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
 # ─────────────────────────────────────────────
 
 def rule_large_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("large_amount", {})
     round_threshold: float = c.get("round_number_threshold", 1_000_000)
     repeat_threshold: float = c.get("repeat_threshold", 10_000_000)
@@ -398,26 +478,37 @@ def rule_large_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
     # 情形A：大额整数（按凭证去重）
     flagged_round: set[str] = set()
-    large = df[df["凭证货币价值"].abs().fillna(0) >= round_threshold]
-    for vid, grp in large.groupby("凭证编号"):
-        if str(vid) in flagged_round:
+    amount_abs = _amount_abs(df).fillna(0)
+    large = df[amount_abs >= round_threshold].copy()
+    large["_rule_amount_abs"] = amount_abs.loc[large.index]
+    for vkey, grp in large.groupby(voucher_col):
+        if str(vkey) in flagged_round:
             continue
-        max_amt = grp["凭证货币价值"].abs().max()
+        max_amt = grp["_rule_amount_abs"].max()
         if _is_round(max_amt, round_threshold):
-            flagged_round.add(str(vid))
+            flagged_round.add(str(vkey))
             result.hits.append(RuleHit(
-                voucher_id=str(vid),
+                voucher_id=_display_voucher_id(grp, vkey),
+                voucher_key=str(vkey),
                 rule_type="大额整数",
                 evidence=f"凭证最大行金额{max_amt:,.0f}为整数",
                 line_indices=tuple(grp.index.tolist()),
                 priority=2,
+                year=_voucher_year(grp),
             ))
 
     # 情形B：大额重复（同供应商窗口内多笔）
     if "供应商编号" in df.columns:
         flagged_repeat: set[str] = set()
         for vendor, v_rows in df[df["供应商编号"].notna()].groupby("供应商编号"):
-            large_v = v_rows[v_rows["凭证货币价值"].abs().fillna(0) >= repeat_threshold].sort_values("过账日期")
+            vendor_amounts = _amount_abs(v_rows).fillna(0)
+            large_v = v_rows[vendor_amounts >= repeat_threshold].copy()
+            large_v["_rule_amount_abs"] = vendor_amounts.loc[large_v.index]
+            # Repeat is a voucher-level event; multi-line vouchers count once.
+            large_v = (
+                large_v.sort_values(["过账日期", "_rule_amount_abs"], ascending=[True, False])
+                .drop_duplicates(subset=voucher_col, keep="first")
+            )
             if len(large_v) < repeat_min:
                 continue
             dates = large_v["过账日期"].values
@@ -425,15 +516,18 @@ def rule_large_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 window_end = dates[i] + pd.Timedelta(days=repeat_window)
                 window = large_v[(large_v["过账日期"] >= dates[i]) & (large_v["过账日期"] <= window_end)]
                 if len(window) >= repeat_min:
-                    for vid in window["凭证编号"].unique():
-                        if str(vid) not in flagged_repeat:
-                            flagged_repeat.add(str(vid))
+                    for vkey in window[voucher_col].unique():
+                        if str(vkey) not in flagged_repeat:
+                            flagged_repeat.add(str(vkey))
+                            hit_rows = df[df[voucher_col].astype(str).eq(str(vkey))]
                             result.hits.append(RuleHit(
-                                voucher_id=str(vid),
+                                voucher_id=_display_voucher_id(hit_rows, vkey),
+                                voucher_key=str(vkey),
                                 rule_type="大额重复",
                                 evidence=f"供应商{vendor}在{repeat_window}天内≥{repeat_min}笔，每笔≥{repeat_threshold/1e4:.0f}万",
-                                line_indices=tuple(window[window["凭证编号"] == vid].index.tolist()),
+                                line_indices=tuple(hit_rows.index.tolist()),
                                 priority=4,
+                                year=_voucher_year(hit_rows),
                             ))
 
     # 情形C：节假日/周末过账 — 只标记周末率远高于公司均值的用户
@@ -460,42 +554,48 @@ def rule_large_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
             flagged_users.add(user)
 
     if flagged_users:
-        voucher_info = df.groupby("凭证编号").agg(
+        voucher_info = df.assign(_rule_amount_abs=amount_abs).groupby(voucher_col).agg(
             date=("过账日期", "first"),
-            max_amt=("凭证货币价值", lambda x: x.abs().max()),
+            max_amt=("_rule_amount_abs", "max"),
             user=("用户名", "first"),
+            voucher_id=("凭证编号", "first"),
         )
         holiday_mask = _is_holiday_vectorized(voucher_info["date"])
         amount_mask = voucher_info["max_amt"] >= holiday_min
         user_mask = voucher_info["user"].isin(flagged_users)
 
-        for vid in voucher_info[holiday_mask & amount_mask & user_mask].index:
-            row = voucher_info.loc[vid]
+        for vkey in voucher_info[holiday_mask & amount_mask & user_mask].index:
+            row = voucher_info.loc[vkey]
+            hit_rows = df[df[voucher_col].astype(str).eq(str(vkey))]
             rate = user_weekend.get(row["user"], 0) / user_total[row["user"]]
             result.hits.append(RuleHit(
-                voucher_id=str(vid),
+                voucher_id=str(row["voucher_id"]),
+                voucher_key=str(vkey),
                 rule_type="异常周末过账",
                 evidence=f"用户{row['user']}周末率{rate:.0%}(公司{company_weekend_rate:.0%})，{row['date'].strftime('%Y-%m-%d')}金额{row['max_amt']:,.0f}",
-                line_indices=tuple(df[df["凭证编号"] == vid].index.tolist()),
+                line_indices=tuple(hit_rows.index.tolist()),
                 priority=3,
+                year=_voucher_year(hit_rows),
             ))
 
     # 情形D：凌晨录入（按凭证去重）
     if "录入时间" in df.columns:
         flagged_night: set[str] = set()
-        for vid, grp in df.groupby("凭证编号"):
-            if str(vid) in flagged_night:
+        for vkey, grp in df.groupby(voucher_col):
+            if str(vkey) in flagged_night:
                 continue
             time_str = grp["录入时间"].iloc[0]
             if isinstance(time_str, str) and re.match(r"^\d{2}:\d{2}:\d{2}$", time_str):
                 if int(time_str[:2]) < 6:
-                    flagged_night.add(str(vid))
+                    flagged_night.add(str(vkey))
                     result.hits.append(RuleHit(
-                        voucher_id=str(vid),
+                        voucher_id=_display_voucher_id(grp, vkey),
+                        voucher_key=str(vkey),
                         rule_type="凌晨录入",
                         evidence=f"录入时间{time_str}（凌晨0-6点）",
                         line_indices=tuple(grp.index.tolist()),
                         priority=3,
+                        year=_voucher_year(grp),
                     ))
     return result
 
@@ -505,6 +605,8 @@ def rule_large_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
 # ─────────────────────────────────────────────
 
 def rule_manual_entries(df: pd.DataFrame, cfg: dict, key_personnel: list[str] | None = None) -> RuleResult:
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("manual_entry", {})
     pnl_threshold: float = c.get("pnl_amount_threshold", 100_000)
     month_end_days: int = c.get("month_end_days", 5)
@@ -542,10 +644,10 @@ def rule_manual_entries(df: pd.DataFrame, cfg: dict, key_personnel: list[str] | 
     # 只处理异常用户的凭证
     suspect_df = manual_df[manual_df["用户名"].isin(flagged_users)]
 
-    for vid, grp in suspect_df.groupby("凭证编号"):
+    for vkey, grp in suspect_df.groupby(voucher_col):
         user = str(grp["用户名"].iloc[0]) if "用户名" in grp.columns else ""
         date = grp["过账日期"].iloc[0]
-        max_amt = grp["凭证货币价值"].abs().max()
+        max_amt = _amount_abs(grp).max()
         m = user_manual.get(user, 0)
         rate = m / user_total[user]
 
@@ -569,11 +671,13 @@ def rule_manual_entries(df: pd.DataFrame, cfg: dict, key_personnel: list[str] | 
 
         if evidence_parts:
             result.hits.append(RuleHit(
-                voucher_id=str(vid),
+                voucher_id=_display_voucher_id(grp, vkey),
+                voucher_key=str(vkey),
                 rule_type="手工凭证",
                 evidence="，".join(evidence_parts),
                 line_indices=tuple(grp.index.tolist()),
                 priority=priority,
+                year=_voucher_year(grp),
             ))
 
     return result
@@ -584,6 +688,8 @@ def rule_manual_entries(df: pd.DataFrame, cfg: dict, key_personnel: list[str] | 
 # ─────────────────────────────────────────────
 
 def rule_accrual_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("accrual_anomaly", {})
     window_days: int = c.get("match_window_days", 90)
     tolerance: float = c.get("amount_tolerance", 0.10)
@@ -599,100 +705,93 @@ def rule_accrual_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
     # 排除常规月度计提（人工费、折旧、摊销等自动计提）
     routine_kw = "人工费|折旧|摊销|社保|公积金|工资|税费|利息"
+    text = df[text_col].astype(str)
+    amount_abs = _amount_abs(df).fillna(0)
+    reversal_text = text.str.contains("冲销预提|冲预提|冲回|冲计提|冲销计提|红字", na=False)
     accrual_rows = df[
-        df[text_col].astype(str).str.contains("预提|计提", na=False)
-        & ~df[text_col].astype(str).str.contains("冲销预提|冲预提|冲回|冲计提|冲销计提", na=False)
-        & ~df[text_col].astype(str).str.contains(routine_kw, na=False)
-        & (df["凭证货币价值"].fillna(0).abs() >= min_amount)
-    ]
+        text.str.contains("预提|计提", na=False)
+        & ~reversal_text
+        & ~text.str.contains(routine_kw, na=False)
+        & amount_abs.ge(min_amount)
+    ].copy()
+    accrual_rows["_rule_amount_abs"] = amount_abs.loc[accrual_rows.index]
     if accrual_rows.empty:
         return result
+    reversal_rows = df[
+        reversal_text
+        & ~text.str.contains(routine_kw, na=False)
+        & amount_abs.ge(min_amount)
+    ].copy()
+    reversal_rows["_rule_amount_abs"] = amount_abs.loc[reversal_rows.index]
 
     seen: set[str] = set()
 
     # 维度1：用户集中度 — 谁在做非常规计提
-    user_counts = accrual_rows["用户名"].value_counts()
-    total_accruals = len(accrual_rows)
+    user_counts = accrual_rows.groupby("用户名")[voucher_col].nunique()
+    total_accruals = accrual_rows[voucher_col].nunique()
     for user, cnt in user_counts.items():
         if cnt / total_accruals > 0.5 and cnt >= 20:
-            vids = accrual_rows[accrual_rows["用户名"] == user]["凭证编号"].unique()
-            for vid in vids:
-                vid_str = str(vid)
-                if vid_str not in seen:
-                    seen.add(vid_str)
-                    grp = accrual_rows[accrual_rows["凭证编号"] == vid]
+            vkeys = accrual_rows[accrual_rows["用户名"] == user][voucher_col].unique()
+            for vkey in vkeys:
+                key = str(vkey)
+                if key not in seen:
+                    seen.add(key)
+                    grp = accrual_rows[accrual_rows[voucher_col].astype(str).eq(key)]
                     result.hits.append(RuleHit(
-                        voucher_id=vid_str,
+                        voucher_id=_display_voucher_id(grp, vkey),
+                        voucher_key=key,
                         rule_type="计提集中(用户独占)",
-                    evidence=f"用户{user}非常规计提{cnt}笔(占{cnt/total_accruals:.0%})，单行金额≥{min_amount:,.0f}",
+                        evidence=f"用户{user}非常规计提{cnt}张凭证(占{cnt/total_accruals:.0%})，单行金额≥{min_amount:,.0f}",
                         line_indices=tuple(grp.index.tolist()),
                         priority=4,
+                        year=_voucher_year(grp),
                     ))
 
-    # 维度2：悬空计提 — 借方无对应贷方冲销（向量化 merge 替代双层 iterrows）
+    # 维度2：悬空计提 — 同科目、相反借贷方向、后续窗口内一对一匹配冲销。
     for acct_prefix in accrual_rows["总账科目"].astype(str).str[:4].unique():
         acct_df = accrual_rows[accrual_rows["总账科目"].astype(str).str[:4] == acct_prefix].copy()
-        debit = acct_df[acct_df["借/贷标识"] == "S"].copy()
-        credit = acct_df[acct_df["借/贷标识"] == "H"].copy()
+        reversal_df = reversal_rows[
+            reversal_rows["总账科目"].astype(str).str[:4].eq(acct_prefix)
+        ].copy()
+        reversal_df["_r_date"] = pd.to_datetime(reversal_df["过账日期"], errors="coerce")
+        used_reversal_rows: set[Any] = set()
 
-        if debit.empty:
-            continue
+        for row_index, accrual in acct_df.sort_values("过账日期").iterrows():
+            accrual_date = pd.to_datetime(accrual["过账日期"], errors="coerce")
+            accrual_amount = float(accrual["_rule_amount_abs"])
+            opposite = "H" if str(accrual.get("借/贷标识", "")) == "S" else "S"
+            candidates = reversal_df[
+                reversal_df["借/贷标识"].astype(str).eq(opposite)
+                & reversal_df["_r_date"].gt(accrual_date)
+                & reversal_df["_r_date"].le(accrual_date + pd.Timedelta(days=window_days))
+                & ~reversal_df.index.isin(used_reversal_rows)
+                & ~reversal_df[voucher_col].astype(str).eq(str(accrual[voucher_col]))
+            ].copy()
+            if accrual_amount > 0 and not candidates.empty:
+                candidates["_tol"] = (
+                    candidates["_rule_amount_abs"].sub(accrual_amount).abs() / accrual_amount
+                )
+                candidates = candidates[candidates["_tol"].le(tolerance)].sort_values(
+                    ["_tol", "_r_date"]
+                )
+            if not candidates.empty:
+                used_reversal_rows.add(candidates.index[0])
+                continue
 
-        # 准备 join 字段
-        debit["_d_date"] = pd.to_datetime(debit["过账日期"])
-        debit["_d_amt"] = debit["凭证货币价值"].abs()
-        debit["_d_key"] = range(len(debit))
-
-        credit["_c_date"] = pd.to_datetime(credit["过账日期"])
-        credit["_c_amt"] = credit["凭证货币价值"].abs()
-
-        if credit.empty:
-            # 无贷方记录，全部为悬空
-            for _, d_row in debit.iterrows():
-                vid = str(d_row["凭证编号"])
-                if vid not in seen:
-                    seen.add(vid)
-                    result.hits.append(RuleHit(
-                        voucher_id=vid,
-                        rule_type="悬空计提",
-                        evidence=f"科目{acct_prefix}计提{d_row['_d_amt']:,.0f}，无对应贷方冲销",
-                        line_indices=tuple([d_row.name]),
-                        priority=3,
-                    ))
-            continue
-
-        # Cross join on科目前缀 → filter by date range + amount tolerance
-        merged = debit[["_d_key", "凭证编号", "_d_date", "_d_amt"]].merge(
-            credit[["凭证编号", "_c_date", "_c_amt"]],
-            how="cross", suffixes=("_d", "_c")
-        )
-        # 日期窗口过滤
-        window_end = merged["_d_date"] + pd.Timedelta(days=window_days)
-        merged = merged[
-            (merged["_c_date"] > merged["_d_date"]) & (merged["_c_date"] <= window_end)
-        ]
-        # 金额容差过滤
-        merged = merged[
-            merged["_d_amt"] > 0
-        ]
-        merged["_tol"] = (merged["_c_amt"] - merged["_d_amt"]).abs() / merged["_d_amt"]
-        merged = merged[merged["_tol"] <= tolerance]
-
-        # 找到有匹配的 debit keys
-        matched_keys = set(merged["_d_key"].unique())
-        unmatched_debit = debit[~debit["_d_key"].isin(matched_keys)]
-
-        for _, d_row in unmatched_debit.iterrows():
-            vid = str(d_row["凭证编号"])
-            if vid not in seen:
-                seen.add(vid)
-                result.hits.append(RuleHit(
-                    voucher_id=vid,
-                    rule_type="悬空计提",
-                    evidence=f"科目{acct_prefix}计提{d_row['_d_amt']:,.0f}，{window_days}天内无冲销",
-                    line_indices=tuple([d_row.name]),
-                    priority=3,
-                ))
+            key = str(accrual[voucher_col])
+            if key in seen:
+                continue
+            seen.add(key)
+            grp = accrual_rows[accrual_rows[voucher_col].astype(str).eq(key)]
+            result.hits.append(RuleHit(
+                voucher_id=_display_voucher_id(grp, key),
+                voucher_key=key,
+                rule_type="悬空计提",
+                evidence=f"科目{acct_prefix}计提{accrual_amount:,.0f}，{window_days}天内无相反方向冲销",
+                line_indices=(row_index,),
+                priority=3,
+                year=_voucher_year(grp),
+            ))
 
     return result
 
@@ -702,6 +801,8 @@ def rule_accrual_anomaly(df: pd.DataFrame, cfg: dict) -> RuleResult:
 # ─────────────────────────────────────────────
 
 def rule_yearend_surge(df: pd.DataFrame, cfg: dict) -> RuleResult:
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("yearend_surge", {})
     multiplier: float = c.get("multiplier", 2.0)
     months: list[int] = c.get("months", [12])
@@ -716,30 +817,40 @@ def rule_yearend_surge(df: pd.DataFrame, cfg: dict) -> RuleResult:
         return result
 
     rev["_month"] = rev["过账日期"].dt.month
-    monthly = rev.groupby("_month")["凭证货币价值"].apply(lambda x: x.abs().sum())
+    rev["_rule_amount_abs"] = _amount_abs(rev).fillna(0)
+    year_values = pd.Series(pd.NA, index=rev.index, dtype="Int64")
+    for year_column in ("会计年度", "_year"):
+        if year_column in rev.columns:
+            year_values = year_values.fillna(
+                pd.to_numeric(rev[year_column], errors="coerce").astype("Int64")
+            )
+    year_values = year_values.fillna(rev["过账日期"].dt.year.astype("Int64"))
+    rev["_rule_year"] = year_values.astype("Int64")
 
-    if len(monthly) < 3:
-        return result
-
-    baseline_months = [m for m in monthly.index if m not in months]
-    baseline = monthly.loc[baseline_months].mean() if baseline_months else monthly.mean()
-
-    # 检测配置月份是否超过基准月份均值 multiplier 倍
-    for month, amount in monthly.items():
-        if month not in months:
+    for year, year_rows in rev.groupby("_rule_year", dropna=False):
+        monthly = year_rows.groupby("_month")["_rule_amount_abs"].sum()
+        if len(monthly) < 3:
             continue
-        if baseline > 0 and amount > baseline * multiplier:
+        baseline_months = [month for month in monthly.index if month not in months]
+        baseline = monthly.loc[baseline_months].mean() if baseline_months else monthly.mean()
+        for month, amount in monthly.items():
+            if month not in months or baseline <= 0 or amount <= baseline * multiplier:
+                continue
             month_name = f"{month}月"
-            surge_vids = rev[rev["_month"] == month]["凭证编号"].unique()
-            for vid in surge_vids:
+            surge_keys = year_rows[year_rows["_month"] == month][voucher_col].unique()
+            for vkey in surge_keys:
+                hit_rows = year_rows[
+                    year_rows[voucher_col].astype(str).eq(str(vkey))
+                    & year_rows["_month"].eq(month)
+                ]
                 result.hits.append(RuleHit(
-                    voucher_id=str(vid),
+                    voucher_id=_display_voucher_id(hit_rows, vkey),
+                    voucher_key=str(vkey),
                     rule_type=f"收入突增({month_name})",
-                    evidence=f"{month_name}收入{amount/1e4:,.0f}万，其他月份均值{baseline/1e4:,.0f}万，{amount/baseline:.1f}x",
-                    line_indices=tuple(
-                        rev[(rev["凭证编号"] == vid) & (rev["_month"] == month)].index.tolist()
-                    ),
+                    evidence=f"{year}年{month_name}收入{amount/1e4:,.0f}万，其他月份均值{baseline/1e4:,.0f}万，{amount/baseline:.1f}x",
+                    line_indices=tuple(hit_rows.index.tolist()),
                     priority=3,
+                    year=int(year) if pd.notna(year) else _voucher_year(hit_rows),
                 ))
     return result
 
@@ -754,10 +865,11 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
     low_margin_threshold: float = c.get("low_margin_threshold", c.get("margin_threshold", 0.05))
     max_loss_rate: float = c.get("max_loss_rate", 0.50)
     min_match_score: float = c.get("min_match_score", 0.55)
-    max_candidate_groups: int = c.get("max_candidate_groups", 50)
     max_related_vouchers: int = c.get("max_related_vouchers", 5)
     window_days: int = c.get("window_days", 30)
     keywords: list[str] = c.get("keywords", ["代垫", "代采购", "委托贸易", "保理"])
+    # 旧配置 max_candidate_groups 只用于展示限流；RiskSignal 必须保存完整命中，
+    # 最终数量控制统一留给 SampleSelection。
 
     result = RuleResult(rule_name="融资性贸易")
     if not c.get("enabled", True):
@@ -780,12 +892,10 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
     cost_records = costs.to_dict(orient="records")
     cost_dates = [row["date"] for row in cost_records]
 
-    group_count = 0
     seen_groups: set[str] = set()
 
     for _, rev in revenues.iterrows():
-        if group_count >= max_candidate_groups:
-            break
+        rev_key = str(rev.get("voucher_key") or rev.get("voucher_id") or "")
 
         if any(kw in str(rev["text"]) for kw in non_trade_kw):
             continue
@@ -794,11 +904,12 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
         if same_voucher_cost > 0:
             same_margin = (float(rev["revenue_amount"]) - same_voucher_cost) / float(rev["revenue_amount"])
             if -max_loss_rate <= same_margin <= low_margin_threshold:
-                group_id = f"FT-{rev['voucher_id']}-SAME"
+                group_id = f"FT-{rev_key}-SAME"
                 if group_id not in seen_groups:
                     seen_groups.add(group_id)
                     result.hits.append(RuleHit(
                         voucher_id=str(rev["voucher_id"]),
+                        voucher_key=rev_key,
                         rule_type="融资性贸易(同凭证低毛利)",
                         evidence=(
                             f"同凭证收入{float(rev['revenue_amount']):,.0f}、成本{same_voucher_cost:,.0f}，"
@@ -810,9 +921,6 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
                         group_id=group_id,
                         relation_evidence="收入与成本已经在同一凭证内出现，优先核对合同、出入库和定价依据",
                     ))
-                    group_count += 1
-                    if group_count >= max_candidate_groups:
-                        break
                 continue
 
         scored_costs: list[dict[str, Any]] = []
@@ -824,12 +932,14 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
         left = bisect_left(cost_dates, start_date)
         right = bisect_right(cost_dates, end_date)
         for cost in cost_records[left:right]:
-            if rev["voucher_id"] == cost["voucher_id"]:
+            cost_key = str(cost.get("voucher_key") or cost.get("voucher_id") or "")
+            if rev_key == cost_key:
                 continue
             score, reasons = _score_trade_relation(rev, cost, window_days)
             if score < min_match_score:
                 continue
             scored_costs.append({
+                "voucher_key": cost_key,
                 "voucher_id": cost["voucher_id"],
                 "date": cost["date"],
                 "cost_amount": float(cost["cost_amount"]),
@@ -865,7 +975,8 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
         margin = (float(rev["revenue_amount"]) - total_cost) / float(rev["revenue_amount"]) if rev["revenue_amount"] else 0.0
         if selected and -max_loss_rate <= margin <= low_margin_threshold:
             related_ids = tuple(str(item["voucher_id"]) for item in selected)
-            group_id = f"FT-{rev['voucher_id']}-{'-'.join(related_ids[:3])}"
+            related_keys = tuple(str(item["voucher_key"]) for item in selected)
+            group_id = f"FT-{rev_key}-{'-'.join(related_keys[:3])}"
             if group_id in seen_groups:
                 continue
             seen_groups.add(group_id)
@@ -884,6 +995,7 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
             )
             result.hits.append(RuleHit(
                 voucher_id=str(rev["voucher_id"]),
+                voucher_key=rev_key,
                 rule_type="融资性贸易(收入-成本组合低毛利)",
                 evidence=(
                     f"收入{float(rev['revenue_amount']):,.0f}，匹配成本{total_cost:,.0f}，"
@@ -894,17 +1006,18 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 year=int(rev["year"]) if pd.notna(rev["year"]) else None,
                 group_id=group_id,
                 related_voucher_ids=related_ids,
+                related_voucher_keys=related_keys,
                 relation_evidence=relation_evidence,
             ))
-            group_count += 1
 
         elif not selected and any(kw in str(rev["text"]) for kw in keywords):
-            group_id = f"FT-{rev['voucher_id']}-NO-COST"
+            group_id = f"FT-{rev_key}-NO-COST"
             if group_id in seen_groups:
                 continue
             seen_groups.add(group_id)
             result.hits.append(RuleHit(
                 voucher_id=str(rev["voucher_id"]),
+                voucher_key=rev_key,
                 rule_type="融资性贸易(关键词收入无匹配成本)",
                 evidence=f"收入{float(rev['revenue_amount']):,.0f}，文本含融资/代采类关键词，{window_days}天内未找到可解释成本凭证",
                 line_indices=tuple(rev["income_line_indices"] or rev["all_line_indices"]),
@@ -913,7 +1026,6 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 group_id=group_id,
                 relation_evidence="无关联成本凭证，需结合合同、物流和收付款进一步复核",
             ))
-            group_count += 1
 
     return result
 
@@ -924,6 +1036,8 @@ def rule_financing_trade(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
 def rule_cash_pool(df: pd.DataFrame, cfg: dict) -> RuleResult:
     """检测资金池、同名划转、关联方资金占用等风险。"""
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("cash_pool", {})
     keywords: list[str] = c.get("keywords", ["资金池", "同名划转", "上划", "下拨"])
     large_threshold: float = c.get("large_threshold", 10_000_000)
@@ -945,19 +1059,21 @@ def rule_cash_pool(df: pd.DataFrame, cfg: dict) -> RuleResult:
         return result
 
     seen: set[str] = set()
-    for vid, grp in flagged_df.groupby("凭证编号"):
-        vid_str = str(vid)
-        if vid_str in seen:
+    for vkey, grp in flagged_df.groupby(voucher_col):
+        key = str(vkey)
+        if key in seen:
             continue
-        max_amt = grp["凭证货币价值"].abs().max()
+        max_amt = _amount_abs(grp).max()
         if max_amt >= large_threshold:
-            seen.add(vid_str)
+            seen.add(key)
             result.hits.append(RuleHit(
-                voucher_id=vid_str,
+                voucher_id=_display_voucher_id(grp, vkey),
+                voucher_key=key,
                 rule_type="资金池大额划转",
                 evidence=f"凭证含资金池关键词，最大行{max_amt:,.0f}",
                 line_indices=tuple(grp.index.tolist()),
                 priority=3,
+                year=_voucher_year(grp),
             ))
 
     return result
@@ -991,6 +1107,8 @@ def rule_user_concentration(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 evidence=f"用户{user}过账{cnt:,}行，占总量{ratio:.1%}",
                 line_indices=(),
                 priority=3,
+                sample_eligible=False,
+                risk_factors=("control_level_signal",),
             ))
 
     return result
@@ -1002,6 +1120,8 @@ def rule_user_concentration(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
 def rule_reversal_pattern(df: pd.DataFrame, cfg: dict) -> RuleResult:
     """检测高频冲销、大额冲销、期后冲销等异常模式。"""
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("reversal_pattern", {})
     frequent_count: int = c.get("frequent_count", 5)
     large_threshold: float = c.get("large_threshold", 500_000)
@@ -1023,39 +1143,45 @@ def rule_reversal_pattern(df: pd.DataFrame, cfg: dict) -> RuleResult:
     seen: set[str] = set()
 
     # 大额冲销
-    for vid, grp in reversal_df.groupby("凭证编号"):
-        vid_str = str(vid)
-        if vid_str in seen:
+    for vkey, grp in reversal_df.groupby(voucher_col):
+        key = str(vkey)
+        if key in seen:
             continue
-        max_amt = grp["凭证货币价值"].abs().max()
+        max_amt = _amount_abs(grp).max()
         if max_amt >= large_threshold:
-            seen.add(vid_str)
+            seen.add(key)
             result.hits.append(RuleHit(
-                voucher_id=vid_str,
+                voucher_id=_display_voucher_id(grp, vkey),
+                voucher_key=key,
                 rule_type="大额冲销",
                 evidence=f"冲销凭证最大行{max_amt:,.0f}",
                 line_indices=tuple(grp.index.tolist()),
                 priority=3,
+                year=_voucher_year(grp),
             ))
 
     # 频繁冲销用户
     if "用户名" in reversal_df.columns:
-        user_rev_counts = reversal_df.groupby("用户名")["凭证编号"].nunique()
+        user_rev_counts = reversal_df.groupby("用户名")[voucher_col].nunique()
         for user, cnt in user_rev_counts.items():
             if cnt >= frequent_count:
-                vids = reversal_df[reversal_df["用户名"] == user]["凭证编号"].unique()
-                for vid in vids:
-                    vid_str = str(vid)
-                    if vid_str not in seen:
-                        seen.add(vid_str)
+                vkeys = reversal_df[reversal_df["用户名"] == user][voucher_col].unique()
+                for vkey in vkeys:
+                    key = str(vkey)
+                    if key not in seen:
+                        seen.add(key)
+                        grp = reversal_df[
+                            reversal_df[voucher_col].astype(str).eq(key)
+                            & reversal_df["用户名"].eq(user)
+                        ]
                         result.hits.append(RuleHit(
-                            voucher_id=vid_str,
+                            voucher_id=_display_voucher_id(grp, vkey),
+                            voucher_key=key,
                             rule_type="频繁冲销用户",
                             evidence=f"用户{user}冲销{cnt}笔",
-                            line_indices=tuple(
-                                reversal_df[(reversal_df["凭证编号"] == vid) & (reversal_df["用户名"] == user)].index.tolist()
-                            ),
+                            line_indices=tuple(grp.index.tolist()),
                             priority=2,
+                            year=_voucher_year(grp),
                         ))
 
     return result
@@ -1067,6 +1193,8 @@ def rule_reversal_pattern(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
 def rule_sensitive_fees(df: pd.DataFrame, cfg: dict) -> RuleResult:
     """筛查敏感费用关键词（咨询、代理、招待、捐赠等），结合金额阈值过滤常规小额。"""
+    df = ensure_voucher_identity(df)
+    voucher_col = _voucher_column(df)
     c = cfg.get("sensitive_fees", {})
     categories: dict[str, dict] = c.get("categories", {
         "咨询费": {"keywords": ["咨询", "顾问"], "exclude": [], "threshold": 10000},
@@ -1088,9 +1216,8 @@ def rule_sensitive_fees(df: pd.DataFrame, cfg: dict) -> RuleResult:
     if text_col is None:
         return result
 
-    seen: set[str] = set()
-
     for cat_name, cat_cfg in categories.items():
+        seen: set[str] = set()
         keywords = cat_cfg.get("keywords", [])
         exclude = cat_cfg.get("exclude", [])
         threshold = cat_cfg.get("threshold", 10000)
@@ -1128,47 +1255,76 @@ def rule_sensitive_fees(df: pd.DataFrame, cfg: dict) -> RuleResult:
             if u_rate > cat_rate * baseline_multiplier and u_count >= 10:
                 flagged_users.add(user)
 
-        # 异常用户：只取金额最大的 top 20 凭证（避免单用户淹没样本）
-        flagged_user_top_n = 20
+        # 用户集中本身是控制层信号，不把该用户的所有小额凭证强行灌入样本。
         for user in flagged_users:
             user_cat = cat_df[cat_df["用户名"] == user].copy()
-            user_vids = user_cat.groupby("凭证编号")["凭证货币价值"].apply(lambda x: x.abs().max())
-            top_vids = user_vids.nlargest(flagged_user_top_n).index
-            u_count = user_cat["凭证编号"].nunique() if not user_cat.empty else 0
+            user_cat["_rule_amount_abs"] = _amount_abs(user_cat)
+            u_count = user_cat[voucher_col].nunique() if not user_cat.empty else 0
+            result.hits.append(RuleHit(
+                voucher_id=f"USER:{user}:{cat_name}",
+                rule_type=f"敏感费用用户集中({cat_name})",
+                evidence=(
+                    f"用户{user}敏感费用率异常(>{baseline_multiplier:.0f}x公司均值，"
+                    f"共{u_count}张凭证)"
+                ),
+                line_indices=(),
+                priority=3,
+                sample_eligible=False,
+                risk_factors=("control_level_signal",),
+            ))
+            user_amounts = user_cat.groupby(voucher_col)["_rule_amount_abs"].max()
+            material_keys = (
+                user_amounts[user_amounts.ge(threshold)]
+                .sort_values(ascending=False)
+                .index
+            )
 
-            for vid in top_vids:
-                vid_str = str(vid)
-                if vid_str in seen:
+            for vkey in material_keys:
+                key = str(vkey)
+                if key in seen:
                     continue
-                seen.add(vid_str)
-                grp = user_cat[user_cat["凭证编号"] == vid]
-                amt = grp["凭证货币价值"].abs().max()
+                seen.add(key)
+                grp = user_cat[user_cat[voucher_col].astype(str).eq(key)]
+                amt = _amount_abs(grp).max()
                 result.hits.append(RuleHit(
-                    voucher_id=vid_str,
+                    voucher_id=_display_voucher_id(grp, vkey),
+                    voucher_key=key,
                     rule_type=f"敏感费用({cat_name})",
                     evidence=f"{cat_name}，用户{user}敏感费用率异常(>{baseline_multiplier:.0f}x公司均值，共{u_count}笔)，金额{amt:,.0f}",
                     line_indices=tuple(grp.index.tolist()),
                     priority=3,
+                    year=_voucher_year(grp),
+                    risk_factors=("abnormal_user_concentration",),
                 ))
 
         # 非异常用户：仅标记超阈值的（向量化，避免 iterrows）
-        cat_df["_vid"] = cat_df["凭证编号"].astype(str)
+        cat_df["_vkey"] = cat_df[voucher_col].astype(str)
         cat_df["_user"] = cat_df.get("用户名", pd.Series("")).fillna("").astype(str)
-        cat_df["_amt"] = cat_df["凭证货币价值"].abs()
+        cat_df["_amt"] = _amount_abs(cat_df)
         over_threshold = cat_df[
-            (~cat_df["_vid"].isin(seen))
+            (~cat_df["_vkey"].isin(seen))
             & (~cat_df["_user"].isin(flagged_users))
             & (cat_df["_amt"] >= threshold)
         ]
-        for _, row in over_threshold.head(200).iterrows():  # 安全上限，避免输出爆炸
-            vid = row["_vid"]
-            seen.add(vid)
+        ranked_keys = (
+            over_threshold.groupby("_vkey")["_amt"]
+            .max()
+            .sort_values(ascending=False)
+        )
+        for vkey, amount in ranked_keys.items():
+            seen.add(vkey)
+            grp = cat_df[cat_df["_vkey"].eq(vkey)]
             result.hits.append(RuleHit(
-                voucher_id=vid,
+                voucher_id=_display_voucher_id(grp, vkey),
+                voucher_key=vkey,
                 rule_type=f"敏感费用({cat_name})",
-                evidence=f"{cat_name}金额{row['_amt']:,.0f}，文本：{str(row.get(text_col, ''))[:40]}",
-                line_indices=tuple(cat_df[cat_df["凭证编号"] == vid].index.tolist()),
+                evidence=(
+                    f"{cat_name}金额{amount:,.0f}，"
+                    f"文本：{str(grp.iloc[0].get(text_col, ''))[:40]}"
+                ),
+                line_indices=tuple(grp.index.tolist()),
                 priority=2,
+                year=_voucher_year(grp),
             ))
 
     return result
@@ -1217,9 +1373,13 @@ def cross_year_findings_to_hits(findings: list, cfg: dict | None = None) -> Rule
         if not _include_cross_year_finding(f, cfg):
             continue
         severity_priority = {"高": 5, "中": 3, "低": 2}.get(f.severity, 2)
-        for vid in f.voucher_ids:
+        voucher_ids = [str(value) for value in getattr(f, "voucher_ids", [])]
+        voucher_keys = [str(value) for value in getattr(f, "voucher_keys", [])]
+        for index, vid in enumerate(voucher_ids):
+            voucher_key = voucher_keys[index] if index < len(voucher_keys) else None
             result.hits.append(RuleHit(
                 voucher_id=str(vid),
+                voucher_key=voucher_key,
                 rule_type=f"跨年:{f.category}",
                 evidence=f.description[:120],
                 line_indices=(),
@@ -1273,12 +1433,13 @@ def run_all_rules(
     key_personnel: list[str] | None = None,
     candidate_voucher_ids: set[str] | list[str] | None = None,
 ) -> list[RuleResult]:
-    df_filtered, _ = apply_whitelist(df, cfg)
+    prepared, _quality = prepare_rule_dataframe(df)
+    df_filtered, _ = apply_whitelist(prepared, cfg)
     candidate_set = {str(v) for v in candidate_voucher_ids or [] if str(v)}
     if candidate_set and "凭证编号" in df_filtered.columns:
-        df_filtered = df_filtered[df_filtered["凭证编号"].astype(str).isin(candidate_set)].copy()
-
-    max_sample_size = int(cfg.get("max_sample_size", 50))
+        stable_match = df_filtered[VOUCHER_KEY_COLUMN].astype(str).isin(candidate_set)
+        legacy_match = df_filtered["凭证编号"].astype(str).isin(candidate_set)
+        df_filtered = df_filtered[stable_match | legacy_match].copy()
 
     results = []
     dispatched_base_keys = set()
@@ -1316,26 +1477,11 @@ def run_all_rules(
         for result in results:
             result.hits = [
                 hit for hit in result.hits
-                if str(hit.voucher_id) in candidate_set
+                if rule_hit_identity(hit) in candidate_set
+                or str(hit.voucher_id) in candidate_set
+                or set(str(v) for v in hit.related_voucher_keys).intersection(candidate_set)
                 or set(str(v) for v in hit.related_voucher_ids).intersection(candidate_set)
             ]
-
-    # ── 按 max_sample_size 截断 ──
-    # 收集所有命中，按凭证去重，按优先级(降序)排序，取前 max_sample_size 个凭证
-    vid_priority: dict[str, int] = {}
-    for r in results:
-        for hit in r.hits:
-            vid = hit.voucher_id
-            vid_priority[vid] = max(vid_priority.get(vid, 0), hit.priority)
-
-    top_voucher_ids = set(
-        sorted(vid_priority, key=lambda v: (vid_priority[v], v), reverse=True)
-        [:max_sample_size]
-    )
-
-    # 过滤每个 RuleResult 的 hits
-    for r in results:
-        r.hits = [hit for hit in r.hits if hit.voucher_id in top_voucher_ids]
 
     return results
 
@@ -1343,6 +1489,10 @@ def run_all_rules(
 def hits_summary(results: list[RuleResult]) -> list[dict]:
     rows = []
     for r in results:
-        voucher_count = len({h.voucher_id for h in r.hits})
+        voucher_count = len({
+            rule_hit_identity(hit)
+            for hit in r.hits
+            if hit.sample_eligible
+        })
         rows.append({"规则": r.rule_name, "命中数": r.count, "凭证数": voucher_count})
     return rows

@@ -96,9 +96,11 @@ def judgments_from_state(raw: dict[str, Any] | None) -> dict[str, list[LLMJudgme
 def summarize_judgments(all_judgments: dict[str, list[LLMJudgment]]) -> dict[str, Any]:
     flat = [j for items in all_judgments.values() for j in items]
     confirmed = [j for j in flat if j.confirmed]
+    unverified = [j for j in flat if not j.confirmed]
     return {
         "total": len(flat),
         "confirmed": len(confirmed),
+        "unverified": len(unverified),
         "high": sum(1 for j in confirmed if j.risk_level == "高"),
         "medium": sum(1 for j in confirmed if j.risk_level != "高"),
         "fallback": sum(1 for j in flat if j.source == "fallback"),
@@ -118,7 +120,6 @@ def verify_with_llm(
     progress_callback=None,
 ) -> dict[str, list[LLMJudgment]]:
     """对 top N 规则命中凭证调用 LLM 核实，返回 {rule_name: [LLMJudgment]}。"""
-    from audit_engine.rule_engine import RuleHit  # local for typing clarity
 
     client = make_openai_client(
         api_key=api_key,
@@ -189,7 +190,10 @@ def verify_with_llm(
 
             if response_text:
                 try:
-                    batch_judgments = _build_judgments_from_response(response_text)
+                    batch_judgments = _build_judgments_from_response(
+                        response_text,
+                        allowed_voucher_ids={str(hit.voucher_id) for hit in batch},
+                    )
                 except ValueError:
                     logger.warning(
                         "LLM verify response parse failed for rule %s",
@@ -302,19 +306,34 @@ def _build_prompt(rule_name: str, groups: list[dict]) -> str:
 ]"""
 
 
-def _build_judgments_from_response(text: str) -> list[LLMJudgment]:
+def _build_judgments_from_response(
+    text: str,
+    *,
+    allowed_voucher_ids: set[str] | None = None,
+) -> list[LLMJudgment]:
     data = parse_json_list(text)
     judgments = []
+    seen: set[str] = set()
     for item in data:
         if not isinstance(item, dict) or not item.get("confirmed", False):
             continue
+        voucher_id = str(item.get("voucher_id", "")).strip()
+        if not voucher_id or voucher_id in seen:
+            continue
+        if allowed_voucher_ids is not None and voucher_id not in allowed_voucher_ids:
+            logger.warning("Ignoring LLM judgment for voucher outside requested batch: %s", voucher_id)
+            continue
+        seen.add(voucher_id)
+        risk_level = str(item.get("risk_level", "中") or "中")
+        if risk_level not in {"高", "中"}:
+            risk_level = "中"
         judgments.append(
             LLMJudgment(
-                voucher_id=str(item.get("voucher_id", "")),
+                voucher_id=voucher_id,
                 confirmed=True,
-                risk_level=item.get("risk_level", "中"),
-                reason=item.get("reason", ""),
-                audit_procedures=item.get("audit_procedures", ""),
+                risk_level=risk_level,
+                reason=str(item.get("reason", "") or ""),
+                audit_procedures=str(item.get("audit_procedures", "") or ""),
             )
         )
     return judgments
@@ -326,9 +345,9 @@ def _fallback_judgments_for_hits(hits: list[Any], reason_prefix: str) -> list[LL
         judgments.append(
             LLMJudgment(
                 voucher_id=str(getattr(hit, "voucher_id", "")),
-                confirmed=True,
-                risk_level="中",
-                reason=f"{reason_prefix}，疑点保留（{str(getattr(hit, 'evidence', ''))[:60]}）",
+                confirmed=False,
+                risk_level="待核验",
+                reason=f"{reason_prefix}，未形成模型结论；疑点仍待人工复核（{str(getattr(hit, 'evidence', ''))[:60]}）",
                 audit_procedures="需人工复核",
                 source="fallback",
             )

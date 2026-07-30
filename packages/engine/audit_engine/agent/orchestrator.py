@@ -24,6 +24,9 @@ SYSTEM_PROMPT = (
     "用户要求“对比”币种时先按 currency 分组展示各币种笔数和各自金额，再请用户选择要进入画像的单一币种；不做隐式汇率折算。"
     "数据质量问题调用 get_data_quality_review；分类决策只能通过 apply_classification_decisions 并等待用户批准。"
     "证据覆盖边界调用 get_evidence_inventory；疑点与结论的区分调用 get_audit_case_summary。"
+    "审计事项详情调用 get_audit_case_detail；需推进立项、认定、证据、程序、结论、复核或关闭时调用 manage_audit_case。"
+    "风险信号和候选疑点不是审计证据，抽样结果也不是审计结论；形成结论前必须读取 readiness 阻断项。"
+    "不得虚构证据来源、执行人或复核人；独立签署时必须使用用户明确提供的复核人身份。"
     "用户左侧选中范围是优先分析对象。用中文简洁专业回复。"
     "能力指引："
     "1) 架构/模块 → list_analysis_modules、describe_agent_capabilities；"
@@ -53,6 +56,7 @@ MUTATING_TOOLS = {
     "apply_rule_tuning",
     "apply_module_insight_recommendations",
     "apply_classification_decisions",
+    "manage_audit_case",
 }
 
 
@@ -216,33 +220,67 @@ def _persist_agent_exchange(
     tool_log: list[dict[str, Any]],
     ctx: AuditSelection | None,
     ui_actions: list[dict[str, Any]] | None = None,
+    persist_pinned_context: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now().isoformat(timespec="seconds")
-    history.append({"role": "user", "content": user_message, "at": now})
+    user_entry = {"role": "user", "content": user_message, "at": now}
     compact_tool_log = _compact_tool_log(tool_log)
-    history.append({"role": "assistant", "content": reply, "at": now, "tool_calls": compact_tool_log})
-    thread["messages"] = history[-MAX_HISTORY:]
-    thread["updated_at"] = now
-    events = list(thread.get("audit_events") or [])
-    events.append(
-        {
-            "at": now,
-            "user_message": user_message,
-            "tool_calls": compact_tool_log,
-            "reply": reply,
-        }
-    )
-    thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
+    assistant_entry = {
+        "role": "assistant",
+        "content": reply,
+        "at": now,
+        "tool_calls": compact_tool_log,
+    }
+    audit_event = {
+        "at": now,
+        "user_message": user_message,
+        "tool_calls": compact_tool_log,
+        "reply": reply,
+    }
+    proposed_actions = list(thread.get("pending_actions") or [])
 
     def update(state: dict[str, Any]) -> None:
-        state["agent_thread"] = thread
+        latest = dict(state.get("agent_thread") or {})
+        if "messages" in latest:
+            messages = list(latest.get("messages") or [])
+        else:
+            messages = list(history)
+        messages.extend((user_entry, assistant_entry))
+        latest["messages"] = messages[-MAX_HISTORY:]
 
-    store.update_state(project_id, update)
+        latest_actions = list(latest.get("pending_actions") or [])
+        latest_ids = {
+            str(action.get("action_id") or "")
+            for action in latest_actions
+            if isinstance(action, dict) and action.get("action_id")
+        }
+        for action in proposed_actions:
+            action_id = str(action.get("action_id") or "") if isinstance(action, dict) else ""
+            if action_id and action_id not in latest_ids:
+                latest_actions.append(action)
+                latest_ids.add(action_id)
+        latest["pending_actions"] = latest_actions[-50:]
+
+        events = list(latest.get("audit_events") or [])
+        events.append(audit_event)
+        latest["audit_events"] = events[-MAX_AUDIT_EVENTS:]
+        if persist_pinned_context:
+            latest["pinned_context"] = ctx
+        latest["updated_at"] = now
+        state["agent_thread"] = latest
+
+    saved_state = store.update_state(project_id, update)
+    saved_thread = saved_state.get("agent_thread") or {}
+    saved_context = (
+        saved_thread.get("pinned_context")
+        if isinstance(saved_thread.get("pinned_context"), dict)
+        else None
+    )
     return {
         "reply": reply,
         "tool_calls": compact_tool_log,
-        "pinned_context": thread.get("pinned_context"),
-        "suggestions": _suggested_followups(ctx),
+        "pinned_context": saved_thread.get("pinned_context"),
+        "suggestions": _suggested_followups(saved_context),
         "ui_actions": ui_actions or [],
         "needs_api_key": False,
     }
@@ -322,6 +360,7 @@ def record_module_insight_dispatch(
         tool_log=tool_log,
         ctx=ctx if isinstance(ctx, dict) else None,
         ui_actions=ui_actions,
+        persist_pinned_context=pinned_context is not None,
     )
 
 
@@ -540,6 +579,7 @@ def run_agent_chat(
         tool_log=tool_log,
         ctx=ctx if isinstance(ctx, dict) else None,
         ui_actions=ui_actions,
+        persist_pinned_context=pinned_context is not None,
     )
 
 
@@ -580,57 +620,100 @@ def resolve_pending_action(
     *,
     approve: bool,
 ) -> dict[str, Any]:
-    state = store.load_state(project_id)
-    thread = dict(state.get("agent_thread") or {})
-    pending = list(thread.get("pending_actions") or [])
-    action = next((item for item in pending if item.get("action_id") == action_id), None)
-    if not action:
-        raise ValueError("待确认操作不存在或已过期")
-    if action.get("status") != "pending":
-        raise ValueError(f"操作已处理：{action.get('status')}")
+    claimed: dict[str, Any] = {}
+    started_at = datetime.now().isoformat(timespec="seconds")
 
-    now = datetime.now().isoformat(timespec="seconds")
+    def claim(state: dict[str, Any]) -> None:
+        thread = dict(state.get("agent_thread") or {})
+        pending = list(thread.get("pending_actions") or [])
+        index = next(
+            (idx for idx, item in enumerate(pending) if item.get("action_id") == action_id),
+            None,
+        )
+        if index is None:
+            raise ValueError("待确认操作不存在或已过期")
+        action = dict(pending[index])
+        if action.get("status") != "pending":
+            raise ValueError(f"操作已处理：{action.get('status')}")
+        action["status"] = "resolving"
+        action["resolution_intent"] = "approve" if approve else "reject"
+        action["resolution_started_at"] = started_at
+        pending[index] = action
+        thread["pending_actions"] = pending
+        thread["updated_at"] = started_at
+        state["agent_thread"] = thread
+        claimed.update(action)
+
+    store.update_state(project_id, claim)
+
     if approve:
-        result = execute_tool(store, project_id, str(action["tool"]), dict(action.get("args") or {}))
+        try:
+            result = execute_tool(
+                store,
+                project_id,
+                str(claimed["tool"]),
+                dict(claimed.get("args") or {}),
+            )
+        except Exception as exc:  # pragma: no cover - execute_tool normally returns structured errors
+            result = {"error": str(exc)}
         status = "approved" if not result.get("error") else "failed"
     else:
         result = {"ok": True, "rejected": True}
         status = "rejected"
-    action["status"] = status
-    action["resolved_at"] = now
-    action["result"] = result
+    resolved_at = datetime.now().isoformat(timespec="seconds")
 
-    events = list(thread.get("audit_events") or [])
-    events.append({
-        "at": now,
-        "action_id": action_id,
-        "tool": action.get("tool"),
-        "args": action.get("args") or {},
-        "decision": status,
-        "result": result,
-    })
-    thread["pending_actions"] = pending
-    thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
-    thread["updated_at"] = now
-    latest_state = store.load_state(project_id)
-    latest_state["agent_thread"] = thread
-    store.save_state(project_id, latest_state)
+    def finalize(state: dict[str, Any]) -> None:
+        thread = dict(state.get("agent_thread") or {})
+        pending = list(thread.get("pending_actions") or [])
+        index = next(
+            (idx for idx, item in enumerate(pending) if item.get("action_id") == action_id),
+            None,
+        )
+        if index is None:
+            raise ValueError("执行完成，但待确认操作记录已丢失")
+        action = dict(pending[index])
+        if action.get("status") != "resolving":
+            raise ValueError(f"操作状态在执行期间发生变化：{action.get('status')}")
+        action["status"] = status
+        action["resolved_at"] = resolved_at
+        action["result"] = result
+        pending[index] = action
+
+        events = list(thread.get("audit_events") or [])
+        events.append({
+            "at": resolved_at,
+            "action_id": action_id,
+            "tool": action.get("tool"),
+            "args": action.get("args") or {},
+            "decision": status,
+            "result": result,
+        })
+        thread["pending_actions"] = pending
+        thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
+        thread["updated_at"] = resolved_at
+        state["agent_thread"] = thread
+
+    store.update_state(project_id, finalize)
     return {"action_id": action_id, "status": status, "result": result, "ui_actions": result.get("ui_actions") or []}
 
 
 def set_pinned_context(store: ProjectStore, project_id: str, context: AuditSelection | None) -> dict[str, Any]:
-    state = store.load_state(project_id)
-    thread = dict(state.get("agent_thread") or {})
-    thread["pinned_context"] = context
-    thread["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    state["agent_thread"] = thread
-    store.save_state(project_id, state)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    def update(state: dict[str, Any]) -> None:
+        thread = dict(state.get("agent_thread") or {})
+        thread["pinned_context"] = context
+        thread["updated_at"] = now
+        state["agent_thread"] = thread
+
+    store.update_state(project_id, update)
     return {"pinned_context": context, "suggestions": _suggested_followups(context)}
 
 
 def clear_agent_thread(store: ProjectStore, project_id: str) -> None:
-    state = store.load_state(project_id)
-    thread = dict(state.get("agent_thread") or {})
-    thread["messages"] = []
-    state["agent_thread"] = thread
-    store.save_state(project_id, state)
+    def update(state: dict[str, Any]) -> None:
+        thread = dict(state.get("agent_thread") or {})
+        thread["messages"] = []
+        state["agent_thread"] = thread
+
+    store.update_state(project_id, update)

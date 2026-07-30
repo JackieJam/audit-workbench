@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from audit_engine.pipeline import AnalysisPipeline
@@ -19,10 +19,30 @@ from audit_api.routers.analysis import _manifest_or_404
 router = APIRouter(prefix="/projects", tags=["pipeline"])
 
 
+class CoverageConstraintsRequest(BaseModel):
+    min_per_month: int | None = Field(None, ge=1, le=500)
+    min_per_account_category: int | None = Field(None, ge=1, le=500)
+    max_same_risk_signal_ratio: float | None = Field(None, gt=0, le=1)
+
+
 class SampleRequest(BaseModel):
+    plan_name: str = Field("", max_length=200)
+    population_scope: Literal["full_population", "risk_signals"] = "risk_signals"
+    strategy: Literal[
+        "risk_directed",
+        "random",
+        "monetary_unit",
+        "stratified",
+        "unpredictable",
+    ] = "risk_directed"
     method: str = Field("by_rule", pattern="^(by_rule|random|all|by_account_weight|monetary_unit|stratified)$")
     size: int | None = Field(None, ge=1, le=500)
     seed: int = 42
+    years: list[int] = Field(default_factory=list, max_length=100)
+    coverage_constraints: CoverageConstraintsRequest = Field(default_factory=CoverageConstraintsRequest)
+    stratify_by: Literal["account_category", "month", "voucher_type"] | None = None
+    stratify_mode: Literal["proportional", "equal"] | None = None
+    unpredictable: bool = False
 
 
 class VerifyRequest(BaseModel):
@@ -114,15 +134,23 @@ def run_rules(
     manifest = _manifest_or_404(store, project_id)
     if not manifest.years:
         raise HTTPException(status_code=400, detail="项目无序时账数据")
-    results = pipeline.run_rules(project_id)
-    return _summarize_rule_results(results)
+    try:
+        results = pipeline.run_rules(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    context = store.load_state(project_id).get("rule_run_context") or {}
+    return _summarize_rule_results(results, context=context)
 
 
 @router.get("/{project_id}/pipeline/rules/results")
 def get_rule_results(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
     _manifest_or_404(store, project_id)
-    results = store.load_state(project_id).get("rule_results", [])
-    return _summarize_rule_results(results)
+    state = store.load_state(project_id)
+    results = state.get("rule_results", [])
+    return _summarize_rule_results(
+        results,
+        context=state.get("rule_run_context") or {},
+    )
 
 
 @router.post("/{project_id}/pipeline/samples")
@@ -135,12 +163,16 @@ def extract_samples(
     manifest = _manifest_or_404(store, project_id)
     if not manifest.years:
         raise HTTPException(status_code=400, detail="项目无序时账数据")
-    return pipeline.extract_samples(
-        project_id,
-        method=body.method,
-        size=body.size,
-        seed=body.seed,
-    )
+    try:
+        return pipeline.extract_samples(
+            project_id,
+            method=body.method,
+            size=body.size,
+            seed=body.seed,
+            plan=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}/pipeline/samples")
@@ -148,11 +180,19 @@ def get_samples(project_id: str, store: ProjectStore = Depends(get_store)) -> di
     _manifest_or_404(store, project_id)
     state = store.load_state(project_id)
     samples = state.get("samples", [])
-    voucher_count = len({s.get("凭证编号") for s in samples if s.get("凭证编号")})
+    voucher_count = len({
+        str(s.get("_voucher_key") or s.get("凭证唯一键") or s.get("凭证编号"))
+        for s in samples
+        if s.get("_voucher_key") or s.get("凭证唯一键") or s.get("凭证编号")
+    })
+    plan_record = state.get("sampling_plan") or {}
     return {
         "sample_rows": len(samples),
         "voucher_count": voucher_count,
         "samples": samples,
+        "requested_plan": plan_record.get("requested_plan"),
+        "population_snapshot": plan_record.get("population_snapshot"),
+        "selection_trace": plan_record.get("selection_trace"),
     }
 
 
@@ -229,18 +269,31 @@ def export_excel(
     )
 
 
-def _summarize_rule_results(results: list[dict]) -> dict:
+def _summarize_rule_results(
+    results: list[dict],
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict:
     summary = []
+    previews = []
     total_hits = 0
     for block in results or []:
-        count = int(block.get("count", len(block.get("hits", []))))
+        hits = list(block.get("hits") or [])
+        count = int(block.get("count", len(hits)))
         total_hits += count
         summary.append({
             "rule_name": block.get("rule_name", ""),
             "count": count,
         })
+        previews.append({
+            "rule_name": block.get("rule_name", ""),
+            "count": count,
+            "hits": hits[:20],
+            "hits_truncated": len(hits) > 20 or count > len(hits[:20]),
+        })
     return {
         "rules": summary,
         "total_hits": total_hits,
-        "results": results,
+        "results": previews,
+        "rule_run_context": context or {},
     }

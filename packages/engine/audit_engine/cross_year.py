@@ -20,7 +20,7 @@ from audit_engine.account_classifier import (
     CAT_TAX_SURCHARGE,
 )
 from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
-from audit_engine.data_columns import ensure_category
+from audit_engine.data_columns import VOUCHER_KEY_COLUMN, ensure_category, ensure_voucher_identity
 
 
 @dataclass
@@ -32,6 +32,19 @@ class CrossYearFinding:
     amount: float
     severity: str          # "高" | "中" | "低"
     evidence: dict[str, Any] = field(default_factory=dict)
+    voucher_keys: list[str] = field(default_factory=list)
+
+
+def _amount_abs(df: pd.DataFrame) -> pd.Series:
+    if "_amount_abs" in df.columns:
+        return pd.to_numeric(df["_amount_abs"], errors="coerce")
+    return pd.to_numeric(df["凭证货币价值"], errors="coerce").abs()
+
+
+def _amount_raw(df: pd.DataFrame) -> pd.Series:
+    if "_amount_raw" in df.columns:
+        return pd.to_numeric(df["_amount_raw"], errors="coerce")
+    return pd.to_numeric(df["凭证货币价值"], errors="coerce")
 
 
 
@@ -91,7 +104,7 @@ def _run_cross_year_impl(
 ) -> list[CrossYearFinding]:
     """执行七类跨年检测。"""
     prepared = {
-        year: ensure_category(df.copy(), category_overrides=overrides)
+        year: ensure_voucher_identity(ensure_category(df.copy(), category_overrides=overrides))
         for year, df in year_map.items()
     }
     t = thresholds
@@ -156,6 +169,7 @@ def _accrual_reversal_pairs(
     mismatch_tolerance: float = _CROSS_YEAR_DETECTION_DEFAULTS["accrual_mismatch_tolerance"],
     high_severity_amount: float = _CROSS_YEAR_DETECTION_DEFAULTS["accrual_high_severity_amount"],
 ) -> list[CrossYearFinding]:
+    year_map = {year: ensure_voucher_identity(df) for year, df in year_map.items()}
     findings = []
     years = sorted(year_map.keys())
 
@@ -186,8 +200,8 @@ def _accrual_reversal_pairs(
             & df_n1["文本"].str.contains("冲销|冲回|红字", na=False)
         ].copy()
 
-        total_accrual = dec_accruals["凭证货币价值"].abs().sum()
-        total_reversal = reversals["凭证货币价值"].abs().sum() if not reversals.empty else 0.0
+        total_accrual = _amount_abs(dec_accruals).sum()
+        total_reversal = _amount_abs(reversals).sum() if not reversals.empty else 0.0
 
         if total_accrual < min_amount:
             continue
@@ -202,6 +216,7 @@ def _accrual_reversal_pairs(
                 description=f"{yr_n}年末预提{total_accrual:,.0f}，{window_label}仅冲回{total_reversal:,.0f}（{coverage:.0%}），悬空{unmatched:,.0f}",
                 years_involved=[yr_n, yr_n1],
                 voucher_ids=dec_accruals["凭证编号"].unique().tolist(),
+                voucher_keys=dec_accruals[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
                 amount=unmatched,
                 severity="高" if unmatched > high_severity_amount else "中",
                 evidence={
@@ -219,6 +234,7 @@ def _accrual_reversal_pairs(
                 description=f"{yr_n}年末预提与{window_label}冲回金额差异{abs(coverage-1):.0%}，疑似调节跨年损益",
                 years_involved=[yr_n, yr_n1],
                 voucher_ids=dec_accruals["凭证编号"].unique().tolist(),
+                voucher_keys=dec_accruals[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
                 amount=abs(total_accrual - total_reversal),
                 severity="中",
                 evidence={"coverage_ratio": round(coverage, 4), "match_window_days": window_days},
@@ -235,6 +251,7 @@ def _revenue_timing_drift(
     year_map: dict[int, pd.DataFrame],
     dec_multiplier: float = _DEFAULT_DEC_MULTIPLIER,
 ) -> list[CrossYearFinding]:
+    year_map = {year: ensure_voucher_identity(df) for year, df in year_map.items()}
     findings = []
     years = sorted(year_map.keys())
 
@@ -246,7 +263,8 @@ def _revenue_timing_drift(
             continue
         rev = rev.copy()
         rev["_month"] = rev["过账日期"].dt.month
-        monthly = rev.groupby("_month")["凭证货币价值"].apply(lambda x: x.abs().sum())
+        rev["_rule_amount_abs"] = _amount_abs(rev)
+        monthly = rev.groupby("_month")["_rule_amount_abs"].sum()
         if len(monthly) < 2:
             continue
         dec = float(monthly.get(12, 0))
@@ -260,18 +278,20 @@ def _revenue_timing_drift(
         # 某年12月收入异常高，且次年1月出现大额红字
         if ratio_n > dec_multiplier:
             df_n1 = ensure_category(year_map[yr_n1])
+            jan_amount = _amount_raw(df_n1)
             jan_red = df_n1[
                 (df_n1["过账日期"].dt.month == 1)
                 & df_n1["_acct_category"].eq(CAT_REVENUE)
-                & (df_n1["凭证货币价值"] < 0)
+                & jan_amount.lt(0)
             ]
             if not jan_red.empty:
-                red_amt = jan_red["凭证货币价值"].abs().sum()
+                red_amt = _amount_abs(jan_red).sum()
                 findings.append(CrossYearFinding(
                     category="收入跨年确认",
                     description=f"{yr_n}年12月收入是前11月均值的{ratio_n:.1f}倍，且{yr_n1}年1月出现红字冲回{red_amt:,.0f}，疑似提前确认收入",
                     years_involved=[yr_n, yr_n1],
                     voucher_ids=jan_red["凭证编号"].unique().tolist(),
+                    voucher_keys=jan_red[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
                     amount=red_amt,
                     severity="高",
                     evidence={
@@ -309,8 +329,8 @@ def _yearend_balance_buildup(
             if acct_rows.empty:
                 continue
             dec_rows = acct_rows[acct_rows["过账日期"].dt.month == 12]
-            year_end_balances[yr] = float(dec_rows["凭证货币价值"].abs().sum())
-            year_avg_balances[yr] = float(acct_rows["凭证货币价值"].abs().sum() / 12)
+            year_end_balances[yr] = float(_amount_abs(dec_rows).sum())
+            year_avg_balances[yr] = float(_amount_abs(acct_rows).sum() / 12)
 
         if len(year_end_balances) < 2:
             continue
@@ -344,6 +364,7 @@ def _counterparty_circular_flow(
     match_ratio: float = _CROSS_YEAR_DETECTION_DEFAULTS["circular_match_ratio"],
     max_vouchers: int = 15,
 ) -> list[CrossYearFinding]:
+    year_map = {year: ensure_voucher_identity(df) for year, df in year_map.items()}
     findings = []
     years = sorted(year_map.keys())
     max_vouchers = max(1, int(max_vouchers or 15))
@@ -354,9 +375,10 @@ def _counterparty_circular_flow(
         df_n1 = year_map[yr_n1]
 
         # Year N 年末大额支出
+        amount_n = _amount_raw(df_n)
         dec_large_out = df_n[
             (df_n["过账日期"].dt.month == 12)
-            & (df_n["凭证货币价值"] < -large_amount)
+            & amount_n.lt(-large_amount)
             & df_n["供应商编号"].notna()
         ]
 
@@ -364,9 +386,10 @@ def _counterparty_circular_flow(
             continue
 
         # Year N+1 年初同供应商大额收入（反向）
+        amount_n1 = _amount_raw(df_n1)
         q1_large_in = df_n1[
             (df_n1["过账日期"].dt.month <= 3)
-            & (df_n1["凭证货币价值"] > large_amount)
+            & amount_n1.gt(large_amount)
             & df_n1["供应商编号"].notna()
         ]
 
@@ -382,8 +405,8 @@ def _counterparty_circular_flow(
 
             out_rows = dec_large_out[dec_large_out["供应商编号"] == vendor]
             in_rows = q1_large_in[q1_large_in["供应商编号"] == vendor]
-            out_amt = out_rows["凭证货币价值"].abs().sum()
-            in_amt = in_rows["凭证货币价值"].abs().sum()
+            out_amt = _amount_abs(out_rows).sum()
+            in_amt = _amount_abs(in_rows).sum()
             ratio = min(out_amt, in_amt) / max(out_amt, in_amt) if max(out_amt, in_amt) > 0 else 0
 
             if ratio > match_ratio:
@@ -392,13 +415,15 @@ def _counterparty_circular_flow(
                     pd.concat([out_rows, in_rows], ignore_index=True)
                     .assign(
                         _vid=lambda d: d["凭证编号"].astype(str),
-                        _amt=lambda d: pd.to_numeric(d["凭证货币价值"], errors="coerce").abs().fillna(0),
+                        _vkey=lambda d: d[VOUCHER_KEY_COLUMN].astype(str),
+                        _amt=lambda d: _amount_abs(d).fillna(0),
                     )
-                    .groupby("_vid", sort=False)["_amt"]
-                    .sum()
+                    .groupby(["_vkey", "_vid"], sort=False)["_amt"].sum()
                     .sort_values(ascending=False)
                 )
-                vids = ranked.head(max_vouchers).index.astype(str).tolist()
+                ranked_head = ranked.head(max_vouchers)
+                keys = [str(key) for key, _vid in ranked_head.index]
+                vids = [str(vid) for _key, vid in ranked_head.index]
                 vendor_name = (
                     out_rows["供应商科目：名称 1"].iloc[0]
                     if "供应商科目：名称 1" in out_rows.columns and len(out_rows)
@@ -409,6 +434,7 @@ def _counterparty_circular_flow(
                     description=f"供应商{vendor_name}：{yr_n}年末付出{out_amt:,.0f}，{yr_n1}年Q1收回{in_amt:,.0f}（匹配度{ratio:.0%}），疑似资金空转",
                     years_involved=[yr_n, yr_n1],
                     voucher_ids=vids,
+                    voucher_keys=keys,
                     amount=(out_amt + in_amt) / 2,
                     severity="高",
                     evidence={
@@ -450,7 +476,7 @@ def _expense_category_spike(
         for yr, df in year_map.items():
             df = ensure_category(df)
             rows = df[df["_acct_category"].eq(category)]
-            year_totals[yr] = float(rows["凭证货币价值"].abs().sum())
+            year_totals[yr] = float(_amount_abs(rows).sum())
 
         if len(year_totals) < 2 or all(v == 0 for v in year_totals.values()):
             continue
