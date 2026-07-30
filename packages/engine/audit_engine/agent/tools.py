@@ -73,6 +73,7 @@ EDITABLE_RULE_KEYS = SAMPLING_RULE_KEYS + CROSS_YEAR_RULE_KEYS + ["max_sample_si
 TOOL_LABELS: dict[str, str] = {
     "get_project_overview": "项目概览",
     "query_journal": "查询序时账",
+    "set_analysis_currency_scope": "切换财务画像币种",
     "get_data_quality_review": "数据质量复核",
     "apply_classification_decisions": "应用科目分类决策",
     "get_evidence_inventory": "证据来源清单",
@@ -171,18 +172,40 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "text_contains": {"type": "string"},
                     "voucher_ids": {"type": "array", "items": {"type": "string"}},
                     "debit_credit": {"type": "string", "enum": ["S", "H"]},
+                    "currencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "按凭证币种筛选，如 CNY、USD；多币种金额不会直接合计",
+                    },
                     "customer_contains": {"type": "string"},
                     "supplier_contains": {"type": "string"},
                     "min_absolute_amount": {"type": "number"},
                     "max_absolute_amount": {"type": "number"},
                     "group_by": {
                         "type": "string",
-                        "enum": ["year", "month", "account", "category", "customer", "supplier", "debit_credit", "user"],
+                        "enum": ["year", "month", "account", "category", "customer", "supplier", "debit_credit", "user", "currency"],
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     "sample_limit": {"type": "integer", "minimum": 0, "maximum": 20},
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_analysis_currency_scope",
+            "description": "将财务画像、钻取、规则与模块 AI 切换到一个凭证币种独立分析；不做汇率折算。用户明确选择 CNY、USD 等币种时调用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "currency": {
+                        "type": "string",
+                        "description": "项目中存在的凭证货币代码，如 CNY 或 USD",
+                    },
+                },
+                "required": ["currency"],
             },
         },
     },
@@ -556,10 +579,11 @@ def execute_tool(
         data_quality = {}
         fin_error = None
         for year in manifest.years:
-            work = store.get_work_df(project_id, year)
-            if work.empty:
+            raw_work = store.get_work_df(project_id, year)
+            work = store.get_analysis_work_df(project_id, year)
+            if raw_work.empty:
                 continue
-            data_quality[year] = analysis_quality_summary(work)
+            data_quality[year] = analysis_quality_summary(raw_work)
             try:
                 financials[year] = build_financial_summary(work, year)
             except Exception as exc:
@@ -579,12 +603,29 @@ def execute_tool(
                 "project_id": project_id,
                 "data_version": store.current_data_version(project_id),
                 "classification_revision": store.current_classification_revision(project_id),
+                "analysis_currency": store.current_analysis_currency(project_id),
                 "years": manifest.years,
             },
         }
 
     if name == "query_journal":
         return run_journal_query(store, project_id, arguments)
+
+    if name == "set_analysis_currency_scope":
+        currency = str(arguments.get("currency") or "").strip()
+        if not currency:
+            return {"error": "currency 不能为空"}
+        try:
+            result = store.set_analysis_currency(project_id, currency, actor="agent")
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return attach_ui_actions(
+            {"ok": True, **result},
+            [
+                {"type": "navigate_main", "tab": "finance"},
+                {"type": "invalidate_project_analysis", "project_id": project_id},
+            ],
+        )
 
     if name == "get_data_quality_review":
         decisions = state.get("account_classification_decisions") or {}
@@ -608,6 +649,10 @@ def execute_tool(
                 "denominator": "序时账逐行统一金额绝对值之和",
                 "review_required": "待补充分类 + 缺少科目身份 + 用户暂缓决策",
                 "excluded": "系统口径排除 + 用户确认排除",
+                "currency_safety": (
+                    "若 mixed_document_currency=true，跨币种金额及其占比不可直接比较；"
+                    "应读取 currency_distribution 或先切换单币种分析口径"
+                ),
             },
         }
 
@@ -699,7 +744,7 @@ def execute_tool(
         if year is None:
             return {"error": "selector 缺少 year"}
         limit = min(int(arguments.get("limit") or 30), 50)
-        work = store.get_work_df(project_id, int(year))
+        work = store.get_analysis_work_df(project_id, int(year))
         df = resolve_drilldown(work, selector, limit=limit)
         vids = sorted({str(v) for v in df["凭证编号"].dropna().astype(str).tolist()}) if not df.empty else []
         return {"row_count": len(df), "voucher_count": len(vids), "voucher_ids_sample": vids[:20], "rows": _records(df, limit)}
@@ -714,7 +759,7 @@ def execute_tool(
         year = selector.get("year")
         if year is None:
             return {"error": "selector 缺少 year"}
-        work = store.get_work_df(project_id, int(year))
+        work = store.get_analysis_work_df(project_id, int(year))
         detail = resolve_drilldown(work, selector)
         vids = {str(v).strip() for v in (arguments.get("voucher_ids") or []) if str(v).strip()}
         if vids:
@@ -809,7 +854,27 @@ def execute_tool(
                 "label": TOOL_LABELS.get(str(fn.get("name")), fn.get("name")),
                 "description": fn.get("description"),
             })
-        return {"tools": caps, "analysis_modules": ANALYSIS_MODULES, "cross_year_detectors": CROSS_YEAR_DETECTORS}
+        return {
+            "tools": caps,
+            "analysis_modules": ANALYSIS_MODULES,
+            "cross_year_detectors": CROSS_YEAR_DETECTORS,
+            "evidence_boundary": {
+                "available": ["序时账", "序时账派生财务画像", "规则命中", "疑点库", "抽样结果"],
+                "not_connected": [
+                    "ERP 科目主数据与系统配置",
+                    "科目余额表",
+                    "财务报表",
+                    "银行流水",
+                    "合同",
+                    "发票",
+                ],
+                "rule": "未接入来源不能被描述为已取得或已核验的审计证据",
+            },
+            "execution_contract": {
+                "truth_source": "tool_calls.result 与后台 job_id/status",
+                "rule": "没有真实工具调用或任务编号时，不得声称任务正在执行或已完成",
+            },
+        }
 
     if name == "update_rule":
         rule_id = str(arguments.get("rule_id") or "").strip()

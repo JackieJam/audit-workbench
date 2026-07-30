@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Any
 
+from audit_engine.agent.audit_questions import MODULE_ID_TO_KEY, MODULE_KEY_TO_ID
 from audit_engine.agent.context import AuditSelection, selection_to_text
 from audit_engine.agent.tools import TOOL_SCHEMAS, execute_tool
 from audit_engine.llm_client import make_openai_client
@@ -17,6 +19,9 @@ SYSTEM_PROMPT = (
     "你是序时账审计分析专家助手。基于工具数据作答，不编造凭证与金额。"
     "凡涉及具体金额、科目、客户、供应商、月份或凭证的问题，优先调用 query_journal，"
     "并在答复中说明数据版本、筛选范围、命中行/凭证数与金额口径。"
+    "涉及多币种时，必须用 query_journal 的 currencies 或 group_by=currency 分币种查询，"
+    "不得把不同币种金额相加；用户明确选择某一币种用于财务画像时调用 set_analysis_currency_scope。"
+    "用户要求“对比”币种时先按 currency 分组展示各币种笔数和各自金额，再请用户选择要进入画像的单一币种；不做隐式汇率折算。"
     "数据质量问题调用 get_data_quality_review；分类决策只能通过 apply_classification_decisions 并等待用户批准。"
     "证据覆盖边界调用 get_evidence_inventory；疑点与结论的区分调用 get_audit_case_summary。"
     "用户左侧选中范围是优先分析对象。用中文简洁专业回复。"
@@ -33,6 +38,9 @@ SYSTEM_PROMPT = (
     "7) 列名映射 → get_column_mapping_status；抽样状态 → get_sampling_status；"
     "8) 打开左侧页签 → focus_analysis_view（分析）、run_sampling_rules/extract_samples（抽样）、apply_module_insight_recommendations（疑点库）。"
     "修改规则阈值时必须保留或更新 rationale。应用调参建议前向用户说明变更内容。"
+    "只有本轮真实 tool_calls 或服务端 job_id 才代表任务已执行；不得仅用文字声称“正在执行”“执行中”或“已完成”。"
+    "未取得工具数据时必须明确说尚未执行，不得把计划、预期风险或模型常识冒充项目分析结果。"
+    "当前没有 ERP 科目主数据、SAP 配置、合同、发票、银行流水等工具；不得声称已查看这些元数据或外部证据。"
 )
 
 MAX_TOOL_ROUNDS = 10
@@ -105,6 +113,275 @@ DEFAULT_AGENT_SUGGESTIONS = [
     "抽样规则有哪些？",
     "根据反馈建议规则调参",
 ]
+
+_MODULE_INTENT_MARKERS = (
+    "ai风险分析",
+    "风险分析",
+    "生成分析",
+    "进行分析",
+    "开始分析",
+    "执行分析",
+    "重新分析",
+    "分析一下",
+)
+_MODULE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("营业外与投资收益", "营业外与投资收益"),
+    ("其他应收", "暂估往来"),
+    ("其他应付", "暂估往来"),
+    ("应付暂估", "暂估往来"),
+    ("暂估往来", "暂估往来"),
+    ("资产负债", "资产负债"),
+    ("收入成本", "收入成本"),
+    ("调账冲销", "调账冲销"),
+    ("投资收益", "营业外与投资收益"),
+    ("营业外", "营业外与投资收益"),
+    ("冲销", "调账冲销"),
+    ("调账", "调账冲销"),
+    ("费用", "费用"),
+)
+
+
+def detect_module_insight_request(
+    user_message: str,
+    pinned_context: AuditSelection | None = None,
+) -> list[str]:
+    """识别用户明确要求执行的模块风险分析，返回中文 module_key。"""
+    normalized = re.sub(r"\s+", "", str(user_message or "")).lower()
+    if not normalized:
+        return []
+    explicit = any(marker in normalized for marker in _MODULE_INTENT_MARKERS)
+    explicit = explicit or ("分析" in normalized and "风险" in normalized)
+    if not explicit:
+        return []
+    if "所有模块" in normalized or "全部模块" in normalized:
+        return list(MODULE_ID_TO_KEY.values())
+
+    modules: list[str] = []
+    searchable = normalized
+    if pinned_context:
+        selector = pinned_context.get("selector") or {}
+        searchable += " " + " ".join(
+            str(value or "")
+            for value in (
+                pinned_context.get("label"),
+                pinned_context.get("source_module"),
+                selector.get("module"),
+            )
+        ).lower()
+
+    for module_id, module_key in MODULE_ID_TO_KEY.items():
+        if module_id in searchable or module_key in searchable:
+            modules.append(module_key)
+    for alias, module_key in _MODULE_ALIASES:
+        if alias.lower() in searchable:
+            modules.append(module_key)
+    return list(dict.fromkeys(modules))
+
+
+def _sanitize_unverified_execution_claim(
+    reply: str,
+    tool_log: list[dict[str, Any]],
+) -> str:
+    text = str(reply or "").strip()
+    execution_claim = any(
+        marker in text
+        for marker in ("正在执行", "执行中", "正在运行", "已开始执行", "已完成分析", "分析已完成")
+    )
+    if not execution_claim:
+        return text
+
+    tool_names = {str(item.get("tool") or "") for item in tool_log}
+    module_claim = "run_module_insight" in text or "AI风险分析" in text or "AI 风险分析" in text
+    module_success = any(
+        item.get("tool") == "run_module_insight"
+        and not (item.get("result") or {}).get("error")
+        for item in tool_log
+    )
+    if not tool_log or (module_claim and ("run_module_insight" not in tool_names or not module_success)):
+        return (
+            "本轮没有产生可核验的工具调用，因此没有任务正在后台执行，也没有新的分析结果。"
+            "请重新发起操作；界面仅会把带真实任务编号的状态显示为“执行中”。"
+        )
+    return text
+
+
+def _persist_agent_exchange(
+    store: ProjectStore,
+    project_id: str,
+    *,
+    thread: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_message: str,
+    reply: str,
+    tool_log: list[dict[str, Any]],
+    ctx: AuditSelection | None,
+    ui_actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    now = datetime.now().isoformat(timespec="seconds")
+    history.append({"role": "user", "content": user_message, "at": now})
+    compact_tool_log = _compact_tool_log(tool_log)
+    history.append({"role": "assistant", "content": reply, "at": now, "tool_calls": compact_tool_log})
+    thread["messages"] = history[-MAX_HISTORY:]
+    thread["updated_at"] = now
+    events = list(thread.get("audit_events") or [])
+    events.append(
+        {
+            "at": now,
+            "user_message": user_message,
+            "tool_calls": compact_tool_log,
+            "reply": reply,
+        }
+    )
+    thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
+
+    def update(state: dict[str, Any]) -> None:
+        state["agent_thread"] = thread
+
+    store.update_state(project_id, update)
+    return {
+        "reply": reply,
+        "tool_calls": compact_tool_log,
+        "pinned_context": thread.get("pinned_context"),
+        "suggestions": _suggested_followups(ctx),
+        "ui_actions": ui_actions or [],
+        "needs_api_key": False,
+    }
+
+
+def record_module_insight_dispatch(
+    store: ProjectStore,
+    project_id: str,
+    *,
+    user_message: str,
+    pinned_context: AuditSelection | None,
+    jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """把确定性模块任务作为真实 Agent 工具事件持久化。"""
+    state = store.load_state(project_id)
+    thread = dict(state.get("agent_thread") or {})
+    history: list[dict[str, Any]] = list(thread.get("messages") or [])
+    if pinned_context:
+        thread["pinned_context"] = pinned_context
+    ctx = thread.get("pinned_context") or pinned_context
+    tool_log: list[dict[str, Any]] = []
+    ui_actions: list[dict[str, Any]] = [
+        {"type": "invalidate_queries", "queryKey": ["insight-jobs", project_id]},
+    ]
+    for job in jobs:
+        module_key = str(job.get("module_key") or "")
+        module_id = MODULE_KEY_TO_ID.get(module_key)
+        tool_log.append(
+            {
+                "tool": "run_module_insight",
+                "args": {"module": module_id or module_key},
+                "result": {
+                    "ok": True,
+                    "job_id": job.get("job_id"),
+                    "module_key": module_key,
+                    "status": job.get("status"),
+                    "stage": job.get("stage"),
+                    "percent": job.get("percent", 0),
+                    "reused": bool(job.get("reused")),
+                },
+            }
+        )
+        ui_actions.append(
+            {
+                "type": "invalidate_queries",
+                "queryKey": ["module-insight", project_id, module_key],
+            }
+        )
+    first_module_id = MODULE_KEY_TO_ID.get(str(jobs[0].get("module_key") or "")) if jobs else None
+    if first_module_id:
+        ui_actions[:0] = [
+            {"type": "navigate_main", "tab": "finance"},
+            {"type": "finance_module", "module": first_module_id},
+        ]
+    reused_count = sum(1 for job in jobs if job.get("reused"))
+    if len(jobs) == 1:
+        module_key = str(jobs[0].get("module_key") or "模块")
+        action = "已连接到现有" if reused_count else "已创建"
+        reply = (
+            f"{action}「{module_key}」AI 风险分析任务。"
+            f"真实任务编号：`{jobs[0].get('job_id')}`。"
+            "后续进度和结果以工具卡及模块结果区为准。"
+        )
+    else:
+        reply = (
+            f"已创建 {len(jobs) - reused_count} 个模块分析任务"
+            f"并复用 {reused_count} 个进行中任务。"
+            "每个任务都已分配真实任务编号，界面将按服务端状态展示进度。"
+        )
+    return _persist_agent_exchange(
+        store,
+        project_id,
+        thread=thread,
+        history=history,
+        user_message=user_message,
+        reply=reply,
+        tool_log=tool_log,
+        ctx=ctx if isinstance(ctx, dict) else None,
+        ui_actions=ui_actions,
+    )
+
+
+def update_agent_module_insight_job(
+    store: ProjectStore,
+    project_id: str,
+    *,
+    job_id: str,
+    status: str,
+    insight: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """后台任务完成后回写 Agent 工具事件，保证重启后状态仍真实。"""
+    now = datetime.now().isoformat(timespec="seconds")
+
+    def update(state: dict[str, Any]) -> None:
+        thread = dict(state.get("agent_thread") or {})
+        changed = False
+        summary = None
+        if insight is not None:
+            summary = {
+                "executive_summary": insight.get("executive_summary"),
+                "findings_count": len(insight.get("findings") or []),
+                "recommendations_count": len(insight.get("recommendations") or []),
+                "findings": (insight.get("findings") or [])[:3],
+                "recommendations": (insight.get("recommendations") or [])[:3],
+                "input_signature": insight.get("input_signature"),
+            }
+        for message in thread.get("messages") or []:
+            for call in message.get("tool_calls") or []:
+                result = call.get("result") or {}
+                if str(result.get("job_id") or "") != job_id:
+                    continue
+                result.update(
+                    {
+                        "status": status,
+                        "error": error,
+                        "completed_at": now,
+                    }
+                )
+                if summary is not None:
+                    result["insight"] = summary
+                changed = True
+        if not changed:
+            return
+        events = list(thread.get("audit_events") or [])
+        events.append(
+            {
+                "at": now,
+                "job_id": job_id,
+                "tool": "run_module_insight",
+                "status": status,
+                "error": error,
+            }
+        )
+        thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
+        thread["updated_at"] = now
+        state["agent_thread"] = thread
+
+    store.update_state(project_id, update)
 
 
 def _suggested_followups(ctx: AuditSelection | None) -> list[str]:
@@ -252,34 +529,18 @@ def run_agent_chat(
 
     if not reply:
         reply = "已完成查询，请换个问法或查看工具结果。"
-
-    now = datetime.now().isoformat(timespec="seconds")
-    history.append({"role": "user", "content": user_message, "at": now})
-    compact_tool_log = _compact_tool_log(tool_log)
-    history.append({"role": "assistant", "content": reply, "at": now, "tool_calls": compact_tool_log})
-    thread["messages"] = history[-MAX_HISTORY:]
-    thread["updated_at"] = now
-    events = list(thread.get("audit_events") or [])
-    events.append({
-        "at": now,
-        "user_message": user_message,
-        "tool_calls": compact_tool_log,
-        "reply": reply,
-    })
-    thread["audit_events"] = events[-MAX_AUDIT_EVENTS:]
-    # 工具执行可能已写入最新项目状态；必须重新加载，避免旧 state 覆盖工具结果。
-    latest_state = store.load_state(project_id)
-    latest_state["agent_thread"] = thread
-    store.save_state(project_id, latest_state)
-
-    return {
-        "reply": reply,
-        "tool_calls": compact_tool_log,
-        "pinned_context": thread.get("pinned_context"),
-        "suggestions": _suggested_followups(ctx if isinstance(ctx, dict) else None),
-        "ui_actions": ui_actions,
-        "needs_api_key": False,
-    }
+    reply = _sanitize_unverified_execution_claim(reply, tool_log)
+    return _persist_agent_exchange(
+        store,
+        project_id,
+        thread=thread,
+        history=history,
+        user_message=user_message,
+        reply=reply,
+        tool_log=tool_log,
+        ctx=ctx if isinstance(ctx, dict) else None,
+        ui_actions=ui_actions,
+    )
 
 
 def get_agent_state(store: ProjectStore, project_id: str) -> dict[str, Any]:

@@ -4,11 +4,13 @@ import type * as echarts from "echarts";
 import { api, type ProjectSummary, type YearProfile } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
+import { EmptyState } from "@/components/EmptyState";
 import { useAgent } from "@/context/AgentContext";
 import { useEcharts } from "@/hooks/useEcharts";
 import { useEnsureProfiles } from "@/hooks/useEnsureProfiles";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 import { moduleOverviewSelection } from "@/lib/agentContext";
+import { chartPalette } from "@/lib/chartTheme";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
 
@@ -143,22 +145,24 @@ export function ProfilePanel({ project, preferredYear }: Props) {
 
   const buildMonthlyOption = useCallback((): echarts.EChartsOption | null => {
     if (!monthlyRows.length) return null;
+    const pal = chartPalette();
     return {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" } },
+      legend: { textStyle: { color: pal.muted } },
       grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
       xAxis: {
         type: "category",
         data: monthlyRows.map((row) => periodLabel(row.month)),
-        axisLabel: { color: "#8b97a8" },
+        axisLabel: { color: pal.muted },
       },
       yAxis: [
-        { type: "value", name: "凭证数", axisLabel: { color: "#8b97a8" } },
+        { type: "value", name: "凭证数", axisLabel: { color: pal.muted } },
         {
           type: "value",
           name: "借方金额",
-          axisLabel: { color: "#8b97a8", formatter: formatWan },
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
         },
       ],
       series: [
@@ -174,62 +178,70 @@ export function ProfilePanel({ project, preferredYear }: Props) {
     };
   }, [monthlyRows]);
 
-  const buildBenfordOption = useCallback((): echarts.EChartsOption => ({
-    backgroundColor: "transparent",
-    tooltip: { trigger: "axis", valueFormatter: (value) => formatPercent(Number(value)) },
-    legend: { textStyle: { color: "#8b97a8" } },
-    grid: { left: 12, right: 18, top: 40, bottom: 28, containLabel: true },
-    xAxis: {
-      type: "category",
-      data: benfordRows.map((row) => String(row.digit)),
-      axisLabel: { color: "#8b97a8" },
-    },
-    yAxis: {
-      type: "value",
-      max: (value: { max: number }) => Math.max(0.35, Math.ceil(value.max * 10) / 10),
-      axisLabel: { color: "#8b97a8", formatter: (value: number) => `${Math.round(value * 100)}%` },
-    },
-    series: [
-      { name: "实际", type: "bar", data: benfordRows.map((row) => row.observed) },
-      {
-        name: "理论",
-        type: "line",
-        smooth: true,
-        symbolSize: 7,
-        data: benfordRows.map((row) => row.expected),
+  const buildBenfordOption = useCallback((): echarts.EChartsOption => {
+    const pal = chartPalette();
+    return {
+      backgroundColor: "transparent",
+      tooltip: { trigger: "axis", valueFormatter: (value) => formatPercent(Number(value)) },
+      legend: { textStyle: { color: pal.muted } },
+      grid: { left: 12, right: 18, top: 40, bottom: 28, containLabel: true },
+      xAxis: {
+        type: "category",
+        data: benfordRows.map((row) => String(row.digit)),
+        axisLabel: { color: pal.muted },
       },
-    ],
-  }), [benfordRows]);
-
-  const buildMonthEndOption = useCallback((): echarts.EChartsOption => ({
-    backgroundColor: "transparent",
-    tooltip: { trigger: "axis", valueFormatter: (value) => formatPercent(Number(value)) },
-    grid: { left: 12, right: 18, top: 24, bottom: 28, containLabel: true },
-    xAxis: {
-      type: "category",
-      data: monthEndRows.map((row) => `${row.month}月`),
-      axisLabel: { color: "#8b97a8" },
-    },
-    yAxis: {
-      type: "value",
-      min: 0,
-      max: 1,
-      axisLabel: { color: "#8b97a8", formatter: (value: number) => `${Math.round(value * 100)}%` },
-    },
-    series: [
-      {
-        name: "月末最后5天凭证占比",
-        type: "bar",
-        data: monthEndRows.map((row) => row.ratio),
-        markLine: {
-          symbol: "none",
-          lineStyle: { color: "#fbbf24", type: "dashed" },
-          label: { color: "#fbbf24", formatter: "内部复核线 60%" },
-          data: [{ yAxis: 0.6 }],
+      yAxis: {
+        type: "value",
+        max: (value: { max: number }) => Math.max(0.35, Math.ceil(value.max * 10) / 10),
+        axisLabel: { color: pal.muted, formatter: (value: number) => `${Math.round(value * 100)}%` },
+        splitLine: { lineStyle: { color: pal.grid } },
+      },
+      series: [
+        { name: "实际", type: "bar", data: benfordRows.map((row) => row.observed) },
+        {
+          name: "理论",
+          type: "line",
+          smooth: true,
+          symbolSize: 7,
+          data: benfordRows.map((row) => row.expected),
         },
+      ],
+    };
+  }, [benfordRows]);
+
+  const buildMonthEndOption = useCallback((): echarts.EChartsOption => {
+    const pal = chartPalette();
+    return {
+      backgroundColor: "transparent",
+      tooltip: { trigger: "axis", valueFormatter: (value) => formatPercent(Number(value)) },
+      grid: { left: 12, right: 18, top: 24, bottom: 28, containLabel: true },
+      xAxis: {
+        type: "category",
+        data: monthEndRows.map((row) => `${row.month}月`),
+        axisLabel: { color: pal.muted },
       },
-    ],
-  }), [monthEndRows]);
+      yAxis: {
+        type: "value",
+        min: 0,
+        max: 1,
+        axisLabel: { color: pal.muted, formatter: (value: number) => `${Math.round(value * 100)}%` },
+        splitLine: { lineStyle: { color: pal.grid } },
+      },
+      series: [
+        {
+          name: "月末最后5天凭证占比",
+          type: "bar",
+          data: monthEndRows.map((row) => row.ratio),
+          markLine: {
+            symbol: "none",
+            lineStyle: { color: pal.warning, type: "dashed" },
+            label: { color: pal.warning, formatter: "内部复核线 60%" },
+            data: [{ yAxis: 0.6 }],
+          },
+        },
+      ],
+    };
+  }, [monthEndRows]);
 
   useEcharts(monthlyRef, buildMonthlyOption, [monthlyRows], {
     enabled: monthlyRows.length > 0,
@@ -291,7 +303,16 @@ export function ProfilePanel({ project, preferredYear }: Props) {
     });
   }, [drilldown.data?.row_count, pinSelection, selection, year]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看统计画像。"
+      />
+    );
+  }
 
   const ov = p?.overview;
   const loading = profiles.isLoading || profiles.isFetching || rebuild.isPending;
@@ -419,7 +440,7 @@ export function ProfilePanel({ project, preferredYear }: Props) {
           </section>
         </>
       ) : !loading ? (
-        <p className="muted">暂无画像数据。</p>
+        <EmptyState kind="chart" size="sm" title="暂无画像数据" description="当前年度尚未生成统计画像，请切换年度或重新构建。" />
       ) : null}
 
       {selection ? (

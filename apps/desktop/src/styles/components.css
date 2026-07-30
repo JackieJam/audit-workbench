@@ -1,0 +1,393 @@
+/* ============================================
+   通用组件 · 按钮 / 表单 / 表格 / 徽章 / 空状态
+   ============================================ */
+
+/* ---------- 按钮 ---------- */
+
+.btn-primary,
+.btn-ghost,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--r-md);
+  font-size: 0.86rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+
+.btn-ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-softer);
+}
+
+.btn-ghost:active {
+  transform: translateY(1px);
+}
+
+.btn-ghost.danger,
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+}
+
+.btn-ghost.danger:hover,
+.btn-danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ---------- 表单 ---------- */
+
+.filters {
+  display: flex;
+  gap: 16px;
+}
+
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.filters select,
+.suspect-filters select,
+.profile-toolbar select,
+.quality-review__decision select,
+.candidate-detail__edit select,
+.candidate-detail__edit input,
+.candidate-detail__edit textarea,
+.rules-panel__field input[type="number"],
+.rules-panel__field input[type="text"] {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.filters select {
+  min-width: 120px;
+}
+
+.filters select:focus,
+.suspect-filters select:focus,
+.profile-toolbar select:focus,
+.quality-review__decision select:focus,
+.candidate-detail__edit select:focus,
+.candidate-detail__edit input:focus,
+.candidate-detail__edit textarea:focus,
+.rules-panel__field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+/* ---------- 表格 ---------- */
+
+.detail-table-wrap {
+  overflow: auto;
+  max-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.detail-table th,
+.detail-table td {
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-table tbody tr:last-child td,
+.detail-table tr:last-child td {
+  border-bottom: none;
+}
+
+.detail-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-subtle);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.detail-table__check {
+  width: 36px;
+  text-align: center;
+}
+
+.detail-table__check input {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.detail-table tbody tr {
+  transition: background 0.12s ease;
+}
+
+.detail-table tbody tr:hover td {
+  background: var(--accent-softer);
+}
+
+.detail-table__row--selected td,
+.detail-table__row--selected:hover td {
+  background: var(--accent-soft);
+}
+
+.detail-table-more {
+  margin: 8px 0 0;
+}
+
+.selectable-table tbody tr {
+  cursor: pointer;
+}
+
+.selectable-table tbody tr:hover td {
+  background: var(--accent-softer);
+}
+
+.selectable-table tbody tr.row-selected td {
+  background: var(--accent-soft);
+}
+
+/* ---------- 徽章与标签 ---------- */
+
+.tag {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.candidate-status {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-softer);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.severity-badge {
+  font-size: 0.76rem;
+  font-weight: 500;
+  padding: 2px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.severity-high {
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.severity-med {
+  color: var(--warning);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.severity-low {
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-softer);
+}
+
+.risk-tag {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.risk-tag--high {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.risk-tag--mid {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.risk-tag--low {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.llm-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---------- 年份分段控件 ---------- */
+
+.year-segmented,
+.profile-year-switcher__options {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+
+.year-segmented button,
+.profile-year-switcher__button {
+  min-width: 58px;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.year-segmented button {
+  min-width: 0;
+  padding: 4px 10px;
+}
+
+.year-segmented button:hover,
+.profile-year-switcher__button:hover {
+  color: var(--text);
+}
+
+.profile-year-switcher__button:active {
+  transform: translateY(1px);
+}
+
+.year-segmented button.active,
+.profile-year-switcher__button.active {
+  background: var(--panel);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ---------- 空状态（含插画） ---------- */
+
+.empty-state {
+  margin-top: 20px;
+  padding: 40px 32px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.empty-state--sm {
+  padding: 26px 20px;
+}
+
+.empty-ill {
+  width: 128px;
+  height: auto;
+  color: var(--border-strong);
+  margin-bottom: 8px;
+}
+
+.empty-state--sm .empty-ill {
+  width: 96px;
+}
+
+.empty-state__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.empty-state__desc {
+  margin: 2px 0 0;
+  max-width: 440px;
+  font-size: 0.83rem;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.empty-state__action {
+  margin-top: 14px;
+}
+
+/* 兼容旧占位卡（新代码请用 EmptyState 组件） */
+.placeholder-card {
+  margin-top: 20px;
+  padding: 40px 32px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.65;
+}

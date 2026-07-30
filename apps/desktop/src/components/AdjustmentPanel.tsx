@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AdjustmentSummaryRow, type ProjectSummary } from "@/api/client";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
@@ -73,7 +74,16 @@ export function AdjustmentPanel({ project, preferredYear }: Props) {
     });
   }, [selected, year, drilldown.data?.row_count, pinSelection]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
+  }
 
   const rows = summary.data?.rows ?? [];
 

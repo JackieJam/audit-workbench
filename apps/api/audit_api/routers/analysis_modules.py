@@ -24,13 +24,18 @@ from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from audit_api.deps import get_store
-from audit_api.routers.analysis import _df_records, _manifest_or_404, _require_year
+from audit_api.routers.analysis import (
+    _analysis_work_or_409,
+    _df_records,
+    _manifest_or_404,
+    _require_year,
+)
 
 router = APIRouter(prefix="/projects", tags=["analysis-modules"])
 
 
 def _work(store: ProjectStore, project_id: str, year: int) -> pd.DataFrame:
-    return store.get_work_df(project_id, year)
+    return _analysis_work_or_409(store, project_id, year)
 
 
 # ── 费用 ──

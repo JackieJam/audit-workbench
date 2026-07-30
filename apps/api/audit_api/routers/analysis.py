@@ -52,6 +52,19 @@ def _require_year(manifest_years: list[int], year: int) -> None:
         raise HTTPException(status_code=404, detail=f"项目中无 {year} 年序时账数据")
 
 
+def _analysis_work_or_409(store: ProjectStore, project_id: str, year: int) -> pd.DataFrame:
+    work = store.get_analysis_work_df(project_id, year)
+    if work.empty or store.current_analysis_currency(project_id):
+        return work
+    quality = analysis_quality_summary(work)
+    if quality["mixed_document_currency"]:
+        raise HTTPException(
+            status_code=409,
+            detail="检测到多种凭证币且没有本位币金额；请先选择一个分析币种",
+        )
+    return work
+
+
 class ClassificationDecision(BaseModel):
     account_code: str = Field(..., min_length=1)
     account_name: str = ""
@@ -64,23 +77,42 @@ class ClassificationDecisionBatch(BaseModel):
     decisions: list[ClassificationDecision] = Field(..., min_length=1, max_length=100)
 
 
+class CurrencyScopeDecision(BaseModel):
+    currency: str = Field(..., min_length=3, max_length=12)
+
+
 def _quality_payload(store: ProjectStore, project_id: str) -> dict:
     manifest = _manifest_or_404(store, project_id)
     state = store.load_state(project_id)
     decisions = state.get("account_classification_decisions") or {}
-    quality = {
+    raw_quality = {
         str(year): analysis_quality_summary(
             store.get_work_df(project_id, year),
             classification_decisions=decisions if isinstance(decisions, dict) else {},
         )
         for year in manifest.years
     }
+    selected_currency = store.current_analysis_currency(project_id)
+    quality = (
+        {
+            str(year): analysis_quality_summary(
+                store.get_analysis_work_df(project_id, year),
+                classification_decisions=decisions if isinstance(decisions, dict) else {},
+            )
+            for year in manifest.years
+        }
+        if selected_currency
+        else raw_quality
+    )
     return {
         "data_version": store.current_data_version(project_id),
         "classification_revision": store.current_classification_revision(project_id),
+        "analysis_currency_scope": selected_currency,
+        "analysis_scope_revision": str(state.get("analysis_scope_revision") or ""),
         "allowed_categories": [category for category in ALL_CATEGORIES if category != CAT_UNCATEGORIZED],
         "classification_decisions": list(decisions.values()) if isinstance(decisions, dict) else [],
         "years": quality,
+        "currency_overview": raw_quality,
     }
 
 
@@ -97,6 +129,20 @@ def module_audit_questions(project_id: str, module_key: str, store: ProjectStore
 @router.get("/{project_id}/analysis/quality")
 def analysis_quality(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
     return _quality_payload(store, project_id)
+
+
+@router.post("/{project_id}/analysis/currency-scope")
+def apply_analysis_currency_scope(
+    project_id: str,
+    body: CurrencyScopeDecision,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        result = store.set_analysis_currency(project_id, body.currency, actor="user")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**_quality_payload(store, project_id), "recalculation": result}
 
 
 @router.post("/{project_id}/analysis/quality/decisions")
@@ -125,7 +171,7 @@ def income_cost_category_list(
 ) -> dict:
     manifest = _manifest_or_404(store, project_id)
     _require_year(manifest.years, year)
-    work = store.get_work_df(project_id, year)
+    work = _analysis_work_or_409(store, project_id, year)
     return {"year": year, "categories": income_cost_categories(work)}
 
 
@@ -138,7 +184,7 @@ def income_cost_monthly(
 ) -> dict:
     manifest = _manifest_or_404(store, project_id)
     _require_year(manifest.years, year)
-    work = store.get_work_df(project_id, year)
+    work = _analysis_work_or_409(store, project_id, year)
     df = monthly_revenue_cost(work, category=category)
     return {"year": year, "category": category, "rows": _df_records(df)}
 
@@ -155,7 +201,7 @@ def income_cost_drilldown_monthly(
 ) -> dict:
     manifest = _manifest_or_404(store, project_id)
     _require_year(manifest.years, year)
-    work = store.get_work_df(project_id, year)
+    work = _analysis_work_or_409(store, project_id, year)
     df = monthly_income_cost_entries(work, month=month, metric=metric, category=category, top_n=limit)
     metric_labels = {"revenue": "净收入", "cost": "净成本", "gross": "毛利"}
     return {
@@ -180,7 +226,7 @@ def income_cost_drilldown_customer(
 ) -> dict:
     manifest = _manifest_or_404(store, project_id)
     _require_year(manifest.years, year)
-    work = store.get_work_df(project_id, year)
+    work = _analysis_work_or_409(store, project_id, year)
     df = customer_revenue_entries(work, customer=customer, category=category, top_n=limit)
     return {
         "year": year,
@@ -201,7 +247,7 @@ def income_cost_customers(
 ) -> dict:
     manifest = _manifest_or_404(store, project_id)
     _require_year(manifest.years, year)
-    work = store.get_work_df(project_id, year)
+    work = _analysis_work_or_409(store, project_id, year)
     df = customer_revenue_top(work, category=category, top_n=top_n)
     return {"year": year, "category": category, "rows": _df_records(df)}
 

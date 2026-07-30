@@ -107,13 +107,14 @@ def build_module_payload(
     risk_questions: list[dict[str, str]],
 ) -> dict[str, Any]:
     manifest = store.load_manifest(project_id)
-    work_by_year = {y: store.get_work_df(project_id, y) for y in manifest.years}
+    work_by_year = {y: store.get_analysis_work_df(project_id, y) for y in manifest.years}
     financials = {y: build_financial_summary(df, y) for y, df in work_by_year.items() if not df.empty}
     profiles = {y: build_profile(df, y) for y, df in work_by_year.items() if not df.empty}
 
     payload: dict[str, Any] = {
         "module": module_key,
         "years": manifest.years,
+        "analysis_currency": store.current_analysis_currency(project_id),
         "risk_focus": [q.get("text", "") for q in risk_questions if q.get("text")],
         "financial_summary": financials_to_summary_text(financials),
         "profile_summary": profiles_to_summary_text(profiles),
@@ -322,7 +323,7 @@ def apply_recommendations(
             continue
         try:
             selector = condition_to_selector(rec.get("condition") or {})
-            work = store.get_work_df(project_id, int(selector["year"]))
+            work = store.get_analysis_work_df(project_id, int(selector["year"]))
             detail = resolve_drilldown(work, selector)
             if detail.empty:
                 skipped += 1
@@ -380,11 +381,13 @@ def run_module_insight_pipeline(
         )
         report("parse")
         report("save")
-        state = store.load_state(project_id)
-        module_insights = dict(state.get("module_insights") or {})
-        module_insights[module_key] = insight
-        state["module_insights"] = module_insights
-        store.save_state(project_id, state)
+
+        def save_insight(state: dict[str, Any]) -> None:
+            module_insights = dict(state.get("module_insights") or {})
+            module_insights[module_key] = insight
+            state["module_insights"] = module_insights
+
+        store.update_state(project_id, save_insight)
         finish_job(store, project_id, module_key)
         return insight
     except Exception as exc:

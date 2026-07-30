@@ -5,6 +5,8 @@ import { api, type ProjectSummary } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
+import { chartPalette } from "@/lib/chartTheme";
 import { useAgent } from "@/context/AgentContext";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
@@ -77,13 +79,18 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
   const rows = monthly.data?.rows ?? [];
   const buildOption = useCallback((): echarts.EChartsOption | null => {
     if (!rows.length) return null;
+    const pal = chartPalette();
     return {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" } },
+      legend: { textStyle: { color: pal.muted } },
       grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
       xAxis: { type: "category", data: rows.map((row) => periodLabel(row.月份)) },
-      yAxis: { type: "value", axisLabel: { formatter: formatWan } },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: pal.muted, formatter: formatWan },
+        splitLine: { lineStyle: { color: pal.grid } },
+      },
       series: [
         { name: "投资收益", type: "bar", data: rows.map((row) => row.投资收益) },
         { name: "营业外收入", type: "bar", data: rows.map((row) => row.营业外收入) },
@@ -122,7 +129,16 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
     });
   }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
+  }
 
   return (
     <div className="module-panel">

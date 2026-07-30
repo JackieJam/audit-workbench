@@ -5,6 +5,8 @@ import { api, type ProjectSummary } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
+import { chartPalette, useThemeVersion, withChartTheme } from "@/lib/chartTheme";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
@@ -54,55 +56,64 @@ export function ExpensePanel({ project }: Props) {
     },
   });
 
+  const themeVersion = useThemeVersion();
+
   useEffect(() => {
     if (!chartRef.current || !data.data?.rows.length) return;
+    const pal = chartPalette();
     const rows = data.data.rows;
     const years = [...new Set(rows.map((r) => r.年份))].sort();
     const categories = [...new Set(rows.map((r) => r.费用类别))];
     const manyCategories = categories.length > 8;
     const chart = echarts.init(chartRef.current);
-    chart.setOption({
-      backgroundColor: "transparent",
-      tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" }, type: "scroll" },
-      grid: { left: 56, right: 24, top: 48, bottom: manyCategories ? 96 : 40, containLabel: true },
-      xAxis: {
-        type: "category",
-        data: categories,
-        axisLabel: {
-          color: "#8b97a8",
-          rotate: manyCategories ? 38 : 0,
-          interval: 0,
-          fontSize: 11,
-          margin: 12,
-          overflow: "break",
-          width: 72,
+    chart.setOption(
+      withChartTheme({
+        backgroundColor: "transparent",
+        tooltip: { trigger: "axis" },
+        legend: { textStyle: { color: pal.muted }, type: "scroll" },
+        grid: { left: 56, right: 24, top: 48, bottom: manyCategories ? 96 : 40, containLabel: true },
+        xAxis: {
+          type: "category",
+          data: categories,
+          axisLabel: {
+            color: pal.muted,
+            rotate: manyCategories ? 38 : 0,
+            interval: 0,
+            fontSize: 11,
+            margin: 12,
+            overflow: "break",
+            width: 72,
+          },
+          axisTick: { alignWithLabel: true },
         },
-        axisTick: { alignWithLabel: true },
-      },
-      yAxis: { type: "value", axisLabel: { color: "#8b97a8", formatter: formatWan } },
-      dataZoom: manyCategories
-        ? [
-            {
-              type: "slider",
-              xAxisIndex: 0,
-              start: 0,
-              end: Math.min(100, Math.round((10 / categories.length) * 100)),
-              height: 20,
-              bottom: 8,
-              borderColor: "transparent",
-              fillerColor: "rgba(59,130,246,0.12)",
-              handleStyle: { color: "#3b82f6" },
-              textStyle: { color: "#8b97a8", fontSize: 10 },
-            },
-          ]
-        : undefined,
-      series: years.map((y) => ({
-        name: String(y),
-        type: "bar",
-        data: categories.map((c) => rows.find((r) => r.年份 === y && r.费用类别 === c)?.金额 ?? 0),
-      })),
-    });
+        yAxis: {
+          type: "value",
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
+        },
+        dataZoom: manyCategories
+          ? [
+              {
+                type: "slider",
+                xAxisIndex: 0,
+                start: 0,
+                end: Math.min(100, Math.round((10 / categories.length) * 100)),
+                height: 20,
+                bottom: 8,
+                borderColor: "transparent",
+                fillerColor: pal.accentSoft,
+                handleStyle: { color: pal.accent },
+                textStyle: { color: pal.muted, fontSize: 10 },
+              },
+            ]
+          : undefined,
+        series: years.map((y) => ({
+          name: String(y),
+          type: "bar",
+          data: categories.map((c) => rows.find((r) => r.年份 === y && r.费用类别 === c)?.金额 ?? 0),
+        })),
+      }),
+    );
     const onClick = (params: { componentType?: string; seriesName?: string; name?: string }) => {
       if (params.componentType !== "series" || !params.seriesName || !params.name) return;
       setSelection({ year: Number(params.seriesName), category: params.name });
@@ -116,7 +127,8 @@ export function ExpensePanel({ project }: Props) {
       window.removeEventListener("resize", onResize);
       chart.dispose();
     };
-  }, [data.data]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.data, themeVersion]);
 
   useEffect(() => {
     if (!selection) {
@@ -132,7 +144,16 @@ export function ExpensePanel({ project }: Props) {
     });
   }, [selection, drilldown.data?.row_count, pinSelection]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
+  }
 
   return (
     <div className="module-panel">

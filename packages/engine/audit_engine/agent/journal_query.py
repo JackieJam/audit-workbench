@@ -18,6 +18,7 @@ GROUP_FIELDS = {
     "supplier": ("供应商", "_vendor_display"),
     "debit_credit": ("借贷方向", "_dc"),
     "user": ("制单用户", "用户名"),
+    "currency": ("币种", "_amount_currency"),
 }
 
 
@@ -65,7 +66,11 @@ def run_journal_query(
         work = work.copy()
         work["_query_year"] = year
         work["_query_period"] = work["_month"].map(
-            lambda month: f"{year}-{int(month):02d}" if pd.notna(month) else f"{year}-未知"
+            lambda month, query_year=year: (
+                f"{query_year}-{int(month):02d}"
+                if pd.notna(month)
+                else f"{query_year}-未知"
+            )
         )
         work["_query_account"] = (
             work["_acct"].fillna("").astype(str)
@@ -77,6 +82,7 @@ def run_journal_query(
             "amount_source": str(work["_amount_source"].iat[0]),
             "sign_mode": str(work["_amount_sign_mode"].iat[0]),
             "sign_confidence": float(work["_amount_sign_confidence"].iat[0]),
+            "currency_basis": str(work["_currency_basis"].iat[0]),
         })
         frames.append(work)
     if not frames:
@@ -104,6 +110,19 @@ def run_journal_query(
     debit_credit = str(arguments.get("debit_credit") or "").strip()
     if debit_credit:
         source = source[source["_dc"].eq(debit_credit)]
+    requested_currencies = {
+        str(value).strip().upper()
+        for value in arguments.get("currencies") or []
+        if str(value).strip()
+    }
+    group_by = str(arguments.get("group_by") or "").strip()
+    active_currency = store.current_analysis_currency(project_id)
+    if requested_currencies:
+        normalized_currency = source["_amount_currency"].fillna("").astype(str).str.strip().str.upper()
+        source = source[normalized_currency.isin(requested_currencies)]
+    elif active_currency and group_by != "currency":
+        normalized_currency = source["_amount_currency"].fillna("").astype(str).str.strip().str.upper()
+        source = source[normalized_currency.eq(active_currency)]
 
     dates = pd.to_datetime(source.get("过账日期"), errors="coerce")
     date_from = pd.to_datetime(arguments.get("date_from"), errors="coerce")
@@ -123,16 +142,23 @@ def run_journal_query(
 
     matched_rows = int(len(source))
     voucher_series = source.get("凭证编号", pd.Series("", index=source.index)).fillna("").astype(str)
+    matched_currencies = sorted({
+        str(value).strip()
+        for value in source.get("_amount_currency", pd.Series("", index=source.index)).dropna().astype(str)
+        if str(value).strip() and str(value).strip() != "未维护"
+    })
+    amounts_comparable = len(matched_currencies) <= 1
     metrics = {
         "row_count": matched_rows,
         "voucher_count": int(voucher_series[voucher_series.str.strip().ne("")].nunique()),
-        "absolute_entry_amount": float(source["_amount_abs"].sum()),
-        "debit_absolute_amount": float(source["_debit_abs"].sum()),
-        "credit_absolute_amount": float(source["_credit_abs"].sum()),
-        "normalized_signed_amount": float(source["_amount_raw"].sum()),
+        "currencies": matched_currencies,
+        "amounts_comparable": amounts_comparable,
+        "absolute_entry_amount": float(source["_amount_abs"].sum()) if amounts_comparable else None,
+        "debit_absolute_amount": float(source["_debit_abs"].sum()) if amounts_comparable else None,
+        "credit_absolute_amount": float(source["_credit_abs"].sum()) if amounts_comparable else None,
+        "normalized_signed_amount": float(source["_amount_raw"].sum()) if amounts_comparable else None,
     }
 
-    group_by = str(arguments.get("group_by") or "").strip()
     group_rows: list[dict[str, Any]] = []
     if group_by:
         if group_by not in GROUP_FIELDS:
@@ -168,6 +194,7 @@ def run_journal_query(
         "_account_name",
         "_acct_category",
         "借/贷标识",
+        "_amount_currency",
         "_amount_raw",
         "_amount_abs",
         "_customer_display",
@@ -179,6 +206,7 @@ def run_journal_query(
         "_query_year": "年度",
         "_account_name": "科目名称",
         "_acct_category": "财务分类",
+        "_amount_currency": "币种",
         "_amount_raw": "统一方向金额",
         "_amount_abs": "绝对发生额",
         "_customer_display": "客户",
@@ -202,12 +230,17 @@ def run_journal_query(
             "classification_revision": store.current_classification_revision(project_id),
             "years": years,
             "query_spec": query_spec,
+            "active_analysis_currency": active_currency,
             "matched_row_count": matched_rows,
             "amount_semantics": amount_semantics,
             "metric_definitions": {
                 "absolute_entry_amount": "逐行统一金额绝对值之和；同一凭证借贷两侧均计入",
                 "normalized_signed_amount": "结合金额正负与借贷标识识别后的方向金额之和",
                 "voucher_count": "匹配范围内非空凭证编号去重数",
+                "currency_safety": (
+                    "金额指标仅在单一币种内可加总；多币种查询仅返回各币种分组金额，"
+                    "总体金额字段为空，不执行隐式汇率折算"
+                ),
             },
         },
     }

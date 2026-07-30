@@ -4,6 +4,8 @@ import * as echarts from "echarts";
 import { api, type ProjectSummary } from "@/api/client";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
+import { chartPalette, useThemeVersion, withChartTheme } from "@/lib/chartTheme";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
@@ -138,26 +140,35 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
     });
   }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
+  const themeVersion = useThemeVersion();
+
   useEffect(() => {
     if (!monthlyRef.current) return;
     const rows = tab === "ap" ? apMonthly.data?.rows : tab === "or" ? orMonthly.data?.rows : opMonthly.data?.rows;
     if (!rows?.length) return;
+    const pal = chartPalette();
     const chart = echarts.init(monthlyRef.current);
     const months = rows.map((r) => periodLabel(r.月份));
     if (tab === "ap") {
       const apRows = rows as import("@/api/client").ApMonthlyRow[];
-      chart.setOption({
-        tooltip: { trigger: "axis" },
-        legend: { textStyle: { color: "#8b97a8" } },
-        grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
-        xAxis: { type: "category", data: months },
-        yAxis: { type: "value", axisLabel: { formatter: formatWan } },
-        series: [
-          { name: "暂估贷方增加", type: "bar", data: apRows.map((r) => r.暂估贷方增加) },
-          { name: "暂估借方减少", type: "bar", data: apRows.map((r) => r.暂估借方减少) },
-          { name: "暂估净额", type: "line", smooth: true, data: apRows.map((r) => r.暂估净额) },
-        ],
-      });
+      chart.setOption(
+        withChartTheme({
+          tooltip: { trigger: "axis" },
+          legend: { textStyle: { color: pal.muted } },
+          grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
+          xAxis: { type: "category", data: months, axisLabel: { color: pal.muted } },
+          yAxis: {
+            type: "value",
+            axisLabel: { color: pal.muted, formatter: formatWan },
+            splitLine: { lineStyle: { color: pal.grid } },
+          },
+          series: [
+            { name: "暂估贷方增加", type: "bar", data: apRows.map((r) => r.暂估贷方增加) },
+            { name: "暂估借方减少", type: "bar", data: apRows.map((r) => r.暂估借方减少) },
+            { name: "暂估净额", type: "line", smooth: true, data: apRows.map((r) => r.暂估净额) },
+          ],
+        }),
+      );
       const onClick = (params: { componentType?: string; dataIndex?: number; seriesIndex?: number }) => {
         if (params.componentType !== "series" || params.dataIndex == null || params.seriesIndex == null) return;
         const month = apRows[params.dataIndex].月份;
@@ -174,18 +185,24 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
     }
     if (tab === "or") {
       const orRows = rows as import("@/api/client").OrMonthlyRow[];
-      chart.setOption({
-        tooltip: { trigger: "axis" },
-        legend: { textStyle: { color: "#8b97a8" } },
-        grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
-        xAxis: { type: "category", data: months },
-        yAxis: { type: "value", axisLabel: { formatter: formatWan } },
-        series: [
-          { name: "S发生额", type: "bar", data: orRows.map((r) => r.其他应收S发生额) },
-          { name: "H发生额", type: "bar", data: orRows.map((r) => r.其他应收H发生额) },
-          { name: "净额", type: "line", smooth: true, data: orRows.map((r) => r.其他应收净额) },
-        ],
-      });
+      chart.setOption(
+        withChartTheme({
+          tooltip: { trigger: "axis" },
+          legend: { textStyle: { color: pal.muted } },
+          grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
+          xAxis: { type: "category", data: months, axisLabel: { color: pal.muted } },
+          yAxis: {
+            type: "value",
+            axisLabel: { color: pal.muted, formatter: formatWan },
+            splitLine: { lineStyle: { color: pal.grid } },
+          },
+          series: [
+            { name: "S发生额", type: "bar", data: orRows.map((r) => r.其他应收S发生额) },
+            { name: "H发生额", type: "bar", data: orRows.map((r) => r.其他应收H发生额) },
+            { name: "净额", type: "line", smooth: true, data: orRows.map((r) => r.其他应收净额) },
+          ],
+        }),
+      );
       const onClick = (params: { componentType?: string; dataIndex?: number; seriesIndex?: number }) => {
         if (params.componentType !== "series" || params.dataIndex == null || params.seriesIndex == null) return;
         const month = orRows[params.dataIndex].月份;
@@ -201,18 +218,24 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
       return () => { chart.off("click", onClick); chart.dispose(); };
     }
     const opRows = rows as import("@/api/client").OpMonthlyRow[];
-    chart.setOption({
-      tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" } },
-      grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
-      xAxis: { type: "category", data: months },
-      yAxis: { type: "value", axisLabel: { formatter: formatWan } },
-      series: [
-        { name: "预提H", type: "bar", data: opRows.map((r) => r.其他应付预提H) },
-        { name: "核销S", type: "bar", data: opRows.map((r) => r.其他应付核销S) },
-        { name: "净值", type: "line", smooth: true, data: opRows.map((r) => r.其他应付净值) },
-      ],
-    });
+    chart.setOption(
+      withChartTheme({
+        tooltip: { trigger: "axis" },
+        legend: { textStyle: { color: pal.muted } },
+        grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
+        xAxis: { type: "category", data: months, axisLabel: { color: pal.muted } },
+        yAxis: {
+          type: "value",
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
+        },
+        series: [
+          { name: "预提H", type: "bar", data: opRows.map((r) => r.其他应付预提H) },
+          { name: "核销S", type: "bar", data: opRows.map((r) => r.其他应付核销S) },
+          { name: "净值", type: "line", smooth: true, data: opRows.map((r) => r.其他应付净值) },
+        ],
+      }),
+    );
     const onClick = (params: { componentType?: string; dataIndex?: number; seriesIndex?: number }) => {
       if (params.componentType !== "series" || params.dataIndex == null || params.seriesIndex == null) return;
       const month = opRows[params.dataIndex].月份;
@@ -226,19 +249,37 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
     };
     chart.on("click", onClick);
     return () => { chart.off("click", onClick); chart.dispose(); };
-  }, [apMonthly.data, orMonthly.data, opMonthly.data, tab, year]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apMonthly.data, orMonthly.data, opMonthly.data, tab, year, themeVersion]);
 
   useEffect(() => {
     if (!supplierRef.current || !apSuppliers.data?.rows.length || tab !== "ap") return;
+    const pal = chartPalette();
     const chart = echarts.init(supplierRef.current);
     const names = apSuppliers.data.rows.map((r) => r.供应商).reverse();
-    chart.setOption({
-      tooltip: { trigger: "axis" },
-      grid: { left: 120, right: 24 },
-      xAxis: { type: "value", axisLabel: { formatter: formatWan } },
-      yAxis: { type: "category", data: names, axisLabel: { width: 110, overflow: "truncate" } },
-      series: [{ type: "bar", data: apSuppliers.data.rows.map((r) => r.暂估净额).reverse() }],
-    });
+    chart.setOption(
+      withChartTheme({
+        tooltip: { trigger: "axis" },
+        grid: { left: 120, right: 24 },
+        xAxis: {
+          type: "value",
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
+        },
+        yAxis: {
+          type: "category",
+          data: names,
+          axisLabel: { color: pal.muted, width: 110, overflow: "truncate" },
+        },
+        series: [
+          {
+            type: "bar",
+            data: apSuppliers.data.rows.map((r) => r.暂估净额).reverse(),
+            itemStyle: { color: pal.accent, borderRadius: [0, 4, 4, 0] },
+          },
+        ],
+      }),
+    );
     const onClick = (params: { componentType?: string; dataIndex?: number }) => {
       if (params.componentType !== "series" || params.dataIndex == null || !selection) return;
       const supplier = names[params.dataIndex];
@@ -252,9 +293,19 @@ export function WorkingCapitalPanel({ project, preferredYear }: Props) {
     };
     chart.on("click", onClick);
     return () => { chart.off("click", onClick); chart.dispose(); };
-  }, [apSuppliers.data, tab, selection?.month, year]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apSuppliers.data, tab, selection?.month, year, themeVersion]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
+  }
 
   return (
     <div className="module-panel">

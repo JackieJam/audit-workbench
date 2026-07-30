@@ -349,18 +349,53 @@ def analysis_quality_summary(
         for key in ("intentional_exclusion", "confirmed_exclusion")
     )
     currencies = sorted({
-        str(value)
+        str(value).strip().upper()
         for value in work["_amount_currency"].dropna().astype(str)
         if str(value).strip() and str(value) != "未维护"
     })
     currency_basis = str(work["_currency_basis"].iat[0]) if not work.empty else ""
+    currency_distribution: list[dict[str, object]] = []
+    if not work.empty and "_amount_currency" in work.columns:
+        voucher_col = (
+            work["凭证编号"].fillna("").astype(str)
+            if "凭证编号" in work.columns
+            else pd.Series("", index=work.index)
+        )
+        distribution = (
+            work.assign(
+                _quality_currency=(
+                    work["_amount_currency"].fillna("未维护").astype(str).str.strip().str.upper()
+                ),
+                _quality_voucher=voucher_col,
+            )
+            .groupby("_quality_currency", dropna=False)
+            .agg(
+                row_count=("_amount_abs", "size"),
+                voucher_count=("_quality_voucher", "nunique"),
+                absolute_entry_amount=("_amount_abs", "sum"),
+            )
+            .reset_index()
+            .sort_values("absolute_entry_amount", ascending=False)
+        )
+        currency_distribution = [
+            {
+                "currency": str(row["_quality_currency"]),
+                "row_count": int(row["row_count"]),
+                "voucher_count": int(row["voucher_count"]),
+                "absolute_entry_amount": float(row["absolute_entry_amount"]),
+            }
+            for _, row in distribution.iterrows()
+        ]
+    mixed_document_currency = currency_basis == "document" and len(currencies) > 1
     return {
         "amount_source": str(work["_amount_source"].iat[0]) if not work.empty else "",
         "amount_sign_mode": str(work["_amount_sign_mode"].iat[0]) if not work.empty else "",
         "amount_sign_confidence": float(work["_amount_sign_confidence"].iat[0]) if not work.empty else 0.0,
         "currency_basis": currency_basis,
         "currencies": currencies,
-        "mixed_document_currency": currency_basis == "document" and len(currencies) > 1,
+        "mixed_document_currency": mixed_document_currency,
+        "amounts_comparable": not mixed_document_currency,
+        "currency_distribution": currency_distribution,
         "total_absolute_entry_amount": total_amount,
         "unclassified_amount": unclassified_amount,
         "unclassified_amount_ratio": unclassified_amount / total_amount if total_amount else 0.0,

@@ -151,6 +151,86 @@ def test_quality_decision_api_rebuilds_classification(tmp_path, monkeypatch) -> 
     get_pipeline.cache_clear()
 
 
+def test_multi_currency_scope_unblocks_charts_without_mixing_amounts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+    store = get_store()
+    manifest = store.create_project("多币种画像")
+    pid = manifest.project_id
+    frame = pd.DataFrame([
+        {
+            "凭证编号": "CNY-1", "过账日期": pd.Timestamp("2024-01-10"),
+            "借/贷标识": "S", "凭证货币价值": 100.0, "凭证货币代码": "CNY",
+            "总账科目": "112201", "总账科目：短文本": "应收账款",
+        },
+        {
+            "凭证编号": "CNY-1", "过账日期": pd.Timestamp("2024-01-10"),
+            "借/贷标识": "H", "凭证货币价值": 100.0, "凭证货币代码": "CNY",
+            "总账科目": "600101", "总账科目：短文本": "主营业务收入",
+        },
+        {
+            "凭证编号": "USD-1", "过账日期": pd.Timestamp("2024-01-11"),
+            "借/贷标识": "S", "凭证货币价值": 10.0, "凭证货币代码": "USD",
+            "总账科目": "112201", "总账科目：短文本": "应收账款",
+        },
+        {
+            "凭证编号": "USD-1", "过账日期": pd.Timestamp("2024-01-11"),
+            "借/贷标识": "H", "凭证货币价值": 10.0, "凭证货币代码": "USD",
+            "总账科目": "600101", "总账科目：短文本": "主营业务收入",
+        },
+    ])
+    store.ingest_journal(
+        pid,
+        {2024: frame},
+        column_mapping={},
+        missing_columns=[],
+        year_summary=[],
+    )
+
+    quality = client.get(f"/projects/{pid}/analysis/quality").json()
+    assert quality["analysis_currency_scope"] is None
+    assert quality["currency_overview"]["2024"]["mixed_document_currency"] is True
+    assert {
+        item["currency"]
+        for item in quality["currency_overview"]["2024"]["currency_distribution"]
+    } == {"CNY", "USD"}
+
+    blocked = client.get(
+        f"/projects/{pid}/analysis/income-cost/monthly",
+        params={"year": 2024, "category": "总计"},
+    )
+    assert blocked.status_code == 409
+
+    selected = client.post(
+        f"/projects/{pid}/analysis/currency-scope",
+        json={"currency": "CNY"},
+    )
+    assert selected.status_code == 200
+    assert selected.json()["analysis_currency_scope"] == "CNY"
+
+    cny = client.get(
+        f"/projects/{pid}/analysis/income-cost/monthly",
+        params={"year": 2024, "category": "总计"},
+    ).json()["rows"]
+    assert sum(row["净收入"] for row in cny) == 100.0
+
+    switched = client.post(
+        f"/projects/{pid}/analysis/currency-scope",
+        json={"currency": "USD"},
+    )
+    assert switched.status_code == 200
+    usd = client.get(
+        f"/projects/{pid}/analysis/income-cost/monthly",
+        params={"year": 2024, "category": "总计"},
+    ).json()["rows"]
+    assert sum(row["净收入"] for row in usd) == 10.0
+
+    get_store.cache_clear()
+    get_pipeline.cache_clear()
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not JOURNAL_2022.exists(), reason="本地测试案例目录不可用")
 def test_real_journal_2022_monthly(tmp_path, monkeypatch) -> None:

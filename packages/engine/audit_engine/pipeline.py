@@ -135,7 +135,7 @@ class AnalysisPipeline:
         profiles: dict[int, dict] = {}
         financials: dict[int, dict] = {}
         for year in manifest.years:
-            work = self._store.get_work_df(project_id, year)
+            work = self._store.get_analysis_work_df(project_id, year)
             if work.empty:
                 continue
             profiles[year] = build_profile(work, year)
@@ -151,7 +151,7 @@ class AnalysisPipeline:
         overrides = _category_overrides(state)
         rules = self.load_rules(project_id)
         year_map = {
-            year: self._store.get_work_df(project_id, year)
+            year: self._store.get_analysis_work_df(project_id, year)
             for year in manifest.years
         }
         findings = run_cross_year_analysis(year_map, rules, category_overrides=overrides)
@@ -166,7 +166,7 @@ class AnalysisPipeline:
         rules = self.load_rules(project_id)
         frames = []
         for year in manifest.years:
-            df = self._store.get_work_df(project_id, year)
+            df = self._store.get_analysis_work_df(project_id, year)
             if not df.empty:
                 if "_year" not in df.columns:
                     df = df.copy()
@@ -218,7 +218,7 @@ class AnalysisPipeline:
         pool = self._store.load_candidate_pool(project_id)
         frames = []
         for year in manifest.years:
-            df = self._store.get_work_df(project_id, year)
+            df = self._store.get_analysis_work_df(project_id, year)
             if not df.empty:
                 if "_year" not in df.columns:
                     df = df.copy()

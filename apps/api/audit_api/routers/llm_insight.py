@@ -12,10 +12,11 @@ from audit_engine.module_insight import (
 )
 from audit_engine.module_insight_jobs import list_jobs
 from audit_engine.store import ProjectStore
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from audit_api.deps import get_store
+from audit_api.module_insight_tasks import enqueue_module_insight
 from audit_api.routers.analysis import _manifest_or_404
 
 router = APIRouter(prefix="/projects", tags=["llm-insight"])
@@ -51,6 +52,43 @@ def get_module_insight(project_id: str, module_key: str, store: ProjectStore = D
     _manifest_or_404(store, project_id)
     cached = (store.load_state(project_id).get("module_insights") or {}).get(module_key)
     return {"module": module_key, "cached": cached is not None, "insight": cached}
+
+
+@router.post("/{project_id}/analysis/modules/{module_key}/insight/jobs")
+def create_module_insight_job(
+    project_id: str,
+    module_key: str,
+    body: InsightCreateRequest,
+    background_tasks: BackgroundTasks,
+    store: ProjectStore = Depends(get_store),
+    x_llm_api_key: str | None = Header(default=None, alias="X-LLM-Api-Key"),
+    x_llm_profile_id: str | None = Header(default=None, alias="X-LLM-Profile-Id"),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    questions = _load_questions(module_key)
+    if not questions:
+        raise HTTPException(status_code=404, detail=f"未知模块：{module_key}")
+    profile_id = (body.profile_id or x_llm_profile_id or "").strip() or None
+    api_key = (body.api_key or x_llm_api_key or "").strip() or None
+    runtime = resolve_llm_runtime(profile_id=profile_id, manual_key=api_key)
+    if not runtime.api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="未配置 LLM API Key。请在「大模型」页签保存方案并填入 Key，或设置 DEEPSEEK_API_KEY",
+        )
+    try:
+        job = enqueue_module_insight(
+            background_tasks,
+            store,
+            project_id,
+            module_key,
+            api_key=runtime.api_key,
+            model=runtime.model,
+            base_url=runtime.base_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"module": module_key, "job": job}
 
 
 @router.post("/{project_id}/analysis/modules/{module_key}/insight")

@@ -71,7 +71,7 @@ def add_candidate(
     if int(year) not in manifest.years:
         raise HTTPException(status_code=404, detail=f"项目中无 {year} 年序时账数据")
 
-    work = store.get_work_df(project_id, int(year))
+    work = store.get_analysis_work_df(project_id, int(year))
     detail = resolve_drilldown(work, selector)
     if detail.empty:
         raise HTTPException(status_code=400, detail="当前选择条件下无匹配分录")

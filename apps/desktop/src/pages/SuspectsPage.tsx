@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type CandidateGroup, type ProjectSummary } from "@/api/client";
 import { DetailTable } from "@/components/DetailTable";
+import { EmptyState } from "@/components/EmptyState";
 
 const FINAL_STATUS = "人工直入最终样本";
 const DEFAULT_STATUS = "候选";
@@ -155,7 +156,11 @@ export function SuspectsPage({ project }: Props) {
     return (
       <section className="page">
         <h2>疑点工作台</h2>
-        <p className="lead">请先在左侧选择项目；从财务画像图表点选后可加入疑点库。</p>
+        <EmptyState
+          kind="search"
+          title="尚未选择项目"
+          description="在左侧选择项目后，从财务画像图表点选异常数据，即可加入疑点库并在此复核。"
+        />
       </section>
     );
   }
@@ -208,11 +213,19 @@ export function SuspectsPage({ project }: Props) {
       {candidates.isError && <p className="error">加载失败</p>}
 
       {!candidates.isLoading && groups.length === 0 && (
-        <div className="placeholder-card">暂无疑点。在「财务画像」中点击图表数据点后可加入。</div>
+        <EmptyState
+          kind="search"
+          title="疑点库为空"
+          description="在「财务画像」中点击图表数据点，即可将异常记录加入疑点库。"
+        />
       )}
 
       {!candidates.isLoading && groups.length > 0 && filtered.length === 0 && (
-        <div className="placeholder-card">当前筛选条件下无匹配疑点。</div>
+        <EmptyState
+          kind="search"
+          title="无匹配疑点"
+          description="当前筛选条件下没有匹配的疑点，请调整状态或模块筛选。"
+        />
       )}
 
       {filtered.length > 0 && (

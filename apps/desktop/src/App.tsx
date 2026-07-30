@@ -1,26 +1,56 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ChartLineUp,
+  ClipboardText,
+  Detective,
+  Moon,
+  Plus,
+  ShieldCheck,
+  SidebarSimple,
+  Sparkle,
+  Sun,
+  type Icon,
+} from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { UploadPanel } from "@/components/UploadPanel";
 import { FinancePage } from "@/pages/FinancePage";
 import { SuspectsPage } from "@/pages/SuspectsPage";
 import { SamplingPage } from "@/pages/SamplingPage";
 import { AgentPanel } from "@/components/AgentPanel";
+import { EmptyState } from "@/components/EmptyState";
 import { AgentProvider, useAgent } from "@/context/AgentContext";
 import { WorkspaceProvider } from "@/context/WorkspaceContext";
 import { LlmProvider } from "@/context/LlmContext";
+import { useTheme } from "@/context/ThemeContext";
 import { LlmSettingsPanel } from "@/components/LlmSettingsPanel";
 import { useAgentPanelWidth } from "@/hooks/useAgentPanelWidth";
 import type { ProjectSummary } from "@/api/client";
 
 type Tab = "finance" | "suspects" | "sampling" | "llm";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "finance", label: "财务画像" },
-  { id: "suspects", label: "疑点工作台" },
-  { id: "sampling", label: "抽样底稿" },
-  { id: "llm", label: "大模型" },
+const TABS: { id: Tab; label: string; icon: Icon }[] = [
+  { id: "finance", label: "财务画像", icon: ChartLineUp },
+  { id: "suspects", label: "疑点工作台", icon: Detective },
+  { id: "sampling", label: "抽样底稿", icon: ClipboardText },
+  { id: "llm", label: "大模型", icon: Sparkle },
 ];
+
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme();
+  const dark = theme === "dark";
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      onClick={toggleTheme}
+      title={dark ? "切换为浅色模式" : "切换为深色模式"}
+      aria-label={dark ? "切换为浅色模式" : "切换为深色模式"}
+    >
+      {dark ? <Sun size={17} /> : <Moon size={17} />}
+    </button>
+  );
+}
 
 function AppWorkspace({
   tab,
@@ -148,7 +178,9 @@ function AppWorkspace({
               title="展开审计助手"
               aria-label="展开审计助手"
             >
-              <span aria-hidden>✦</span>
+              <span aria-hidden>
+                <Sparkle size={16} />
+              </span>
               <span>助手</span>
             </button>
           ) : (
@@ -190,6 +222,24 @@ export default function App() {
     setSidebarCollapsed(!!project && project.years.length > 0);
   };
 
+  const apiStatus = health.isLoading
+    ? { dot: "status-dot status-dot--pending", text: "正在连接 API…" }
+    : health.isError
+      ? { dot: "status-dot status-dot--err", text: "API 未连接，请先运行 scripts/dev-api.sh" }
+      : {
+          dot: "status-dot status-dot--ok",
+          text: `API ${health.data?.version ?? ""} 已连接${
+            selected
+              ? ` · ${selected.project_name}${
+                  selectedHasData ? `（${selected.total_rows.toLocaleString()} 行）` : "（待上传）"
+                }`
+              : ""
+          }`,
+        };
+  const apiStatusFull = health.isSuccess
+    ? `数据目录 ${health.data.storage_root}`
+    : undefined;
+
   return (
     <LlmProvider>
       <div className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}>
@@ -197,47 +247,44 @@ export default function App() {
           <div className="app-header-brand">
             <button
               type="button"
-              className="sidebar-toggle"
+              className="icon-btn"
               onClick={() => setSidebarCollapsed((v) => !v)}
               title={sidebarCollapsed ? "展开项目与上传" : "收起项目与上传"}
               aria-expanded={!sidebarCollapsed}
+              aria-label={sidebarCollapsed ? "展开项目与上传" : "收起项目与上传"}
             >
-              {sidebarCollapsed ? "☰ 项目" : "⟨ 收起"}
+              <SidebarSimple size={18} />
             </button>
-            <div>
+            <span className="brand-mark" aria-hidden>
+              <ShieldCheck size={19} weight="duotone" />
+            </span>
+            <div className="brand-text">
               <h1>审计分析工作台</h1>
-              <p className="muted">
-                {health.isLoading && "连接 API…"}
-                {health.isError && "API 未连接 — 请先运行 scripts/dev-api.sh"}
-                {health.isSuccess && (
-                  <>
-                    API {health.data.version} · 数据目录 {health.data.storage_root}
-                    {selected && (
-                      <>
-                        {" · "}
-                        {selected.project_name}
-                        {selectedHasData
-                          ? `（${selected.total_rows.toLocaleString()} 行）`
-                          : "（待上传）"}
-                      </>
-                    )}
-                  </>
-                )}
+              <p className="brand-status" title={apiStatusFull}>
+                <span className={apiStatus.dot} aria-hidden />
+                {apiStatus.text}
               </p>
             </div>
           </div>
           <nav className="tabs">
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={tab === t.id ? "tab active" : "tab"}
-                onClick={() => setTab(t.id)}
-              >
-                {t.label}
-              </button>
-            ))}
+            {TABS.map((t) => {
+              const Icon = t.icon;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={tab === t.id ? "tab active" : "tab"}
+                  onClick={() => setTab(t.id)}
+                >
+                  <Icon size={16} />
+                  {t.label}
+                </button>
+              );
+            })}
           </nav>
+          <div className="app-header-actions">
+            <ThemeToggle />
+          </div>
         </header>
 
         <aside className={`sidebar${sidebarCollapsed ? " sidebar--collapsed" : ""}`} aria-hidden={sidebarCollapsed}>
@@ -264,6 +311,7 @@ export default function App() {
               >
                 <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="新项目名称" />
                 <button type="submit" disabled={createProject.isPending}>
+                  <Plus size={14} weight="bold" />
                   创建
                 </button>
               </form>
@@ -283,10 +331,15 @@ export default function App() {
                     </span>
                   </li>
                 ))}
-                {projects.isSuccess && projects.data.length === 0 && (
-                  <li className="muted">暂无项目，请先创建</li>
-                )}
               </ul>
+              {projects.isSuccess && projects.data.length === 0 && (
+                <EmptyState
+                  kind="project"
+                  size="sm"
+                  title="还没有项目"
+                  description="创建一个项目并上传序时账，开始财务分析。"
+                />
+              )}
 
               <UploadPanel
                 projectId={selectedId}

@@ -71,6 +71,13 @@ export type AnalysisQuality = {
   currency_basis: string;
   currencies: string[];
   mixed_document_currency: boolean;
+  amounts_comparable: boolean;
+  currency_distribution: Array<{
+    currency: string;
+    row_count: number;
+    voucher_count: number;
+    absolute_entry_amount: number;
+  }>;
   total_absolute_entry_amount: number;
   unclassified_amount: number;
   unclassified_amount_ratio: number;
@@ -114,9 +121,12 @@ export type ClassificationDecision = {
 export type AnalysisQualityResponse = {
   data_version: string;
   classification_revision: string;
+  analysis_currency_scope?: string | null;
+  analysis_scope_revision?: string;
   allowed_categories: string[];
   classification_decisions: ClassificationDecision[];
   years: Record<string, AnalysisQuality>;
+  currency_overview?: Record<string, AnalysisQuality>;
   recalculation?: {
     applied_count: number;
     classification_revision: string;
@@ -215,14 +225,18 @@ export type LlmModelsResponse = {
 export type InsightStage = { id: string; label: string; percent: number };
 
 export type InsightJob = {
+  job_id: string;
   module_key: string;
   stage: string;
   stage_label: string;
   percent: number;
-  status: "running" | "done" | "error";
-  started_at?: string;
+  status: "queued" | "running" | "done" | "error";
+  created_at?: string;
+  started_at?: string | null;
   updated_at?: string;
+  completed_at?: string | null;
   error?: string | null;
+  reused?: boolean;
   stages?: InsightStage[];
 };
 
@@ -388,6 +402,11 @@ export const api = {
     request<AnalysisQualityResponse>(
       `/projects/${projectId}/analysis/quality`,
     ),
+  setAnalysisCurrencyScope: (projectId: string, currency: string) =>
+    request<AnalysisQualityResponse>(
+      `/projects/${projectId}/analysis/currency-scope`,
+      { method: "POST", body: JSON.stringify({ currency }) },
+    ),
   applyAnalysisQualityDecisions: (
     projectId: string,
     decisions: ClassificationDecision[],
@@ -411,6 +430,21 @@ export const api = {
   ) =>
     request<{ module: string; insight: ModuleInsight }>(
       `/projects/${projectId}/analysis/modules/${encodeURIComponent(moduleKey)}/insight`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          profile_id: opts?.profileId ?? "",
+          api_key: opts?.apiKey ?? "",
+        }),
+      },
+    ),
+  startModuleInsightJob: (
+    projectId: string,
+    moduleKey: string,
+    opts?: { profileId?: string | null; apiKey?: string },
+  ) =>
+    request<{ module: string; job: InsightJob }>(
+      `/projects/${projectId}/analysis/modules/${encodeURIComponent(moduleKey)}/insight/jobs`,
       {
         method: "POST",
         body: JSON.stringify({

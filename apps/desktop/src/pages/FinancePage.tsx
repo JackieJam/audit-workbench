@@ -1,10 +1,8 @@
 import type { ProjectSummary } from "@/api/client";
 import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
-import { useEnsureProfiles } from "@/hooks/useEnsureProfiles";
-import { useModuleInsightStatus } from "@/hooks/useModuleInsight";
-import { AnalysisProgressBar } from "@/components/AnalysisProgressBar";
+import { EmptyState } from "@/components/EmptyState";
 import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { BalanceSheetPanel } from "@/components/BalanceSheetPanel";
 import { CrossYearPanel } from "@/components/CrossYearPanel";
@@ -35,13 +33,24 @@ const MODULES: { id: FinanceModule; label: string }[] = [
 export function FinancePage({ project }: Props) {
   const { financeModule, setFinanceModule } = useWorkspace();
   const { pinSelection } = useAgent();
-  useEnsureProfiles(project);
-  const insightStatus = useModuleInsightStatus(project?.project_id);
+  const queryClient = useQueryClient();
+  const qualityKey = ["analysis-quality", ...(project ? projectDataKey(project) : [null, null])];
   const quality = useQuery({
-    queryKey: ["analysis-quality", ...(project ? projectDataKey(project) : [null, null])],
+    queryKey: qualityKey,
     queryFn: () => api.getAnalysisQuality(project!.project_id),
     enabled: !!project?.project_id && project.years.length > 0,
     ...financialAnalysisQueryOptions,
+  });
+  const currencyMutation = useMutation({
+    mutationFn: (currency: string) => api.setAnalysisCurrencyScope(project!.project_id, currency),
+    onSuccess: async (next) => {
+      queryClient.setQueryData(qualityKey, next);
+      await queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey.includes(project!.project_id) &&
+          query.queryKey[0] !== "analysis-quality",
+      });
+    },
   });
   const qualityWarnings = Object.entries(quality.data?.years ?? {}).flatMap(([year, item]) => {
     const warnings: { key: string; text: string }[] = [];
@@ -59,9 +68,25 @@ export function FinancePage({ project }: Props) {
     }
     return warnings;
   });
-  const mixedCurrencyBlocked = Object.values(quality.data?.years ?? {}).some(
+  const currencyOverview = quality.data?.currency_overview ?? quality.data?.years ?? {};
+  const mixedCurrencyProject = Object.values(currencyOverview).some(
     (item) => item.mixed_document_currency,
   );
+  const selectedCurrency = quality.data?.analysis_currency_scope ?? null;
+  const mixedCurrencyBlocked = mixedCurrencyProject && !selectedCurrency;
+  const currencyOptions = Array.from(
+    new Set(Object.values(currencyOverview).flatMap((item) => item.currencies)),
+  ).sort();
+  const scopedProject = project && selectedCurrency
+    ? {
+        ...project,
+        years: project.years.filter((year) =>
+          currencyOverview[String(year)]?.currency_distribution.some(
+            (row) => row.currency === selectedCurrency && row.row_count > 0,
+          ),
+        ),
+      }
+    : project;
   const hasQualityReview = Object.values(quality.data?.years ?? {}).some(
     (item) => item.unclassified_amount > 0,
   ) || Boolean(quality.data?.classification_decisions?.length);
@@ -72,13 +97,63 @@ export function FinancePage({ project }: Props) {
     pinSelection(moduleOverviewSelection(financeModule, label));
   }, [financeModule, project?.project_id, pinSelection]);
 
-  if (project && mixedCurrencyBlocked) {
+  if (project && quality.isLoading) {
     return (
       <section className="page">
         <h2>财务画像</h2>
         <p className="lead"><strong>{project.project_name}</strong></p>
-        <div className="placeholder-card">
-          检测到多种凭证币且未提供公司代码货币金额。为避免把不同币种直接相加，分析图表已暂停；请上传本位币金额列或按币种拆分项目。
+        <p className="muted">正在识别金额与币种口径…</p>
+      </section>
+    );
+  }
+
+  if (project && mixedCurrencyBlocked) {
+    return (
+      <section className="page">
+        <h2>财务画像</h2>
+        <p className="lead">
+          <strong>{project.project_name}</strong> — 检测到 {currencyOptions.join("、")} 多币种
+        </p>
+        <div className="chart-card currency-scope-card">
+          <h3>选择财务画像的分析币种</h3>
+          <p className="muted">
+            当前未提供公司代码货币金额，系统不会把不同币种直接相加。请选择一个币种独立生成全部图表；
+            下表仅用于对比各币种的数据规模，不包含汇率折算。
+          </p>
+          <div className="currency-scope-table">
+            <div className="currency-scope-row currency-scope-row--header">
+              <span>年度</span><span>币种</span><span>分录行</span><span>凭证数</span><span>绝对发生额（原币）</span>
+            </div>
+            {Object.entries(currencyOverview).flatMap(([year, item]) =>
+              item.currency_distribution.map((row) => (
+                <div className="currency-scope-row" key={`${year}-${row.currency}`}>
+                  <span>{year}</span>
+                  <strong>{row.currency}</strong>
+                  <span>{row.row_count.toLocaleString()}</span>
+                  <span>{row.voucher_count.toLocaleString()}</span>
+                  <span>{row.absolute_entry_amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} {row.currency}</span>
+                </div>
+              )),
+            )}
+          </div>
+          <div className="year-segmented currency-scope-actions" aria-label="选择分析币种">
+            {currencyOptions.map((currency) => (
+              <button
+                key={currency}
+                type="button"
+                disabled={currencyMutation.isPending}
+                onClick={() => currencyMutation.mutate(currency)}
+              >
+                分析 {currency}
+              </button>
+            ))}
+          </div>
+          {currencyMutation.isError ? (
+            <p className="error">{String(currencyMutation.error)}</p>
+          ) : null}
+          <p className="chart-hint muted">
+            如需合并口径，请重新导入“本位币金额 / 公司代码货币价值”列；系统不会自动猜测汇率。
+          </p>
         </div>
       </section>
     );
@@ -88,17 +163,46 @@ export function FinancePage({ project }: Props) {
     <section className="page">
       <h2>财务画像</h2>
       {!project ? (
-        <p className="lead">请先在左侧选择或创建项目，并上传序时账。</p>
+        <EmptyState
+          kind="project"
+          title="尚未选择项目"
+          description="在左侧选择或创建一个项目，并上传年度序时账后，这里将呈现完整的财务画像与风险分析。"
+        />
       ) : (
         <>
           <p className="lead">
             <strong>{project.project_name}</strong> — {project.total_rows.toLocaleString()} 行
             {project.years.length > 0 ? `（${project.years.join("、")} 年）` : ""}
           </p>
-          <AnalysisProgressBar
-            projectId={project.project_id}
-            phase={insightStatus.phase}
-          />
+          {mixedCurrencyProject && selectedCurrency ? (
+            <details className="data-quality-strip currency-scope-strip">
+              <summary>
+                <span className="data-quality-strip__status" aria-hidden>¥</span>
+                <span className="data-quality-strip__summary">
+                  <strong>当前按 {selectedCurrency} 单币种分析</strong>
+                  <span>其他币种未计入图表，也未执行隐式汇率折算</span>
+                </span>
+                <span className="data-quality-strip__action">切换币种</span>
+              </summary>
+              <div className="data-quality-strip__details">
+                <div className="year-segmented" aria-label="切换分析币种">
+                  {currencyOptions.map((currency) => (
+                    <button
+                      key={currency}
+                      type="button"
+                      className={selectedCurrency === currency ? "active" : ""}
+                      disabled={currencyMutation.isPending}
+                      onClick={() => currencyMutation.mutate(currency)}
+                    >
+                      {currency}
+                    </button>
+                  ))}
+                </div>
+                <p className="muted">切换后会重新计算画像、规则结果和模块 AI 分析；已加入疑点库的凭证不会被删除。</p>
+                {currencyMutation.isError ? <p className="error">{String(currencyMutation.error)}</p> : null}
+              </div>
+            </details>
+          ) : null}
           {quality.isError ? (
             <div className="data-quality-strip data-quality-strip--error" role="alert">
               <span>数据质量信息读取失败，当前图表仍可查看，但请先确认分析口径。</span>
@@ -128,7 +232,7 @@ export function FinancePage({ project }: Props) {
                     ))}
                   </ul>
                 ) : null}
-                <DataQualityReview project={project} quality={quality.data} />
+                <DataQualityReview project={scopedProject ?? project} quality={quality.data} />
               </div>
             </details>
           ) : null}
@@ -144,18 +248,18 @@ export function FinancePage({ project }: Props) {
               </button>
             ))}
           </nav>
-          {financeModule === "income" && <IncomeCostPanel project={project} />}
-          {financeModule === "expense" && <ExpensePanel project={project} />}
-          {financeModule === "other_pnl" && <OtherPnlPanel project={project} />}
+          {financeModule === "income" && <IncomeCostPanel project={scopedProject ?? project} />}
+          {financeModule === "expense" && <ExpensePanel project={scopedProject ?? project} />}
+          {financeModule === "other_pnl" && <OtherPnlPanel project={scopedProject ?? project} />}
           {financeModule === "working_capital" && (
-            <WorkingCapitalPanel project={project} />
+            <WorkingCapitalPanel project={scopedProject ?? project} />
           )}
           {financeModule === "balance_sheet" && (
-            <BalanceSheetPanel project={project} />
+            <BalanceSheetPanel project={scopedProject ?? project} />
           )}
-          {financeModule === "adjustment" && <AdjustmentPanel project={project} />}
-          {financeModule === "profile" && <ProfilePanel project={project} />}
-          {financeModule === "cross" && <CrossYearPanel project={project} />}
+          {financeModule === "adjustment" && <AdjustmentPanel project={scopedProject ?? project} />}
+          {financeModule === "profile" && <ProfilePanel project={scopedProject ?? project} />}
+          {financeModule === "cross" && <CrossYearPanel project={scopedProject ?? project} />}
         </>
       )}
     </section>

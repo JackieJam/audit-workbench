@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ProjectSummary } from "@/api/client";
 import { RulesPanel } from "@/components/RulesPanel";
+import { EmptyState } from "@/components/EmptyState";
 import { useLlm } from "@/context/LlmContext";
 
 type Props = { project: ProjectSummary | null };
@@ -100,7 +101,11 @@ export function SamplingPage({ project }: Props) {
     return (
       <section className="page">
         <h2>抽样底稿</h2>
-        <p className="lead">请先在左侧选择项目并上传序时账。</p>
+        <EmptyState
+          kind="clipboard"
+          title="尚未选择项目"
+          description="在左侧选择项目并上传序时账后，即可配置规则、执行抽样并导出底稿。"
+        />
       </section>
     );
   }
@@ -237,7 +242,11 @@ export function SamplingPage({ project }: Props) {
           </table>
         </div>
       ) : (
-        <div className="placeholder-card">运行规则并选择抽样方式后，样本清单将显示于此。</div>
+        <EmptyState
+          kind="clipboard"
+          title="尚无样本"
+          description="运行规则并选择抽样方式后，样本清单将显示于此。"
+        />
       )}
     </section>
   );

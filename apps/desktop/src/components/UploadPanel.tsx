@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type DetectResponse, type IngestResponse } from "@/api/client";
 import { ChartLoadingBar, useSimulatedProgress } from "@/components/ChartLoadingBar";
+import { EmptyState } from "@/components/EmptyState";
 
 type Props = {
   projectId: string | null;
@@ -61,7 +62,14 @@ export function UploadPanel({ projectId, onImported }: Props) {
       : "处理中";
 
   if (!projectId) {
-    return <p className="muted">请先在左侧选择一个项目</p>;
+    return (
+      <EmptyState
+        kind="project"
+        size="sm"
+        title="未选择项目"
+        description="在上方选择或创建一个项目后，即可上传序时账。"
+      />
+    );
   }
 
   return (

@@ -4,6 +4,8 @@ import * as echarts from "echarts";
 import { api, type ProjectSummary } from "@/api/client";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
+import { chartPalette, useThemeVersion, withChartTheme } from "@/lib/chartTheme";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
@@ -126,23 +128,32 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
     });
   }, [selection, drilldown.data?.row_count, pinSelection, year]);
 
+  const themeVersion = useThemeVersion();
+
   useEffect(() => {
     if (!monthlyRef.current || !monthly.data?.rows.length) return;
+    const pal = chartPalette();
     const chart = echarts.init(monthlyRef.current);
     const rows = monthly.data.rows;
     const months = rows.map((r) => periodLabel(r.月份));
-    chart.setOption({
-      tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" } },
-      grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
-      xAxis: { type: "category", data: months },
-      yAxis: { type: "value", axisLabel: { formatter: formatWan } },
-      series: [
-        { name: "借方发生额", type: "bar", data: rows.map((r) => r.借方发生额) },
-        { name: "贷方发生额", type: "bar", data: rows.map((r) => r.贷方发生额) },
-        { name: "净变动", type: "line", smooth: true, data: rows.map((r) => r.净变动) },
-      ],
-    });
+    chart.setOption(
+      withChartTheme({
+        tooltip: { trigger: "axis" },
+        legend: { textStyle: { color: pal.muted } },
+        grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
+        xAxis: { type: "category", data: months, axisLabel: { color: pal.muted } },
+        yAxis: {
+          type: "value",
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
+        },
+        series: [
+          { name: "借方发生额", type: "bar", data: rows.map((r) => r.借方发生额) },
+          { name: "贷方发生额", type: "bar", data: rows.map((r) => r.贷方发生额) },
+          { name: "净变动", type: "line", smooth: true, data: rows.map((r) => r.净变动) },
+        ],
+      }),
+    );
     const dirs = ["debit", "credit", "net"] as const;
     const onClick = (params: { componentType?: string; dataIndex?: number; seriesIndex?: number }) => {
       if (params.componentType !== "series" || params.dataIndex == null || params.seriesIndex == null) return;
@@ -159,20 +170,38 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
     const onResize = () => chart.resize();
     window.addEventListener("resize", onResize);
     return () => { chart.off("click", onClick); window.removeEventListener("resize", onResize); chart.dispose(); };
-  }, [monthly.data, year, category]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthly.data, year, category, themeVersion]);
 
   useEffect(() => {
     if (!accountRef.current || !accounts.data?.rows.length) return;
+    const pal = chartPalette();
     const chart = echarts.init(accountRef.current);
     const rows = accounts.data.rows;
     const labels = rows.map((r) => `${r.科目编号} ${r.科目名称}`).reverse();
-    chart.setOption({
-      tooltip: { trigger: "axis" },
-      grid: { left: 160, right: 24 },
-      xAxis: { type: "value", axisLabel: { formatter: formatWan } },
-      yAxis: { type: "category", data: labels, axisLabel: { width: 150, overflow: "truncate" } },
-      series: [{ type: "bar", data: rows.map((r) => r.净变动).reverse() }],
-    });
+    chart.setOption(
+      withChartTheme({
+        tooltip: { trigger: "axis" },
+        grid: { left: 160, right: 24 },
+        xAxis: {
+          type: "value",
+          axisLabel: { color: pal.muted, formatter: formatWan },
+          splitLine: { lineStyle: { color: pal.grid } },
+        },
+        yAxis: {
+          type: "category",
+          data: labels,
+          axisLabel: { color: pal.muted, width: 150, overflow: "truncate" },
+        },
+        series: [
+          {
+            type: "bar",
+            data: rows.map((r) => r.净变动).reverse(),
+            itemStyle: { color: pal.accent, borderRadius: [0, 4, 4, 0] },
+          },
+        ],
+      }),
+    );
     const onClick = (params: { componentType?: string; dataIndex?: number }) => {
       if (params.componentType !== "series" || params.dataIndex == null) return;
       const row = rows[rows.length - 1 - params.dataIndex];
@@ -187,10 +216,29 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
     const onResize = () => chart.resize();
     window.addEventListener("resize", onResize);
     return () => { chart.off("click", onClick); window.removeEventListener("resize", onResize); chart.dispose(); };
-  }, [accounts.data, year, category]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts.data, year, category, themeVersion]);
 
-  if (!project.years.length) return <p className="muted">请先在左侧上传序时账。</p>;
-  if (!cats.data?.categories.length) return <p className="muted">当前数据未识别到资产负债类科目。</p>;
+  if (!project.years.length) {
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
+  }
+  if (!cats.data?.categories.length) {
+    return (
+      <EmptyState
+        kind="search"
+        size="sm"
+        title="未识别到资产负债类科目"
+        description="当前数据中没有可归入资产负债分析的科目，请检查科目映射。"
+      />
+    );
+  }
 
   return (
     <div className="module-panel">

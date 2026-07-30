@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -108,10 +109,122 @@ class ProjectStore:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
+    def current_analysis_currency(self, project_id: str) -> str | None:
+        value = str(self.load_state(project_id).get("analysis_currency_scope") or "").strip()
+        return value or None
+
+    def set_analysis_currency(
+        self,
+        project_id: str,
+        currency: str | None,
+        *,
+        actor: str = "user",
+    ) -> dict[str, Any]:
+        """选择单一凭证币作为分析口径；不做任何汇率折算。"""
+        manifest = self.load_manifest(project_id)
+        requested = str(currency or "").strip().upper()
+        available: set[str] = set()
+        requires_scope = False
+        for year in manifest.years:
+            work = self.get_work_df(project_id, year)
+            if work.empty or "_amount_currency" not in work.columns:
+                continue
+            year_currencies = {
+                str(value).strip().upper()
+                for value in work["_amount_currency"].dropna()
+                if str(value).strip() and str(value).strip() != "未维护"
+            }
+            available.update(year_currencies)
+            basis = str(work["_currency_basis"].iat[0]) if "_currency_basis" in work else ""
+            requires_scope = requires_scope or (basis == "document" and len(year_currencies) > 1)
+        if requested and requested not in available:
+            raise ValueError(f"项目中不存在币种 {requested}；可选币种：{sorted(available)}")
+        if not requested and requires_scope:
+            raise ValueError("当前项目包含多种凭证币，必须选择一个币种后才能进行金额分析")
+
+        now = datetime.now(UTC).isoformat()
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            previous = str(state.get("analysis_currency_scope") or "").strip() or None
+            selected = requested or None
+            state["analysis_currency_scope"] = selected
+            revision_seed = f"{self.current_data_version(project_id)}|{selected or 'all'}"
+            state["analysis_scope_revision"] = hashlib.sha256(revision_seed.encode()).hexdigest()[:16]
+            if previous != selected:
+                for key in (
+                    "profiles",
+                    "financials",
+                    "cross_year_findings",
+                    "rule_results",
+                    "samples",
+                    "module_insights",
+                    "module_insight_jobs",
+                    "rule_tuning_suggestions",
+                ):
+                    state.pop(key, None)
+                thread = dict(state.get("agent_thread") or {})
+                if thread:
+                    thread["pinned_context"] = None
+                    messages = list(thread.get("messages") or [])
+                    messages.append({
+                        "role": "assistant",
+                        "content": (
+                            f"财务画像分析口径已切换为 {selected} 单币种；"
+                            "旧画像、规则结果与模块分析已失效，请基于当前币种重新分析。"
+                        ),
+                        "at": now,
+                    })
+                    thread["messages"] = messages[-40:]
+                    thread["updated_at"] = now
+                    state["agent_thread"] = thread
+            events = list(state.get("analysis_currency_events") or [])
+            events.append({
+                "at": now,
+                "actor": actor,
+                "previous": previous,
+                "selected": selected,
+                "data_version": self.current_data_version(project_id),
+            })
+            state["analysis_currency_events"] = events[-200:]
+            return state
+
+        state = self.update_state(project_id, update)
+        return {
+            "selected_currency": state.get("analysis_currency_scope"),
+            "available_currencies": sorted(available),
+            "analysis_scope_revision": state.get("analysis_scope_revision"),
+            "invalidated": [
+                "profiles",
+                "financials",
+                "cross_year_findings",
+                "rule_results",
+                "samples",
+                "module_insights",
+            ],
+        }
+
     def save_state(self, project_id: str, state: dict[str, Any]) -> None:
         pdir = self.project_dir(project_id)
         with file_lock(pdir / ".state.lock"):
             self._write_state(pdir, state)
+
+    def update_state(
+        self,
+        project_id: str,
+        updater: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any]:
+        """在同一文件锁内完成 state 的读取、修改和原子写入。"""
+        pdir = self.project_dir(project_id)
+        path = pdir / "state.json"
+        with file_lock(pdir / ".state.lock"):
+            if path.exists():
+                state = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                state = {}
+            updated = updater(state)
+            next_state = updated if isinstance(updated, dict) else state
+            self._write_state(pdir, next_state)
+        return next_state
 
     def apply_account_classification_decisions(
         self,
@@ -294,6 +407,8 @@ class ProjectStore:
         state["year_summary"] = year_summary
         state["data_version"] = self._dataset_version(project_id, years)
         state["data_ingested_at"] = now
+        state.pop("analysis_currency_scope", None)
+        state.pop("analysis_scope_revision", None)
         self.save_state(project_id, state)
         return manifest
 
@@ -363,6 +478,8 @@ class ProjectStore:
         state = self._invalidate_analysis_state(self.load_state(project_id), now)
         state["data_version"] = self._dataset_version(project_id, years)
         state["data_ingested_at"] = now
+        state.pop("analysis_currency_scope", None)
+        state.pop("analysis_scope_revision", None)
         self.save_state(project_id, state)
         return len(df)
 
@@ -386,6 +503,15 @@ class ProjectStore:
         derived.parent.mkdir(parents=True, exist_ok=True)
         _parquet_safe(work).to_parquet(derived, index=False)
         return work
+
+    def get_analysis_work_df(self, project_id: str, year: int) -> pd.DataFrame:
+        """按用户选择的单币种口径返回分析数据，不进行跨币种金额合并。"""
+        work = self.get_work_df(project_id, year)
+        currency = self.current_analysis_currency(project_id)
+        if work.empty or not currency or "_amount_currency" not in work.columns:
+            return work
+        normalized = work["_amount_currency"].fillna("").astype(str).str.strip().str.upper()
+        return work.loc[normalized.eq(currency)].copy()
 
     def load_journal_year(self, project_id: str, year: int) -> pd.DataFrame:
         path = self.project_dir(project_id) / "raw" / "years" / f"{year}.parquet"

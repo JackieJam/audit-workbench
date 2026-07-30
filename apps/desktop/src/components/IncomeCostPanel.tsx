@@ -7,6 +7,8 @@ import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { useAgent } from "@/context/AgentContext";
 import { moduleOverviewSelection } from "@/lib/agentContext";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
+import { EmptyState } from "@/components/EmptyState";
+import { chartPalette } from "@/lib/chartTheme";
 import { useEcharts } from "@/hooks/useEcharts";
 import { usePreferredYear } from "@/hooks/usePreferredYear";
 import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
@@ -189,6 +191,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
 
   const buildMonthlyOption = useCallback((): echarts.EChartsOption | null => {
     if (!monthlyRows.length) return null;
+    const pal = chartPalette();
     const months = monthlyRows.map((r) => periodLabel(r.月份));
     // 图上「净成本」用正数发生额：优先后端净成本，否则取 -净成本影响
     const costBars = monthlyRows.map((r) =>
@@ -197,13 +200,13 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
     return {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
-      legend: { textStyle: { color: "#8b97a8" } },
+      legend: { textStyle: { color: pal.muted } },
       grid: { left: 16, right: 24, top: 40, bottom: 32, containLabel: true },
-      xAxis: { type: "category", data: months, axisLabel: { color: "#8b97a8" } },
+      xAxis: { type: "category", data: months, axisLabel: { color: pal.muted } },
       yAxis: {
         type: "value",
-        axisLabel: { color: "#8b97a8", formatter: (v: number) => formatWan(v) },
-        splitLine: { lineStyle: { color: "#2a3344" } },
+        axisLabel: { color: pal.muted, formatter: (v: number) => formatWan(v) },
+        splitLine: { lineStyle: { color: pal.grid } },
       },
       series: [
         { name: "净收入", type: "bar", data: monthlyRows.map((r) => r.净收入) },
@@ -240,6 +243,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
 
   const buildCustomerOption = useCallback((): echarts.EChartsOption | null => {
     if (!customerRows.length) return null;
+    const pal = chartPalette();
     const names = customerRows.map((r) => r.客户).reverse();
     const values = customerRows.map((r) => r.净收入).reverse();
     const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);
@@ -262,8 +266,8 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
       grid: { left: 12, right: 96, top: 16, bottom: 32, containLabel: true },
       xAxis: {
         type: "value",
-        axisLabel: { color: "#8b97a8", formatter: (v: number) => formatWan(v) },
-        splitLine: { lineStyle: { color: "#2a3344" } },
+        axisLabel: { color: pal.muted, formatter: (v: number) => formatWan(v) },
+        splitLine: { lineStyle: { color: pal.grid } },
       },
       yAxis: {
         type: "category",
@@ -283,7 +287,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
               label: {
                 show: true,
                 position: short ? "right" : "insideLeft",
-                color: short ? "#c9d4e4" : "#f5f8fc",
+                color: short ? pal.muted : pal.onAccent,
                 fontSize: 11,
                 distance: short ? 6 : 8,
                 formatter: (params) => {
@@ -294,7 +298,7 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
               },
             };
           }),
-          itemStyle: { color: "#4f8ef7", borderRadius: [0, 4, 4, 0] },
+          itemStyle: { color: pal.accent, borderRadius: [0, 4, 4, 0] },
         },
       ],
     };
@@ -317,7 +321,14 @@ export function IncomeCostPanel({ project, preferredYear }: Props) {
   );
 
   if (!project.years.length) {
-    return <p className="muted">请先在左侧上传序时账。</p>;
+    return (
+      <EmptyState
+        kind="upload"
+        size="sm"
+        title="尚未上传序时账"
+        description="在左侧上传年度序时账后，即可查看该模块分析。"
+      />
+    );
   }
 
 

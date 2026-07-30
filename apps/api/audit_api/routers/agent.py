@@ -6,16 +6,20 @@ from typing import Any
 
 from audit_engine.agent.orchestrator import (
     clear_agent_thread,
+    detect_module_insight_request,
     get_agent_state,
+    record_module_insight_dispatch,
     resolve_pending_action,
     run_agent_chat,
     set_pinned_context,
 )
+from audit_engine.llm_runtime import resolve_llm_runtime
 from audit_engine.store import ProjectStore
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from audit_api.deps import get_store
+from audit_api.module_insight_tasks import enqueue_module_insight
 from audit_api.routers.analysis import _manifest_or_404
 
 router = APIRouter(prefix="/projects", tags=["agent"])
@@ -48,6 +52,7 @@ def agent_context(project_id: str, body: ContextRequest, store: ProjectStore = D
 def agent_chat(
     project_id: str,
     body: ChatRequest,
+    background_tasks: BackgroundTasks,
     store: ProjectStore = Depends(get_store),
     x_llm_api_key: str | None = Header(default=None, alias="X-LLM-Api-Key"),
     x_llm_profile_id: str | None = Header(default=None, alias="X-LLM-Profile-Id"),
@@ -56,6 +61,34 @@ def agent_chat(
     try:
         profile_id = (body.profile_id or x_llm_profile_id or "").strip() or None
         api_key = (body.api_key or x_llm_api_key or "").strip() or None
+        modules = detect_module_insight_request(body.message, body.pinned_context)
+        if modules:
+            runtime = resolve_llm_runtime(profile_id=profile_id, manual_key=api_key)
+            if not runtime.api_key:
+                return {
+                    "reply": "未配置 LLM API Key。请在「大模型」页签保存方案并填入 Key，或设置 DEEPSEEK_API_KEY。",
+                    "tool_calls": [],
+                    "needs_api_key": True,
+                }
+            jobs = [
+                enqueue_module_insight(
+                    background_tasks,
+                    store,
+                    project_id,
+                    module_key,
+                    api_key=runtime.api_key,
+                    model=runtime.model,
+                    base_url=runtime.base_url,
+                )
+                for module_key in modules
+            ]
+            return record_module_insight_dispatch(
+                store,
+                project_id,
+                user_message=body.message.strip(),
+                pinned_context=body.pinned_context,
+                jobs=jobs,
+            )
         return run_agent_chat(
             store,
             project_id,

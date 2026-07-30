@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, type CrossYearFinding, type ProjectSummary } from "@/api/client";
+import { EmptyState } from "@/components/EmptyState";
 import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary };
@@ -24,7 +25,14 @@ export function CrossYearPanel({ project }: Props) {
   });
 
   if (project.years.length < 2) {
-    return <p className="muted">跨年稽核需要至少上传两个年度的序时账。</p>;
+    return (
+      <EmptyState
+        kind="chart"
+        size="sm"
+        title="年度不足"
+        description="跨年稽核需要至少上传两个年度的序时账。"
+      />
+    );
   }
 
   const list: CrossYearFinding[] = findings.data?.findings ?? [];
@@ -41,7 +49,11 @@ export function CrossYearPanel({ project }: Props) {
       {findings.isLoading && <p className="muted">加载稽核结果…</p>}
 
       {!findings.isLoading && list.length === 0 && (
-        <div className="placeholder-card">暂无异常发现。点击上方按钮执行七类跨年检测。</div>
+        <EmptyState
+          kind="shield"
+          title="暂无异常发现"
+          description="点击上方按钮执行七类跨年检测，结果将在此列出。"
+        />
       )}
 
       {list.length > 0 && (

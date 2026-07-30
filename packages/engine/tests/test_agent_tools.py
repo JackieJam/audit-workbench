@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 from audit_engine.agent.orchestrator import (
+    _sanitize_unverified_execution_claim,
+    detect_module_insight_request,
     get_agent_state,
+    record_module_insight_dispatch,
     resolve_pending_action,
     set_pinned_context,
+    update_agent_module_insight_job,
 )
 from audit_engine.agent.rule_memory import record_rule_feedback
 from audit_engine.agent.tools import execute_tool
@@ -60,6 +64,57 @@ def test_query_journal_is_filtered_bounded_and_traceable(tmp_path, monkeypatch):
     assert out["provenance"]["data_version"]
     assert out["provenance"]["classification_revision"]
     assert out["provenance"]["query_spec"]["text_contains"] == "收入"
+
+
+def test_agent_can_compare_and_select_document_currency(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
+    store = ProjectStore(root=tmp_path)
+    manifest = store.create_project("Agent 多币种")
+    pid = manifest.project_id
+    frame = pd.DataFrame({
+        "凭证编号": ["C1", "C1", "U1", "U1"],
+        "过账日期": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-02-01", "2024-02-01"]),
+        "借/贷标识": ["S", "H", "S", "H"],
+        "凭证货币价值": [100.0, 100.0, 10.0, 10.0],
+        "凭证货币代码": ["CNY", "CNY", "USD", "USD"],
+        "总账科目": ["112201", "600101", "112201", "600101"],
+        "总账科目：短文本": ["应收账款", "主营业务收入", "应收账款", "主营业务收入"],
+    })
+    store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
+
+    compared = execute_tool(
+        store,
+        pid,
+        "query_journal",
+        {"years": [2024], "group_by": "currency", "sample_limit": 0},
+    )
+    assert {row["group_value"] for row in compared["groups"]} == {"CNY", "USD"}
+    assert compared["metrics"]["amounts_comparable"] is False
+    assert compared["metrics"]["absolute_entry_amount"] is None
+
+    filtered = execute_tool(
+        store,
+        pid,
+        "query_journal",
+        {"years": [2024], "currencies": ["USD"], "sample_limit": 5},
+    )
+    assert filtered["metrics"]["currencies"] == ["USD"]
+    assert filtered["metrics"]["absolute_entry_amount"] == 20.0
+    assert {row["币种"] for row in filtered["sample_rows"]} == {"USD"}
+
+    selected = execute_tool(
+        store,
+        pid,
+        "set_analysis_currency_scope",
+        {"currency": "CNY"},
+    )
+    assert selected["ok"] is True
+    assert selected["selected_currency"] == "CNY"
+    assert any(action["type"] == "invalidate_project_analysis" for action in selected["ui_actions"])
+
+    scoped = execute_tool(store, pid, "query_journal", {"years": [2024], "sample_limit": 5})
+    assert scoped["metrics"]["currencies"] == ["CNY"]
+    assert scoped["provenance"]["active_analysis_currency"] == "CNY"
 
 
 def test_data_quality_review_separates_intentional_exclusions(tmp_path, monkeypatch):
@@ -151,6 +206,8 @@ def test_describe_capabilities_and_column_status(tmp_path, monkeypatch):
     assert "record_rule_feedback" in names
     assert "run_module_insight" in names
     assert "suggest_rule_tuning" in names
+    assert "ERP 科目主数据与系统配置" in caps["evidence_boundary"]["not_connected"]
+    assert caps["execution_contract"]["truth_source"] == "tool_calls.result 与后台 job_id/status"
 
     col = execute_tool(store, pid, "get_column_mapping_status", {})
     assert "missing_columns" in col
@@ -268,3 +325,73 @@ def test_pending_mutation_requires_resolution_and_preserves_audit_event(tmp_path
     agent_state = get_agent_state(store, pid)
     assert agent_state["pending_actions"] == []
     assert agent_state["audit_events"][-1]["decision"] == "approved"
+
+
+def test_detect_explicit_module_insight_request_uses_text_and_context():
+    assert detect_module_insight_request("请对收入成本模块做 AI 风险分析") == ["收入成本"]
+    assert detect_module_insight_request("对所有模块进行AI风险分析") == [
+        "收入成本",
+        "费用",
+        "营业外与投资收益",
+        "暂估往来",
+        "资产负债",
+        "调账冲销",
+    ]
+    assert detect_module_insight_request(
+        "那你进行分析",
+        {
+            "label": "其他应收 · 2024年",
+            "source_module": "暂估往来",
+            "source_view": "月度钻取",
+            "selector": {"kind": "working_capital_month"},
+        },
+    ) == ["暂估往来"]
+    assert detect_module_insight_request("解释一下当前图表口径") == []
+
+
+def test_unverified_execution_claim_is_replaced():
+    reply = _sanitize_unverified_execution_claim(
+        "正在执行 run_module_insight('income')，请稍候。",
+        [],
+    )
+    assert "没有产生可核验的工具调用" in reply
+    assert "正在执行" not in reply
+
+
+def test_agent_job_dispatch_and_completion_are_persisted(tmp_path):
+    store = ProjectStore(root=tmp_path)
+    pid = _seed_project(store)
+    response = record_module_insight_dispatch(
+        store,
+        pid,
+        user_message="分析收入成本风险",
+        pinned_context=None,
+        jobs=[
+            {
+                "job_id": "ins_test",
+                "module_key": "收入成本",
+                "status": "queued",
+                "stage": "queued",
+                "percent": 0,
+                "reused": False,
+            }
+        ],
+    )
+    assert response["tool_calls"][0]["result"]["job_id"] == "ins_test"
+    assert "真实任务编号" in response["reply"]
+
+    update_agent_module_insight_job(
+        store,
+        pid,
+        job_id="ins_test",
+        status="done",
+        insight={
+            "executive_summary": "测试摘要",
+            "findings": [{"severity": "中"}],
+            "recommendations": [{"title": "建议"}],
+        },
+    )
+    state = get_agent_state(store, pid)
+    result = state["messages"][-1]["tool_calls"][0]["result"]
+    assert result["status"] == "done"
+    assert result["insight"]["findings_count"] == 1
