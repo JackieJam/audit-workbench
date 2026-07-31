@@ -11,6 +11,7 @@ from audit_engine.analysis.balance_sheet import (
     category_account_breakdown,
     category_monthly_movement,
 )
+from audit_engine.analysis.cost_variance import cost_variance_summary, monthly_cost_variance
 from audit_engine.analysis.drilldown import resolve_drilldown
 from audit_engine.analysis.expense import build_expense_financials, cross_year_expense_table, expense_category_entries
 from audit_engine.analysis.other_pnl import monthly_other_pnl
@@ -79,6 +80,22 @@ def other_pnl_monthly(
     _require_year(manifest.years, year)
     df = monthly_other_pnl(_work(store, project_id, year))
     return {"year": year, "rows": _df_records(df)}
+
+
+@router.get("/{project_id}/analysis/cost-variance/monthly")
+def cost_variance_monthly(
+    project_id: str,
+    year: int = Query(...),
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    manifest = _manifest_or_404(store, project_id)
+    _require_year(manifest.years, year)
+    work = _work(store, project_id, year)
+    return {
+        "year": year,
+        "summary": cost_variance_summary(work),
+        "rows": _df_records(monthly_cost_variance(work)),
+    }
 
 
 # ── 暂估往来 ──

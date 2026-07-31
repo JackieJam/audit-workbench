@@ -10,6 +10,7 @@ from audit_engine.account_classifier import (
     apply_prefix_category,
     auto_classify,
     classify_dataframe,
+    is_system_protected_category,
     uncategorized_reason,
 )
 
@@ -498,11 +499,13 @@ def add_analysis_columns(
         out["_acct_category"] = manual.where(manual.notna() & manual.astype(bool), auto_cats)
     else:
         out["_acct_category"] = auto_cats
-    # 生产成本等前缀强制不进损益，覆盖手工分类
-    out["_acct_category"] = [
+    # 明确会计语义由系统保护；错误的历史人工覆盖只保留审计轨迹，不再改变有效分类。
+    out["_acct_category"] = pd.Series([
         apply_prefix_category(code, cat)
         for code, cat in zip(out["_acct"], out["_acct_category"], strict=False)
-    ]
+    ], index=out.index)
+    protected = auto_cats.map(is_system_protected_category)
+    out["_acct_category"] = out["_acct_category"].where(~protected, auto_cats)
 
     out["_header_text"] = _safe_text(out, "凭证抬头摘要")
     out["_line_text"] = _safe_text(out, "文本") if "文本" in out.columns else _safe_text(out, "摘要")
@@ -569,6 +572,7 @@ QUALITY_REASON_LABELS = {
     "intentional_exclusion": "系统口径排除",
     "confirmed_exclusion": "用户确认排除",
     "deferred": "暂缓决策",
+    "system_corrected": "系统已纠正",
 }
 
 
@@ -587,9 +591,9 @@ def analysis_quality_summary(
         key: {"label": label, "amount": 0.0, "row_count": 0, "account_count": 0}
         for key, label in QUALITY_REASON_LABELS.items()
     }
-    if not unclassified.empty:
+    if not work.empty:
         grouped = (
-            unclassified.groupby(["_acct", "_account_name"], dropna=False)
+            work.groupby(["_acct", "_account_name", "_acct_category"], dropna=False)
             .agg(amount=("_amount_abs", "sum"), row_count=("_acct", "size"))
             .reset_index()
             .sort_values("amount", ascending=False)
@@ -597,9 +601,23 @@ def analysis_quality_summary(
         for _, row in grouped.iterrows():
             code = str(row["_acct"]).strip()
             name = str(row["_account_name"]).strip()
+            effective_category = str(row["_acct_category"]).strip()
             decision = decisions.get(code) if isinstance(decisions.get(code), dict) else {}
             decision_kind = str((decision or {}).get("decision") or "")
-            if decision_kind == "exclude":
+            recommended_category = apply_prefix_category(code, auto_classify(name))
+            corrected = (
+                decision_kind in {"map", "exclude", "defer"}
+                and is_system_protected_category(recommended_category)
+                and (
+                    decision_kind != "map"
+                    or str((decision or {}).get("category") or "") != recommended_category
+                )
+            )
+            if corrected:
+                reason = "system_corrected"
+            elif effective_category != "未分类":
+                continue
+            elif decision_kind == "exclude":
                 reason = "confirmed_exclusion"
             elif decision_kind == "defer":
                 reason = "deferred"
@@ -618,7 +636,14 @@ def analysis_quality_summary(
                 "row_count": row_count,
                 "reason": reason,
                 "reason_label": QUALITY_REASON_LABELS[reason],
-                "mapping_allowed": reason not in {"intentional_exclusion", "confirmed_exclusion"},
+                "mapping_allowed": reason not in {
+                    "intentional_exclusion",
+                    "confirmed_exclusion",
+                    "system_corrected",
+                },
+                "recommended_category": recommended_category,
+                "effective_category": effective_category,
+                "system_corrected": corrected,
                 "decision": decision_kind or None,
                 "decision_category": (decision or {}).get("category"),
                 "rationale": str((decision or {}).get("rationale") or ""),

@@ -13,6 +13,7 @@ MODULE_ID_TO_KEY: dict[str, str] = {
     "income": "收入成本",
     "expense": "费用",
     "other_pnl": "营业外与投资收益",
+    "cost_variance": "成本差异",
     "working_capital": "暂估往来",
     "balance_sheet": "资产负债",
     "adjustment": "调账冲销",

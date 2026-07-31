@@ -267,6 +267,8 @@ export function BalanceSheetPanel({ project, preferredYear }: Props) {
         <p className="muted chart-hint">
           {category === "货币资金"
             ? "货币资金下多为银行子户流水，属预期结构，不宜当作风险集中度。"
+            : category === "技术清算"
+              ? "技术清算属于内部过渡口径，绝对发生额大并不等于异常；重点检查期末净变动是否回零、是否长期挂账。"
             : "按净变动绝对值看该类变动由哪些明细科目驱动，点击可下钻。"}
         </p>
         <div ref={accountRef} className="chart-box tall" />

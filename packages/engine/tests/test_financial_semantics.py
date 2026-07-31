@@ -3,14 +3,31 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 from audit_engine.account_classifier import (
+    CAT_CONTRACT_ASSET,
+    CAT_COST_VARIANCE,
+    CAT_CREDIT_IMPAIRMENT,
+    CAT_DEFERRED_TAX_ASSET,
+    CAT_DERIVATIVE_LIABILITY,
     CAT_EMPLOYEE_PAYABLE,
+    CAT_EQUITY,
+    CAT_FAIR_VALUE_CHANGE,
+    CAT_FINANCIAL_EXPENSE,
+    CAT_INCOME_TAX,
     CAT_INVESTMENT_INCOME,
+    CAT_LONG_TERM_PREPAID,
     CAT_NON_OPERATING_EXPENSE,
     CAT_NON_OPERATING_INCOME,
+    CAT_PROVISION,
+    CAT_RD_EXPENSE,
     auto_classify,
 )
 from audit_engine.analysis.adjustment import adjustment_summary
 from audit_engine.analysis.balance_sheet import category_month_entries, category_monthly_movement
+from audit_engine.analysis.cost_variance import (
+    cost_variance_entries,
+    cost_variance_summary,
+    monthly_cost_variance,
+)
 from audit_engine.analysis.drilldown import customer_revenue_entries
 from audit_engine.analysis.expense import expense_category_entries
 from audit_engine.analysis.income_cost import customer_revenue_top, monthly_revenue_cost
@@ -20,6 +37,7 @@ from audit_engine.data_columns import (
     AMOUNT_MODE_DC_MULTIPLIER,
     AMOUNT_MODE_SIGNED,
     add_analysis_columns,
+    analysis_quality_summary,
 )
 from audit_engine.profiler import build_financial_summary
 
@@ -110,6 +128,23 @@ def test_other_pnl_chart_and_drilldown_reconcile() -> None:
     assert other_pnl_entries(work, month=3, metric="investment_income")["投资收益"].sum() == 50
 
 
+def test_other_pnl_includes_fair_value_impairment_and_income_tax_without_overlap() -> None:
+    work = _work([
+        {"凭证编号": "F1", "过账日期": "2024-03-01", "借/贷标识": "H", "凭证货币价值": 30, "总账科目": "610101", "总账科目：长文本": "公允价值变动损益"},
+        {"凭证编号": "F1", "过账日期": "2024-03-01", "借/贷标识": "S", "凭证货币价值": 30, "总账科目": "110101", "总账科目：长文本": "交易性金融资产"},
+        {"凭证编号": "L1", "过账日期": "2024-03-02", "借/贷标识": "S", "凭证货币价值": 8, "总账科目": "670201", "总账科目：长文本": "信用减值损失-应收账款"},
+        {"凭证编号": "L1", "过账日期": "2024-03-02", "借/贷标识": "H", "凭证货币价值": 8, "总账科目": "123101", "总账科目：长文本": "坏账准备"},
+        {"凭证编号": "T1", "过账日期": "2024-03-03", "借/贷标识": "S", "凭证货币价值": 12, "总账科目": "680101", "总账科目：长文本": "所得税费用"},
+        {"凭证编号": "T1", "过账日期": "2024-03-03", "借/贷标识": "H", "凭证货币价值": 12, "总账科目": "222101", "总账科目：长文本": "应交税费"},
+    ])
+    march = monthly_other_pnl(work).query("月份 == 3").iloc[0]
+    assert march["公允价值变动损益"] == 30
+    assert march["信用减值损失"] == 8
+    assert march["所得税费用"] == 12
+    assert march["净影响"] == 10
+    assert build_financial_summary(work, 2024)["expenses"] == {}
+
+
 def test_other_pnl_has_distinct_categories_and_accepts_manual_mapping() -> None:
     assert auto_classify("投资收益") == CAT_INVESTMENT_INCOME
     assert auto_classify("营业外收入") == CAT_NON_OPERATING_INCOME
@@ -177,6 +212,130 @@ def test_other_pnl_standard_prefixes_cannot_leak_into_operating_charts() -> None
     assert march["营业外收入"] == 20
     assert march["营业外支出"] == 10
     assert march["投资收益"] == 30
+
+
+def test_specific_financial_semantics_precede_generic_name_fragments() -> None:
+    expected = {
+        "信用减值损失-应收账款": CAT_CREDIT_IMPAIRMENT,
+        "所得税费用-递延所得税": CAT_INCOME_TAX,
+        "递延所得税资产": CAT_DEFERRED_TAX_ASSET,
+        "衍生金融负债": CAT_DERIVATIVE_LIABILITY,
+        "预计负债": CAT_PROVISION,
+        "合同资产": CAT_CONTRACT_ASSET,
+        "公允价值变动损益": CAT_FAIR_VALUE_CHANGE,
+        "差异-差异结转": CAT_COST_VARIANCE,
+        "长期待摊费用-装修费": CAT_LONG_TERM_PREPAID,
+        "利润分配-应付现金股利或利润": CAT_EQUITY,
+        "财务费用-借款利息": CAT_FINANCIAL_EXPENSE,
+        "研发费用-工艺开发及设计制造费用": CAT_RD_EXPENSE,
+    }
+    assert {name: auto_classify(name) for name in expected} == expected
+
+    raw = pd.DataFrame([
+        {
+            "凭证编号": "P1",
+            "过账日期": pd.Timestamp("2024-01-31"),
+            "借/贷标识": "S",
+            "凭证货币价值": 100,
+            "总账科目": "67020101",
+            "总账科目：长文本": "信用减值损失-应收账款",
+        },
+        {
+            "凭证编号": "P2",
+            "过账日期": pd.Timestamp("2024-01-31"),
+            "借/贷标识": "S",
+            "凭证货币价值": 100,
+            "总账科目": "18110201",
+            "总账科目：长文本": "递延所得税资产",
+        },
+        {
+            "凭证编号": "P3",
+            "过账日期": pd.Timestamp("2024-01-31"),
+            "借/贷标识": "S",
+            "凭证货币价值": 100,
+            "总账科目": "69100702",
+            "总账科目：长文本": "费用-固定资产折旧费-机器设备",
+        },
+    ])
+    work = add_analysis_columns(
+        raw,
+        category_overrides={"67020101": "应收", "18110201": "固定资产"},
+    )
+    assert work["_acct_category"].tolist() == [
+        CAT_CREDIT_IMPAIRMENT,
+        CAT_DEFERRED_TAX_ASSET,
+        "费用",
+    ]
+
+
+def test_cost_variance_is_reconciled_by_destination_not_mixed_into_gross_margin() -> None:
+    work = _work([
+        {
+            "凭证编号": "V1",
+            "过账日期": "2024-01-31",
+            "借/贷标识": "S",
+            "凭证货币价值": 100,
+            "总账科目": "6990099101",
+            "总账科目：长文本": "差异-差异结转",
+        },
+        {
+            "凭证编号": "V1",
+            "过账日期": "2024-01-31",
+            "借/贷标识": "H",
+            "凭证货币价值": 60,
+            "总账科目": "64019801",
+            "总账科目：长文本": "主营业务成本-其他",
+        },
+        {
+            "凭证编号": "V1",
+            "过账日期": "2024-01-31",
+            "借/贷标识": "H",
+            "凭证货币价值": 40,
+            "总账科目": "14050101",
+            "总账科目：长文本": "库存商品",
+        },
+    ])
+
+    january = monthly_cost_variance(work).query("月份 == 1").iloc[0]
+    assert january["差异科目净额"] == 100
+    assert january["差异绝对发生额"] == 100
+    assert january["结转营业成本"] == -60
+    assert january["结转存货"] == -40
+    assert january["期末五日占比"] == 1
+    assert cost_variance_summary(work)["cogs_impact"] == -60
+    assert cost_variance_entries(work, month=1, metric="cogs")["结转营业成本影响"].sum() == -60
+
+    gross_margin = monthly_revenue_cost(work).query("月份 == 1").iloc[0]
+    assert gross_margin["净成本"] == -60
+    assert work.loc[work["总账科目"].eq("6990099101"), "_acct_category"].iat[0] == CAT_COST_VARIANCE
+
+
+def test_quality_review_explains_historical_override_corrected_by_system() -> None:
+    work = _work([
+        {
+            "凭证编号": "Q1",
+            "过账日期": "2024-01-31",
+            "借/贷标识": "S",
+            "凭证货币价值": 100,
+            "总账科目": "6990099101",
+            "总账科目：长文本": "差异-差异结转",
+        },
+    ])
+    quality = analysis_quality_summary(
+        work,
+        classification_decisions={
+            "6990099101": {
+                "decision": "map",
+                "category": "成本",
+                "rationale": "历史人工映射",
+            },
+        },
+    )
+    account = quality["review_accounts"][0]
+    assert account["reason"] == "system_corrected"
+    assert account["effective_category"] == CAT_COST_VARIANCE
+    assert account["mapping_allowed"] is False
+    assert quality["review_required_amount"] == 0
 
 
 def test_multi_customer_voucher_is_not_silently_guessed() -> None:

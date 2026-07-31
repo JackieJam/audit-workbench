@@ -29,8 +29,17 @@ CAT_RD_EXPENSE = "研发费用"
 CAT_FINANCIAL_EXPENSE = "财务费用"
 CAT_TAX_SURCHARGE = "税金及附加"
 CAT_INVESTMENT_INCOME = "投资收益"
+CAT_FAIR_VALUE_CHANGE = "公允价值变动损益"
+CAT_OTHER_INCOME = "其他收益"
+CAT_ASSET_DISPOSAL = "资产处置收益"
+CAT_CREDIT_IMPAIRMENT = "信用减值损失"
+CAT_ASSET_IMPAIRMENT = "资产减值损失"
+CAT_INCOME_TAX = "所得税费用"
 CAT_NON_OPERATING_INCOME = "营业外收入"
 CAT_NON_OPERATING_EXPENSE = "营业外支出"
+CAT_PRIOR_PERIOD_ADJUSTMENT = "以前年度损益调整"
+CAT_MANUFACTURING_COST = "制造成本"
+CAT_COST_VARIANCE = "成本差异"
 CAT_AR = "应收"
 CAT_OTHER_RECEIVABLE = "其他应收"
 CAT_AP = "应付"
@@ -39,15 +48,34 @@ CAT_OTHER_PAYABLE = "其他应付"
 # ── 资产负债表类别（流量分析用，非余额表）──
 CAT_CASH = "货币资金"
 CAT_INVENTORY = "存货"
+CAT_CONTRACT_ASSET = "合同资产"
+CAT_CONTRACT_COST = "合同成本"
+CAT_BAD_DEBT_ALLOWANCE = "坏账准备"
 CAT_FIXED_ASSET = "固定资产"
+CAT_ACCUMULATED_DEPRECIATION = "累计折旧"
+CAT_RIGHT_OF_USE_ASSET = "使用权资产"
+CAT_INTANGIBLE_ASSET = "无形资产"
+CAT_ACCUMULATED_AMORTIZATION = "累计摊销"
+CAT_DEFERRED_TAX_ASSET = "递延所得税资产"
+CAT_DERIVATIVE_ASSET = "衍生金融资产"
+CAT_OTHER_CURRENT_ASSET = "其他流动资产"
+CAT_LONG_TERM_PREPAID = "长期待摊费用"
+CAT_PENDING_PROPERTY = "待处理财产损溢"
 CAT_PREPAY = "预付账款"
 CAT_ADVANCE_RECEIPT = "预收账款"
 CAT_TAX_PAYABLE = "应交税费"
 CAT_LOAN = "借款"
+CAT_LEASE_LIABILITY = "租赁负债"
+CAT_UNRECOGNIZED_FINANCE_CHARGE = "未确认融资费用"
+CAT_DEFERRED_TAX_LIABILITY = "递延所得税负债"
+CAT_DERIVATIVE_LIABILITY = "衍生金融负债"
+CAT_PROVISION = "预计负债"
 CAT_EQUITY = "权益"
+CAT_SPECIAL_RESERVE = "专项储备"
 CAT_EMPLOYEE_PAYABLE = "应付职工薪酬"
 CAT_BOND_PAYABLE = "应付债券"
 CAT_DIVIDEND_PAYABLE = "应付股利"
+CAT_TECHNICAL_CLEARING = "技术清算"
 CAT_UNCATEGORIZED = "未分类"
 
 ALL_CATEGORIES: tuple[str, ...] = (
@@ -58,8 +86,17 @@ ALL_CATEGORIES: tuple[str, ...] = (
     CAT_FINANCIAL_EXPENSE,
     CAT_TAX_SURCHARGE,
     CAT_INVESTMENT_INCOME,
+    CAT_FAIR_VALUE_CHANGE,
+    CAT_OTHER_INCOME,
+    CAT_ASSET_DISPOSAL,
+    CAT_CREDIT_IMPAIRMENT,
+    CAT_ASSET_IMPAIRMENT,
+    CAT_INCOME_TAX,
     CAT_NON_OPERATING_INCOME,
     CAT_NON_OPERATING_EXPENSE,
+    CAT_PRIOR_PERIOD_ADJUSTMENT,
+    CAT_MANUFACTURING_COST,
+    CAT_COST_VARIANCE,
     CAT_AR,
     CAT_OTHER_RECEIVABLE,
     CAT_AP,
@@ -67,23 +104,77 @@ ALL_CATEGORIES: tuple[str, ...] = (
     CAT_OTHER_PAYABLE,
     CAT_CASH,
     CAT_INVENTORY,
+    CAT_CONTRACT_ASSET,
+    CAT_CONTRACT_COST,
+    CAT_BAD_DEBT_ALLOWANCE,
     CAT_FIXED_ASSET,
+    CAT_ACCUMULATED_DEPRECIATION,
+    CAT_RIGHT_OF_USE_ASSET,
+    CAT_INTANGIBLE_ASSET,
+    CAT_ACCUMULATED_AMORTIZATION,
+    CAT_DEFERRED_TAX_ASSET,
+    CAT_DERIVATIVE_ASSET,
+    CAT_OTHER_CURRENT_ASSET,
+    CAT_LONG_TERM_PREPAID,
+    CAT_PENDING_PROPERTY,
     CAT_PREPAY,
     CAT_ADVANCE_RECEIPT,
     CAT_TAX_PAYABLE,
     CAT_LOAN,
+    CAT_LEASE_LIABILITY,
+    CAT_UNRECOGNIZED_FINANCE_CHARGE,
+    CAT_DEFERRED_TAX_LIABILITY,
+    CAT_DERIVATIVE_LIABILITY,
+    CAT_PROVISION,
     CAT_EQUITY,
+    CAT_SPECIAL_RESERVE,
     CAT_EMPLOYEE_PAYABLE,
     CAT_BOND_PAYABLE,
     CAT_DIVIDEND_PAYABLE,
+    CAT_TECHNICAL_CLEARING,
     CAT_UNCATEGORIZED,
 )
 
 OTHER_PNL_CATEGORIES: tuple[str, ...] = (
     CAT_INVESTMENT_INCOME,
+    CAT_FAIR_VALUE_CHANGE,
+    CAT_OTHER_INCOME,
+    CAT_ASSET_DISPOSAL,
+    CAT_CREDIT_IMPAIRMENT,
+    CAT_ASSET_IMPAIRMENT,
+    CAT_INCOME_TAX,
     CAT_NON_OPERATING_INCOME,
     CAT_NON_OPERATING_EXPENSE,
 )
+
+# 这些类别由明确科目前缀或不易歧义的会计语义识别。系统口径优先于历史人工覆盖，
+# 避免把信用减值、递延税、衍生工具等重新塞回宽泛的应收/费用类别。
+SYSTEM_PROTECTED_CATEGORIES: frozenset[str] = frozenset({
+    *OTHER_PNL_CATEGORIES,
+    CAT_PRIOR_PERIOD_ADJUSTMENT,
+    CAT_MANUFACTURING_COST,
+    CAT_COST_VARIANCE,
+    CAT_CONTRACT_ASSET,
+    CAT_CONTRACT_COST,
+    CAT_BAD_DEBT_ALLOWANCE,
+    CAT_ACCUMULATED_DEPRECIATION,
+    CAT_RIGHT_OF_USE_ASSET,
+    CAT_INTANGIBLE_ASSET,
+    CAT_ACCUMULATED_AMORTIZATION,
+    CAT_DEFERRED_TAX_ASSET,
+    CAT_DERIVATIVE_ASSET,
+    CAT_OTHER_CURRENT_ASSET,
+    CAT_LONG_TERM_PREPAID,
+    CAT_PENDING_PROPERTY,
+    CAT_LEASE_LIABILITY,
+    CAT_UNRECOGNIZED_FINANCE_CHARGE,
+    CAT_DEFERRED_TAX_LIABILITY,
+    CAT_DERIVATIVE_LIABILITY,
+    CAT_PROVISION,
+    CAT_EQUITY,
+    CAT_SPECIAL_RESERVE,
+    CAT_TECHNICAL_CLEARING,
+})
 
 # ── 资产负债页：类别 -> 大类（资产/负债/权益）──
 # 决定月度净变动的符号约定：资产借增（净=借-贷），负债/权益贷增（净=贷-借）。
@@ -93,27 +184,53 @@ BALANCE_SHEET_SIDE: dict[str, str] = {
     CAT_OTHER_RECEIVABLE: "资产",
     CAT_PREPAY: "资产",
     CAT_INVENTORY: "资产",
+    CAT_CONTRACT_ASSET: "资产",
+    CAT_CONTRACT_COST: "资产",
+    CAT_BAD_DEBT_ALLOWANCE: "资产抵减",
     CAT_FIXED_ASSET: "资产",
+    CAT_ACCUMULATED_DEPRECIATION: "资产抵减",
+    CAT_RIGHT_OF_USE_ASSET: "资产",
+    CAT_INTANGIBLE_ASSET: "资产",
+    CAT_ACCUMULATED_AMORTIZATION: "资产抵减",
+    CAT_DEFERRED_TAX_ASSET: "资产",
+    CAT_DERIVATIVE_ASSET: "资产",
+    CAT_OTHER_CURRENT_ASSET: "资产",
+    CAT_LONG_TERM_PREPAID: "资产",
+    CAT_PENDING_PROPERTY: "资产",
+    CAT_TECHNICAL_CLEARING: "清算",
     CAT_AP: "负债",
     CAT_AP_ACCRUAL: "负债",
     CAT_OTHER_PAYABLE: "负债",
     CAT_ADVANCE_RECEIPT: "负债",
     CAT_TAX_PAYABLE: "负债",
     CAT_LOAN: "负债",
+    CAT_LEASE_LIABILITY: "负债",
+    CAT_UNRECOGNIZED_FINANCE_CHARGE: "负债抵减",
+    CAT_DEFERRED_TAX_LIABILITY: "负债",
+    CAT_DERIVATIVE_LIABILITY: "负债",
+    CAT_PROVISION: "负债",
     CAT_EMPLOYEE_PAYABLE: "负债",
     CAT_BOND_PAYABLE: "负债",
     CAT_DIVIDEND_PAYABLE: "负债",
     CAT_EQUITY: "权益",
+    CAT_SPECIAL_RESERVE: "权益",
 }
 
 # 资产负债页可选类别：往来类优先（默认打开更有审计信息量），货币资金靠后。
 BALANCE_SHEET_CATEGORIES: tuple[str, ...] = (
-    CAT_AR, CAT_OTHER_RECEIVABLE, CAT_PREPAY,
+    CAT_AR, CAT_OTHER_RECEIVABLE, CAT_PREPAY, CAT_CONTRACT_ASSET, CAT_CONTRACT_COST,
+    CAT_BAD_DEBT_ALLOWANCE,
     CAT_AP, CAT_AP_ACCRUAL, CAT_OTHER_PAYABLE, CAT_ADVANCE_RECEIPT,
     CAT_TAX_PAYABLE, CAT_EMPLOYEE_PAYABLE, CAT_BOND_PAYABLE, CAT_DIVIDEND_PAYABLE, CAT_LOAN,
-    CAT_INVENTORY, CAT_FIXED_ASSET,
+    CAT_LEASE_LIABILITY, CAT_UNRECOGNIZED_FINANCE_CHARGE, CAT_PROVISION,
+    CAT_DERIVATIVE_LIABILITY, CAT_DEFERRED_TAX_LIABILITY,
+    CAT_INVENTORY, CAT_FIXED_ASSET, CAT_ACCUMULATED_DEPRECIATION, CAT_RIGHT_OF_USE_ASSET,
+    CAT_INTANGIBLE_ASSET, CAT_ACCUMULATED_AMORTIZATION,
+    CAT_DERIVATIVE_ASSET, CAT_DEFERRED_TAX_ASSET, CAT_OTHER_CURRENT_ASSET,
+    CAT_LONG_TERM_PREPAID,
+    CAT_PENDING_PROPERTY, CAT_TECHNICAL_CLEARING,
     CAT_CASH,
-    CAT_EQUITY,
+    CAT_EQUITY, CAT_SPECIAL_RESERVE,
 )
 
 
@@ -128,23 +245,6 @@ class _Rule:
     keywords: tuple[str, ...]
 
 
-# 这些成本、费用名称不应进入经营损益口径（毛利/期间费用）。
-# 命中后直接「未分类」，由生产/存货等专门口径处理。
-_PNL_EXCLUSIONS: tuple[str, ...] = (
-    "生产成本",
-    "制造费用",
-    "合同履约成本",
-    "合同取得成本",
-    "劳务成本",
-)
-
-# 制造费用分摊等内部结转科目（名称常带「费用」但不属于期间费用）
-_PREFIX_FORCE_UNCATEGORIZED: tuple[str, ...] = (
-    "5001",  # 生产成本
-    "8142",  # 制造费用分摊-人工
-    "8143",  # 制造费用分摊-明细
-)
-
 # SAP 标准科目前缀兜底（名称缺失或仅写「应付账款」时仍能归类）。
 # 仅在名称分类为未分类，或明确需要升级（如 220204）时使用。
 _PREFIX_CATEGORY_EXACT4: dict[str, str] = {
@@ -155,18 +255,85 @@ _PREFIX_CATEGORY_EXACT4: dict[str, str] = {
     "6403": CAT_TAX_SURCHARGE,
     "6601": CAT_EXPENSE,
     "6602": CAT_EXPENSE,
-    "6603": CAT_FINANCIAL_EXPENSE,
-    "6604": CAT_RD_EXPENSE,
 }
 _PREFIX_FORCE_CATEGORY_EXACT4: dict[str, str] = {
+    "5001": CAT_MANUFACTURING_COST,
+    "6101": CAT_FAIR_VALUE_CHANGE,
+    "6603": CAT_FINANCIAL_EXPENSE,
+    "6604": CAT_RD_EXPENSE,
     "6111": CAT_INVESTMENT_INCOME,
+    "6115": CAT_ASSET_DISPOSAL,
+    "6117": CAT_OTHER_INCOME,
     "6301": CAT_NON_OPERATING_INCOME,
+    "6701": CAT_ASSET_IMPAIRMENT,
+    "6702": CAT_CREDIT_IMPAIRMENT,
     "6711": CAT_NON_OPERATING_EXPENSE,
+    "6801": CAT_INCOME_TAX,
+    "6901": CAT_PRIOR_PERIOD_ADJUSTMENT,
+    "6910": CAT_EXPENSE,
+    "6920": CAT_RD_EXPENSE,
+    "6990": CAT_COST_VARIANCE,
+    "8142": CAT_MANUFACTURING_COST,
+    "8143": CAT_MANUFACTURING_COST,
+    "1464": CAT_CONTRACT_ASSET,
+    "1602": CAT_ACCUMULATED_DEPRECIATION,
+    "1701": CAT_INTANGIBLE_ASSET,
+    "1702": CAT_ACCUMULATED_AMORTIZATION,
+    "1703": CAT_RIGHT_OF_USE_ASSET,
+    "1801": CAT_LONG_TERM_PREPAID,
+    "1811": CAT_DEFERRED_TAX_ASSET,
+    "1901": CAT_PENDING_PROPERTY,
+    "2102": CAT_DERIVATIVE_LIABILITY,
+    "2712": CAT_UNRECOGNIZED_FINANCE_CHARGE,
+    "2801": CAT_PROVISION,
+    "4104": CAT_EQUITY,
 }
 _AP_ACCRUAL_CODE_PREFIX = "220204"
 
 
 _PRIORITY_RULES: tuple[_Rule, ...] = (
+    # ── 独立损益 / 制造结转（必须早于“应收/固定资产/费用”等裸词）──
+    _Rule(CAT_CREDIT_IMPAIRMENT, ("信用减值损失",)),
+    _Rule(CAT_ASSET_IMPAIRMENT, ("资产减值损失",)),
+    _Rule(CAT_INCOME_TAX, ("所得税费用",)),
+    _Rule(CAT_DERIVATIVE_ASSET, ("衍生金融资产", "衍生工具资产")),
+    _Rule(CAT_DERIVATIVE_LIABILITY, ("衍生金融负债", "衍生工具负债")),
+    _Rule(CAT_FAIR_VALUE_CHANGE, ("公允价值变动",)),
+    _Rule(CAT_ASSET_DISPOSAL, ("资产处置收益", "资产处置损益")),
+    _Rule(CAT_OTHER_INCOME, ("其他收益",)),
+    _Rule(CAT_PRIOR_PERIOD_ADJUSTMENT, ("以前年度损益调整",)),
+    _Rule(CAT_COST_VARIANCE, (
+        "差异-差异结转",
+        "差异-调整结转",
+        "成本差异",
+        "采购价格差异",
+        "生产成本差异",
+        "价格重估差异",
+        "在制品差异",
+    )),
+    _Rule(CAT_FINANCIAL_EXPENSE, ("财务费用", "汇兑损益")),
+    _Rule(CAT_RD_EXPENSE, ("研发费用",)),
+    _Rule(CAT_EXPENSE, ("固定资产折旧费", "使用权折旧费", "长期待摊费用摊销")),
+    _Rule(CAT_MANUFACTURING_COST, ("生产成本", "制造费用")),
+    _Rule(CAT_CONTRACT_COST, ("合同履约成本", "合同取得成本", "劳务成本")),
+    _Rule(CAT_TECHNICAL_CLEARING, ("技术清算",)),
+    # ── 具体资产负债项目 ──
+    _Rule(CAT_CONTRACT_ASSET, ("合同资产",)),
+    _Rule(CAT_BAD_DEBT_ALLOWANCE, ("坏账准备",)),
+    _Rule(CAT_ACCUMULATED_DEPRECIATION, ("累计折旧",)),
+    _Rule(CAT_RIGHT_OF_USE_ASSET, ("使用权资产",)),
+    _Rule(CAT_LEASE_LIABILITY, ("租赁负债",)),
+    _Rule(CAT_UNRECOGNIZED_FINANCE_CHARGE, ("未确认融资费用",)),
+    _Rule(CAT_DEFERRED_TAX_ASSET, ("递延所得税资产",)),
+    _Rule(CAT_DEFERRED_TAX_LIABILITY, ("递延所得税负债",)),
+    _Rule(CAT_ACCUMULATED_AMORTIZATION, ("累计摊销",)),
+    _Rule(CAT_INTANGIBLE_ASSET, ("无形资产",)),
+    _Rule(CAT_PROVISION, ("预计负债",)),
+    _Rule(CAT_OTHER_CURRENT_ASSET, ("其他流动资产",)),
+    _Rule(CAT_LONG_TERM_PREPAID, ("长期待摊费用",)),
+    _Rule(CAT_PENDING_PROPERTY, ("待处理财产损溢", "待处理财产损益")),
+    _Rule(CAT_SPECIAL_RESERVE, ("专项储备",)),
+    _Rule(CAT_EQUITY, ("利润分配", "未分配利润", "本年利润", "资本公积", "盈余公积")),
     _Rule(CAT_AP_ACCRUAL, ("暂估", "GR/IR", "GRIR")),
     _Rule(CAT_OTHER_RECEIVABLE, ("其他应收",)),
     _Rule(CAT_OTHER_PAYABLE, ("其他应付",)),
@@ -183,7 +350,7 @@ _PRIORITY_RULES: tuple[_Rule, ...] = (
     _Rule(CAT_CASH, ("货币资金", "银行存款", "库存现金", "现金等价物")),
     _Rule(CAT_INVENTORY, ("存货", "原材料", "库存商品", "周转材料", "在产品", "产成品",
                           "发出商品", "委托加工", "包装物", "低值易耗")),
-    _Rule(CAT_FIXED_ASSET, ("固定资产", "在建工程", "工程物资", "累计折旧")),
+    _Rule(CAT_FIXED_ASSET, ("固定资产", "在建工程", "工程物资")),
     _Rule(CAT_LOAN, ("短期借款", "长期借款", "借款")),
     _Rule(CAT_EQUITY, ("实收资本", "股本", "资本公积", "盈余公积", "未分配利润",
                        "利润分配", "本年利润")),
@@ -217,8 +384,6 @@ def auto_classify(account_name: str | None) -> str:
     name = str(account_name).strip()
     if not name or name.lower() == "nan":
         return CAT_UNCATEGORIZED
-    if any(ex in name for ex in _PNL_EXCLUSIONS):
-        return CAT_UNCATEGORIZED
     for rule in _PRIORITY_RULES:
         for keyword in rule.keywords:
             if keyword in name:
@@ -230,8 +395,8 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
     """科目前缀兜底 / 升级。
 
     - 220204* 一律视为应付暂估（即使名称只写「应付账款」）
-    - 5001/8142/8143 强制未分类（生产成本/制造费用分摊，不进毛利与期间费用）
-    - 6111/6301/6711 强制进入投资收益/营业外收支独立口径
+    - 5001/8142/8143 强制进入制造成本独立口径（不进毛利与期间费用）
+    - 明确标准前缀强制进入独立口径，防止历史人工映射污染通用图表
     - 标准损益前缀仅在当前为「未分类」时补全，不覆盖名称已判定的类别
     """
     if account_code is None or (isinstance(account_code, float) and pd.isna(account_code)):
@@ -243,8 +408,6 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
     if code.startswith(_AP_ACCRUAL_CODE_PREFIX):
         return CAT_AP_ACCRUAL
     acct4 = code[:4]
-    if acct4 in _PREFIX_FORCE_UNCATEGORIZED:
-        return CAT_UNCATEGORIZED
     if acct4 in _PREFIX_FORCE_CATEGORY_EXACT4:
         return _PREFIX_FORCE_CATEGORY_EXACT4[acct4]
     if current_category != CAT_UNCATEGORIZED:
@@ -258,10 +421,6 @@ def uncategorized_reason(account_code: object, account_name: object) -> str:
     name = _as_text(account_name)
     if not code and not name:
         return "missing_identity"
-    if code[:4] in _PREFIX_FORCE_UNCATEGORIZED:
-        return "intentional_exclusion"
-    if any(marker in name for marker in _PNL_EXCLUSIONS):
-        return "intentional_exclusion"
     return "needs_mapping"
 
 
@@ -287,7 +446,7 @@ def is_inventory_manufacturing_account(account_code: object, account_name: objec
     """生产成本/制造费用等：归集进存货，不属于毛利「净成本」。"""
     code = _as_text(account_code)
     name = _as_text(account_name)
-    if code[:4] in _PREFIX_FORCE_UNCATEGORIZED:
+    if code[:4] in {"5001", "8142", "8143"}:
         return True
     return any(marker in name for marker in _GROSS_MARGIN_COST_NAME_EXCLUSIONS)
 
@@ -313,11 +472,41 @@ def operating_cost_mask(work: pd.DataFrame) -> pd.Series:
         code4 = work["总账科目"].astype(str).str[:4]
     name = work["_account_name"].astype(str) if "_account_name" in work.columns else pd.Series("", index=work.index)
     by_prefix = code4.isin(_OPERATING_COGS_PREFIXES)
-    excluded = code4.isin(_PREFIX_FORCE_UNCATEGORIZED) | name.apply(
+    excluded = work["_acct_category"].isin(
+        {CAT_MANUFACTURING_COST, CAT_COST_VARIANCE, CAT_CONTRACT_COST}
+    ) | name.apply(
         lambda n: any(m in n for m in _GROSS_MARGIN_COST_NAME_EXCLUSIONS)
+    ).astype(bool)
+    by_cat = work["_acct_category"].eq(CAT_COST)
+    return (by_prefix | by_cat) & ~excluded
+
+
+def manufacturing_cost_mask(work: pd.DataFrame) -> pd.Series:
+    """制造归集口径：生产成本和制造费用，不进入经营毛利。"""
+    code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return (
+        category.eq(CAT_MANUFACTURING_COST)
+        | code4.isin({"5001", "8142", "8143"})
+        | name.str.contains("生产成本|制造费用", na=False)
     )
-    by_cat = work["_acct_category"].eq(CAT_COST) & ~excluded
-    return by_prefix | by_cat
+
+
+def cost_variance_mask(work: pd.DataFrame) -> pd.Series:
+    """标准成本与实际成本差异及其结转口径。"""
+    code4 = work.get("_acct4", pd.Series("", index=work.index)).astype(str)
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return (
+        category.eq(CAT_COST_VARIANCE)
+        | code4.eq("6990")
+        | name.str.contains("差异-差异结转|差异-调整结转|成本差异", na=False)
+    )
+
+
+def is_system_protected_category(category: object) -> bool:
+    return str(category or "").strip() in SYSTEM_PROTECTED_CATEGORIES
 
 
 def investment_income_mask(work: pd.DataFrame) -> pd.Series:
@@ -330,6 +519,40 @@ def investment_income_mask(work: pd.DataFrame) -> pd.Series:
         | code4.eq("6111")
         | name.str.contains("投资收益", na=False)
     )
+
+
+def _category_name_mask(
+    work: pd.DataFrame,
+    category_name: str,
+    name_pattern: str,
+) -> pd.Series:
+    category = work.get("_acct_category", pd.Series("", index=work.index)).astype(str)
+    name = work.get("_account_name", pd.Series("", index=work.index)).astype(str)
+    return category.eq(category_name) | name.str.contains(name_pattern, na=False)
+
+
+def fair_value_change_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_FAIR_VALUE_CHANGE, "公允价值变动")
+
+
+def other_income_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_OTHER_INCOME, "其他收益")
+
+
+def asset_disposal_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_ASSET_DISPOSAL, "资产处置收益|资产处置损益")
+
+
+def credit_impairment_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_CREDIT_IMPAIRMENT, "信用减值损失")
+
+
+def asset_impairment_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_ASSET_IMPAIRMENT, "资产减值损失")
+
+
+def income_tax_expense_mask(work: pd.DataFrame) -> pd.Series:
+    return _category_name_mask(work, CAT_INCOME_TAX, "所得税费用")
 
 
 def non_operating_income_mask(work: pd.DataFrame) -> pd.Series:
@@ -381,7 +604,7 @@ def classify_dataframe(
 
     acct_str = out["总账科目"].astype(str).str.strip()
     # 自动分类 + 科目前缀兜底
-    auto = pd.Series(
+    automatic = pd.Series(
         [
             apply_prefix_category(code, auto_classify(name))
             for code, name in zip(acct_str, names, strict=False)
@@ -399,13 +622,19 @@ def classify_dataframe(
         }
         if valid_overrides:
             mapped = acct_str.map(valid_overrides)
-            auto = mapped.where(mapped.notna(), auto)
+            effective = mapped.where(mapped.notna(), automatic)
+        else:
+            effective = automatic
+    else:
+        effective = automatic
 
-    # 生产成本等前缀强制不进损益，即使用户覆盖也不允许
-    out["_acct_category"] = pd.Series(
-        [apply_prefix_category(code, cat) for code, cat in zip(acct_str, auto, strict=False)],
+    # 明确会计语义由系统口径保护：历史人工覆盖保留在 state 供追溯，但不再污染图表。
+    effective = pd.Series(
+        [apply_prefix_category(code, cat) for code, cat in zip(acct_str, effective, strict=False)],
         index=out.index,
     )
+    protected = automatic.map(is_system_protected_category)
+    out["_acct_category"] = effective.where(~protected, automatic)
     return out
 
 
@@ -445,8 +674,19 @@ def build_account_overview(
 
     overrides = overrides or {}
     grouped["人工分类"] = grouped["科目编号"].map(overrides).fillna("")
-    grouped["生效分类"] = grouped["人工分类"].where(
+    chosen = grouped["人工分类"].where(
         grouped["人工分类"].astype(bool), grouped["自动分类"]
+    )
+    effective = pd.Series(
+        [
+            apply_prefix_category(code, category)
+            for code, category in zip(grouped["科目编号"], chosen, strict=False)
+        ],
+        index=grouped.index,
+    )
+    grouped["生效分类"] = effective.where(
+        ~grouped["自动分类"].map(is_system_protected_category),
+        grouped["自动分类"],
     )
 
     grouped = grouped.sort_values("金额", ascending=False).reset_index(drop=True)

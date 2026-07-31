@@ -104,8 +104,11 @@ export type QualityReviewAccount = {
   reason: string;
   reason_label: string;
   mapping_allowed: boolean;
-  decision?: "exclude" | "defer" | null;
+  decision?: "map" | "exclude" | "defer" | null;
   decision_category?: string | null;
+  recommended_category?: string | null;
+  effective_category?: string | null;
+  system_corrected?: boolean;
   rationale: string;
 };
 
@@ -173,6 +176,7 @@ export type FinanceModuleId =
   | "income"
   | "expense"
   | "other_pnl"
+  | "cost_variance"
   | "working_capital"
   | "balance_sheet"
   | "adjustment"
@@ -647,9 +651,40 @@ export type ExpenseRow = { 年份: number; 费用类别: string; 金额: number;
 export type OtherPnlMonthlyRow = {
   月份: number;
   投资收益: number;
+  公允价值变动损益: number;
+  其他收益: number;
+  资产处置收益: number;
   营业外收入: number;
   营业外支出: number;
+  信用减值损失: number;
+  资产减值损失: number;
+  所得税费用: number;
   净影响: number;
+};
+export type CostVarianceMonthlyRow = {
+  月份: number;
+  差异科目净额: number;
+  差异绝对发生额: number;
+  结转营业成本: number;
+  结转存货: number;
+  制造归集: number;
+  期末五日占比: number;
+  异常波动: boolean;
+};
+export type CostVarianceSummary = {
+  variance_absolute_amount: number;
+  variance_net_amount: number;
+  cogs_impact: number;
+  cogs_impact_ratio: number;
+  inventory_impact: number;
+  period_end_five_day_ratio: number;
+  year_end_amount_ratio: number;
+  active_month_count: number;
+  recurring_monthly: boolean;
+  largest_cogs_impact_month: number | null;
+  largest_cogs_impact_amount: number;
+  outlier_months: number[];
+  interpretation: string;
 };
 export type ApMonthlyRow = { 月份: number; 暂估贷方增加: number; 暂估借方减少: number; 暂估净额: number };
 export type ApSupplierRow = { 供应商: string; 暂估贷方增加: number; 暂估借方减少: number; 暂估净额: number };
@@ -1129,6 +1164,10 @@ export const api = {
   otherPnlMonthly: (projectId: string, year: number) =>
     request<{ year: number; rows: OtherPnlMonthlyRow[] }>(
       `/projects/${projectId}/analysis/other-pnl/monthly?year=${year}`,
+    ),
+  costVarianceMonthly: (projectId: string, year: number) =>
+    request<{ year: number; summary: CostVarianceSummary; rows: CostVarianceMonthlyRow[] }>(
+      `/projects/${projectId}/analysis/cost-variance/monthly?year=${year}`,
     ),
   wcApMonthly: (projectId: string, year: number) =>
     request<{ year: number; rows: ApMonthlyRow[] }>(

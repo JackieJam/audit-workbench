@@ -92,3 +92,41 @@ def test_build_balance_sheet_payload_and_selectors(tmp_path) -> None:
     )
     assert account_selector["kind"] == "bs_category_account"
     assert account_selector["account"] == "100201"
+
+
+def test_build_cost_variance_payload_and_selector(tmp_path) -> None:
+    from audit_engine.store import ProjectStore
+
+    store = ProjectStore(root=tmp_path)
+    manifest = store.create_project("成本差异payload测试")
+    pid = manifest.project_id
+    df = pd.DataFrame(
+        {
+            "凭证编号": ["V1", "V1"],
+            "过账日期": pd.to_datetime(["2024-12-31", "2024-12-31"]),
+            "凭证货币价值": [1000.0, 1000.0],
+            "借/贷标识": ["S", "H"],
+            "总账科目": ["699009", "640198"],
+            "总账科目：长文本": ["差异-差异结转", "主营业务成本-其他"],
+        }
+    )
+    store.ingest_journal(pid, {2024: df}, column_mapping={}, missing_columns=[], year_summary=[])
+    payload = build_module_payload(
+        store,
+        pid,
+        "成本差异",
+        risk_questions=[{"id": "x", "text": "是否存在异常利润调节？"}],
+    )
+
+    item = payload["yearly_cost_variance"][0]
+    assert item["year"] == 2024
+    assert item["summary"]["cogs_impact"] == -1000
+    selector = condition_to_selector(
+        {"kind": "cost_variance_month", "year": 2024, "month": 12, "metric": "cogs"}
+    )
+    assert selector == {
+        "kind": "cost_variance_month",
+        "year": 2024,
+        "month": 12,
+        "metric": "cogs",
+    }

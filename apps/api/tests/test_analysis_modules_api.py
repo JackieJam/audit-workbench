@@ -102,6 +102,13 @@ def test_analysis_module_endpoints(tmp_path, monkeypatch) -> None:
     )
     assert other_pnl.status_code == 200
     assert len(other_pnl.json()["rows"]) == 12
+    cost_variance = client.get(
+        f"/projects/{pid}/analysis/cost-variance/monthly",
+        params={"year": 2023},
+    )
+    assert cost_variance.status_code == 200
+    assert len(cost_variance.json()["rows"]) == 12
+    assert "interpretation" in cost_variance.json()["summary"]
     assert client.get(
         f"/projects/{pid}/analysis/adjustment/summary",
         params={"year": 2023},

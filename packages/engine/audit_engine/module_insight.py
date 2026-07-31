@@ -15,6 +15,7 @@ from audit_engine.analysis.balance_sheet import (
     category_account_breakdown,
     category_monthly_movement,
 )
+from audit_engine.analysis.cost_variance import cost_variance_summary, monthly_cost_variance
 from audit_engine.analysis.drilldown import resolve_drilldown
 from audit_engine.analysis.expense import cross_year_expense_table
 from audit_engine.analysis.income_cost import customer_revenue_top, monthly_revenue_cost
@@ -71,6 +72,7 @@ MODULE_GUIDES = {
     "收入成本": "kind: monthly_income_cost/customer_revenue；需 year、month、metric、category 或 customer",
     "费用": "kind=expense_category；需 year、expense_category",
     "营业外与投资收益": "kind=other_pnl_month；需 year、month、metric",
+    "成本差异": "kind=cost_variance_month；需 year、month、metric（variance/cogs/inventory/manufacturing）",
     "暂估往来": "kind: ap_accrual_month/other_receivable_month/other_payable_month；需 year、month、direction",
     "资产负债": "kind: bs_category_month/bs_category_account",
     "调账冲销": "kind=adjustment_voucher；需 year、voucher_id",
@@ -125,6 +127,16 @@ def build_module_payload(
     elif module_key == "营业外与投资收益":
         payload["yearly_other_pnl"] = [
             {"year": year, "monthly": _records(monthly_other_pnl(work), 13)}
+            for year, work in work_by_year.items()
+            if not work.empty
+        ]
+    elif module_key == "成本差异":
+        payload["yearly_cost_variance"] = [
+            {
+                "year": year,
+                "summary": cost_variance_summary(work),
+                "monthly": _records(monthly_cost_variance(work), 13),
+            }
             for year, work in work_by_year.items()
             if not work.empty
         ]
@@ -273,6 +285,12 @@ def condition_to_selector(condition: dict[str, Any]) -> dict[str, Any]:
             "year": year,
             "month": int(c.get("month", 1)),
             "metric": str(c.get("metric", "investment_income")),
+        },
+        "cost_variance_month": lambda: {
+            "kind": "cost_variance_month",
+            "year": year,
+            "month": int(c.get("month", 1)),
+            "metric": str(c.get("metric", "cogs")),
         },
         "bs_category_month": lambda: {
             "kind": "bs_category_month",

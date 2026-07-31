@@ -7,6 +7,7 @@ export type FinanceModule =
   | "income"
   | "expense"
   | "other_pnl"
+  | "cost_variance"
   | "working_capital"
   | "balance_sheet"
   | "adjustment"

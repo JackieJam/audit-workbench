@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { BalanceSheetPanel } from "@/components/BalanceSheetPanel";
 import { CrossYearPanel } from "@/components/CrossYearPanel";
+import { CostVariancePanel } from "@/components/CostVariancePanel";
 import { DataQualityReview } from "@/components/DataQualityReview";
 import { ExpensePanel } from "@/components/ExpensePanel";
 import { IncomeCostPanel } from "@/components/IncomeCostPanel";
@@ -22,7 +23,8 @@ type Props = { project: ProjectSummary | null };
 const MODULES: { id: FinanceModule; label: string }[] = [
   { id: "income", label: "收入成本" },
   { id: "expense", label: "费用" },
-  { id: "other_pnl", label: "营业外与投资收益" },
+  { id: "other_pnl", label: "其他损益" },
+  { id: "cost_variance", label: "成本差异" },
   { id: "working_capital", label: "暂估往来" },
   { id: "balance_sheet", label: "资产负债" },
   { id: "adjustment", label: "调账冲销" },
@@ -251,6 +253,9 @@ export function FinancePage({ project }: Props) {
           {financeModule === "income" && <IncomeCostPanel project={scopedProject ?? project} />}
           {financeModule === "expense" && <ExpensePanel project={scopedProject ?? project} />}
           {financeModule === "other_pnl" && <OtherPnlPanel project={scopedProject ?? project} />}
+          {financeModule === "cost_variance" && (
+            <CostVariancePanel project={scopedProject ?? project} />
+          )}
           {financeModule === "working_capital" && (
             <WorkingCapitalPanel project={scopedProject ?? project} />
           )}

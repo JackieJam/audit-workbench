@@ -327,9 +327,9 @@ class ProjectStore:
         from audit_engine.account_classifier import (
             ALL_CATEGORIES,
             CAT_UNCATEGORIZED,
-            OTHER_PNL_CATEGORIES,
             apply_prefix_category,
             auto_classify,
+            is_system_protected_category,
             uncategorized_reason,
         )
 
@@ -365,21 +365,21 @@ class ProjectStore:
                     raise ValueError("科目编号不能为空")
                 if decision not in {"map", "exclude", "defer", "reset"}:
                     raise ValueError(f"不支持的决策类型：{decision}")
+                automatic_category = apply_prefix_category(
+                    code,
+                    auto_classify(actual_names.get(code, "")),
+                )
+                if (
+                    decision != "reset"
+                    and is_system_protected_category(automatic_category)
+                ):
+                    raise ValueError(
+                        f"科目 {code} 已由高置信度系统口径归入“{automatic_category}”，"
+                        "无需人工分类；如认为源科目名称有误，请先修正源数据"
+                    )
                 if decision == "map":
                     if category not in ALL_CATEGORIES or category == CAT_UNCATEGORIZED:
                         raise ValueError(f"无效的目标分类：{category}")
-                    automatic_category = apply_prefix_category(
-                        code,
-                        auto_classify(actual_names.get(code, "")),
-                    )
-                    if (
-                        automatic_category in OTHER_PNL_CATEGORIES
-                        and category != automatic_category
-                    ):
-                        raise ValueError(
-                            f"科目 {code} 已归入独立分类“{automatic_category}”，"
-                            "不能映射到经营收入、成本或费用口径"
-                        )
                     if (
                         uncategorized_reason(code, actual_names.get(code, ""))
                         == "intentional_exclusion"
@@ -713,8 +713,8 @@ class ProjectStore:
 
     def get_work_df(self, project_id: str, year: int) -> pd.DataFrame:
         """Load journal year and build analysis-ready work frame (cached in derived/)."""
-        # v5: 投资收益和营业外收支改为独立分类；换文件名以失效旧分类缓存
-        work_version = 5
+        # v7: 高置信度会计语义、特殊资产负债与成本差异独立分类
+        work_version = 7
         pdir = self.project_dir(project_id)
         derived = pdir / "derived" / f"work_v{work_version}_{year}.parquet"
         journal = pdir / "raw" / "years" / f"{year}.parquet"

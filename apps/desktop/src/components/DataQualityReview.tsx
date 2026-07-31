@@ -17,6 +17,16 @@ function formatAmount(value: number) {
   return value.toLocaleString("zh-CN", { maximumFractionDigits: 0 });
 }
 
+function historicalDecisionLabel(
+  decision: "map" | "exclude" | "defer" | null | undefined,
+  category?: string | null,
+) {
+  if (decision === "map") return `映射到“${category || "未指定"}”`;
+  if (decision === "exclude") return "确认排除";
+  if (decision === "defer") return "暂缓决策";
+  return "历史决策";
+}
+
 export function DataQualityReview({ project, quality }: Props) {
   const queryClient = useQueryClient();
   const [year, setYear] = useState(project.years.at(-1) ?? 0);
@@ -31,6 +41,7 @@ export function DataQualityReview({ project, quality }: Props) {
   const reviewRatio =
     yearQuality?.review_required_amount_ratio ?? yearQuality?.unclassified_amount_ratio ?? 0;
   const excludedRatio = yearQuality?.excluded_amount_ratio ?? 0;
+  const correctedCount = accounts.filter((item) => item.system_corrected).length;
   const pending = Object.values(drafts);
   const existingDecisions = quality.classification_decisions ?? [];
   const allowedCategories = quality.allowed_categories ?? [];
@@ -125,6 +136,10 @@ export function DataQualityReview({ project, quality }: Props) {
             <strong>{accounts.filter((item) => item.reason === "needs_mapping").length}</strong>
             待分类科目
           </span>
+          <span>
+            <strong>{correctedCount}</strong>
+            已自动纠正
+          </span>
         </div>
       ) : null}
 
@@ -141,6 +156,12 @@ export function DataQualityReview({ project, quality }: Props) {
                 <strong>{account.account_code || "无科目编号"}</strong>
                 <span>{account.account_name || "无科目名称"}</span>
                 <small>{account.row_count.toLocaleString()} 行 · {formatAmount(account.amount)}</small>
+                {account.system_corrected ? (
+                  <small>
+                    历史{historicalDecisionLabel(account.decision, account.decision_category)}
+                    未再生效，系统按“{account.effective_category}”分析
+                  </small>
+                ) : null}
               </div>
               <div className="quality-review__decision">
                 {account.mapping_allowed ? (
@@ -157,22 +178,28 @@ export function DataQualityReview({ project, quality }: Props) {
                     ))}
                   </select>
                 ) : (
-                  <span className="quality-review__locked">通用图表不接收此口径</span>
+                  <span className="quality-review__locked">
+                    {account.system_corrected ? "已采用系统高置信度口径" : "通用图表不接收此口径"}
+                  </span>
                 )}
-                <button
-                  type="button"
-                  className={selected?.decision === "exclude" ? "btn-ghost active" : "btn-ghost"}
-                  onClick={() => setDecision(account, "exclude")}
-                >
-                  确认排除
-                </button>
-                <button
-                  type="button"
-                  className={selected?.decision === "defer" ? "btn-ghost active" : "btn-ghost"}
-                  onClick={() => setDecision(account, "defer")}
-                >
-                  暂缓
-                </button>
+                {!account.system_corrected ? (
+                  <>
+                    <button
+                      type="button"
+                      className={selected?.decision === "exclude" ? "btn-ghost active" : "btn-ghost"}
+                      onClick={() => setDecision(account, "exclude")}
+                    >
+                      确认排除
+                    </button>
+                    <button
+                      type="button"
+                      className={selected?.decision === "defer" ? "btn-ghost active" : "btn-ghost"}
+                      onClick={() => setDecision(account, "defer")}
+                    >
+                      暂缓
+                    </button>
+                  </>
+                ) : null}
                 {existing ? (
                   <button type="button" className="btn-ghost" onClick={() => setDecision(account, "reset")}>
                     撤销原决策
@@ -182,7 +209,7 @@ export function DataQualityReview({ project, quality }: Props) {
             </div>
           );
         })}
-        {!accounts.length ? <p className="quality-review__empty">当前年度没有未分类科目。</p> : null}
+        {!accounts.length ? <p className="quality-review__empty">当前年度没有待复核或已纠正科目。</p> : null}
       </div>
 
       {existingDecisions.some((item) => item.decision === "map") ? (
@@ -213,7 +240,9 @@ export function DataQualityReview({ project, quality }: Props) {
         <span>
           {pending.length
             ? `待应用 ${pending.length} 项；将批量失效一次并重算`
-            : "选择分类、确认排除或暂缓后，再统一应用"}
+            : correctedCount
+              ? "高置信度系统口径已自动生效，无需用户操作"
+              : "选择分类、确认排除或暂缓后，再统一应用"}
         </span>
         {mutation.isError ? <span className="quality-review__error">{String(mutation.error)}</span> : null}
         <button

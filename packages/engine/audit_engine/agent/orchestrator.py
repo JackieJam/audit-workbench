@@ -35,7 +35,7 @@ SYSTEM_PROMPT = (
     "4) 规则迭代记忆 → record_rule_feedback、list_rule_feedback、suggest_rule_tuning、apply_rule_tuning；"
     "5) 模块 AI 分析 → run_module_insight、get_module_insight_cache、apply_module_insight_recommendations、get_module_insight_jobs；"
     "   若用户要求「对所有模块进行AI风险分析」，依次对有风险问题配置的模块执行 run_module_insight："
-    "   收入成本、费用、营业外与投资收益、暂估往来、资产负债、调账冲销；"
+    "   收入成本、费用、其他损益、成本差异、暂估往来、资产负债、调账冲销；"
     "   每完成一个模块简要汇报，全部完成后再汇总主要风险与可入库抽样建议；"
     "6) 跨年 → run_cross_year_audit、get_cross_year_findings；"
     "7) 列名映射 → get_column_mapping_status；抽样状态 → get_sampling_status；"
@@ -129,6 +129,10 @@ _MODULE_INTENT_MARKERS = (
     "分析一下",
 )
 _MODULE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("成本差异", "成本差异"),
+    ("差异结转", "成本差异"),
+    ("标准成本", "成本差异"),
+    ("其他损益", "营业外与投资收益"),
     ("营业外与投资收益", "营业外与投资收益"),
     ("其他应收", "暂估往来"),
     ("其他应付", "暂估往来"),

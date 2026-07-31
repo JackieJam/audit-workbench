@@ -192,11 +192,11 @@ def test_data_quality_review_separates_intentional_exclusions(tmp_path, monkeypa
     out = execute_tool(store, pid, "get_data_quality_review", {})
     year = out["years"]["2024"]
     reasons = {item["account_code"]: item["reason"] for item in year["review_accounts"]}
-    assert reasons["500101"] == "intentional_exclusion"
+    assert "500101" not in reasons
     assert reasons["999901"] == "needs_mapping"
     assert {"611101", "630101", "671101"}.isdisjoint(reasons)
     assert year["review_required_amount"] == 200.0
-    assert year["excluded_amount"] == 100.0
+    assert year["excluded_amount"] == 0.0
     assert {"投资收益", "营业外收入", "营业外支出"}.issubset(out["allowed_categories"])
 
 
@@ -584,6 +584,7 @@ def test_detect_explicit_module_insight_request_uses_text_and_context():
         "收入成本",
         "费用",
         "营业外与投资收益",
+        "成本差异",
         "暂估往来",
         "资产负债",
         "调账冲销",

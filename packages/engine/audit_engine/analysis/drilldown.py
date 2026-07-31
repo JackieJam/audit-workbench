@@ -6,6 +6,7 @@ import pandas as pd
 from audit_engine.account_classifier import operating_cost_mask, operating_revenue_mask
 from audit_engine.analysis.adjustment import adjustment_voucher_entries
 from audit_engine.analysis.balance_sheet import category_account_entries, category_month_entries
+from audit_engine.analysis.cost_variance import cost_variance_entries
 from audit_engine.analysis.entry_display import entry_display_columns
 from audit_engine.analysis.expense import expense_category_entries
 from audit_engine.analysis.other_pnl import other_pnl_entries
@@ -104,6 +105,13 @@ def resolve_drilldown(work: pd.DataFrame, selector: dict, *, limit: int | None =
         return expense_category_entries(work, str(selector["expense_category"]), top_n=limit)
     if kind == "other_pnl_month":
         return other_pnl_entries(
+            work,
+            month=int(selector["month"]),
+            metric=str(selector["metric"]),
+            top_n=limit,
+        )
+    if kind == "cost_variance_month":
+        return cost_variance_entries(
             work,
             month=int(selector["month"]),
             metric=str(selector["metric"]),

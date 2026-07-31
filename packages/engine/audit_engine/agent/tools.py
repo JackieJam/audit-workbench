@@ -36,7 +36,8 @@ from audit_engine.store import ProjectStore
 ANALYSIS_MODULES: list[dict[str, str]] = [
     {"id": "income", "label": "收入成本", "desc": "月度收入成本、客户Top10、钻取、AI风险分析"},
     {"id": "expense", "label": "费用", "desc": "跨年费用结构对比、钻取"},
-    {"id": "other_pnl", "label": "营业外与投资收益", "desc": "投资收益、营业外收入与营业外支出月度分析、钻取"},
+    {"id": "other_pnl", "label": "其他损益", "desc": "投资、公允价值、其他收益、营业外、减值与所得税分析"},
+    {"id": "cost_variance", "label": "成本差异", "desc": "标准成本差异结转去向、期末集中度与异常波动"},
     {"id": "working_capital", "label": "暂估往来", "desc": "应付暂估/其他应收/其他应付月度与钻取"},
     {"id": "balance_sheet", "label": "资产负债", "desc": "科目类别月度发生额与科目构成"},
     {"id": "adjustment", "label": "调账冲销", "desc": "调账冲销凭证摘要"},
@@ -407,7 +408,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "module": {
                         "type": "string",
-                        "enum": ["income", "expense", "other_pnl", "working_capital", "balance_sheet", "adjustment", "profile", "cross"],
+                        "enum": ["income", "expense", "other_pnl", "cost_variance", "working_capital", "balance_sheet", "adjustment", "profile", "cross"],
                         "description": "分析模块 id",
                     },
                     "year": {"type": "integer"},

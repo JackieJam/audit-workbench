@@ -350,14 +350,14 @@ def test_other_pnl_category_cannot_be_remapped_into_operating_category(store: Pr
     })
     store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
 
-    with pytest.raises(ValueError, match="不能映射到经营收入、成本或费用口径"):
+    with pytest.raises(ValueError, match="高置信度系统口径"):
         store.apply_account_classification_decisions(
             pid,
             [{"account_code": "611101", "decision": "map", "category": "收入"}],
         )
 
 
-def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: ProjectStore) -> None:
+def test_manufacturing_cost_cannot_be_mapped_into_generic_category(store: ProjectStore) -> None:
     manifest = store.create_project("排除口径")
     pid = manifest.project_id
     frame = pd.DataFrame({
@@ -370,7 +370,7 @@ def test_intentional_exclusion_cannot_be_mapped_into_generic_category(store: Pro
     })
     store.ingest_journal(pid, {2024: frame}, column_mapping={}, missing_columns=[], year_summary=[])
 
-    with pytest.raises(ValueError, match="不能映射"):
+    with pytest.raises(ValueError, match="高置信度系统口径"):
         store.apply_account_classification_decisions(
             pid,
             [{"account_code": "500101", "decision": "map", "category": "成本"}],

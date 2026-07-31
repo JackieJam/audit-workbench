@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type * as echarts from "echarts";
-import { api, type ProjectSummary } from "@/api/client";
+import { api, type OtherPnlMonthlyRow, type ProjectSummary } from "@/api/client";
 import { ChartLoadingBar } from "@/components/ChartLoadingBar";
 import { DrilldownPanel } from "@/components/DrilldownPanel";
 import { ModuleInsightCard } from "@/components/ModuleInsightCard";
@@ -14,15 +14,62 @@ import { moduleOverviewSelection } from "@/lib/agentContext";
 import { financialAnalysisQueryOptions, projectDataKey } from "@/lib/queryPolicy";
 
 type Props = { project: ProjectSummary; preferredYear?: number | null };
-type Metric = "investment_income" | "non_operating_income" | "non_operating_expense";
+type Metric =
+  | "investment_income"
+  | "fair_value_change"
+  | "other_income"
+  | "asset_disposal"
+  | "non_operating_income"
+  | "non_operating_expense"
+  | "credit_impairment"
+  | "asset_impairment"
+  | "income_tax";
+type View = "returns" | "non_operating" | "impairment_tax";
 type Selection = { year: number; month: number; metric: Metric; label: string };
 
-const METRICS: Metric[] = ["investment_income", "non_operating_income", "non_operating_expense"];
 const LABELS: Record<Metric, string> = {
   investment_income: "投资收益",
+  fair_value_change: "公允价值变动损益",
+  other_income: "其他收益",
+  asset_disposal: "资产处置收益",
   non_operating_income: "营业外收入",
   non_operating_expense: "营业外支出",
+  credit_impairment: "信用减值损失",
+  asset_impairment: "资产减值损失",
+  income_tax: "所得税费用",
 };
+const VIEW_METRICS: Record<View, Metric[]> = {
+  returns: ["investment_income", "fair_value_change", "other_income", "asset_disposal"],
+  non_operating: ["non_operating_income", "non_operating_expense"],
+  impairment_tax: ["credit_impairment", "asset_impairment", "income_tax"],
+};
+
+function metricValue(row: OtherPnlMonthlyRow, metric: Metric) {
+  if (metric === "investment_income") return row.投资收益;
+  if (metric === "fair_value_change") return row.公允价值变动损益;
+  if (metric === "other_income") return row.其他收益;
+  if (metric === "asset_disposal") return row.资产处置收益;
+  if (metric === "non_operating_income") return row.营业外收入;
+  if (metric === "non_operating_expense") return row.营业外支出;
+  if (metric === "credit_impairment") return row.信用减值损失;
+  if (metric === "asset_impairment") return row.资产减值损失;
+  return row.所得税费用;
+}
+
+function viewNetImpact(row: OtherPnlMonthlyRow, view: View) {
+  const metrics = VIEW_METRICS[view];
+  const expenseMetrics = new Set<Metric>([
+    "non_operating_expense",
+    "credit_impairment",
+    "asset_impairment",
+    "income_tax",
+  ]);
+  return metrics.reduce(
+    (sum, metric) =>
+      sum + metricValue(row, metric) * (expenseMetrics.has(metric) ? -1 : 1),
+    0,
+  );
+}
 
 function formatWan(value: number) {
   return `${(value / 10000).toFixed(1)}万`;
@@ -34,6 +81,7 @@ function periodLabel(period: number) {
 
 export function OtherPnlPanel({ project, preferredYear }: Props) {
   const [year, setYear] = useState(project.years[project.years.length - 1] ?? 0);
+  const [view, setView] = useState<View>("returns");
   const [selection, setSelection] = useState<Selection | null>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
@@ -61,8 +109,8 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
     mutationFn: (voucherIds: string[]) =>
       api.addCandidate(project.project_id, {
         title: `${selection!.year}年${periodLabel(selection!.month)} ${selection!.label}`,
-        source_module: "营业外与投资收益",
-        source_view: "月度营业外与投资收益",
+        source_module: "其他损益",
+        source_view: "月度其他损益",
         selector: {
           kind: "other_pnl_month",
           year: selection!.year,
@@ -80,6 +128,7 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
   const buildOption = useCallback((): echarts.EChartsOption | null => {
     if (!rows.length) return null;
     const pal = chartPalette();
+    const metrics = VIEW_METRICS[view];
     return {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
@@ -92,33 +141,41 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
         splitLine: { lineStyle: { color: pal.grid } },
       },
       series: [
-        { name: "投资收益", type: "bar", data: rows.map((row) => row.投资收益) },
-        { name: "营业外收入", type: "bar", data: rows.map((row) => row.营业外收入) },
-        { name: "营业外支出", type: "bar", data: rows.map((row) => row.营业外支出) },
-        { name: "净影响", type: "line", smooth: true, data: rows.map((row) => row.净影响) },
+        ...metrics.map((metric) => ({
+          name: LABELS[metric],
+          type: "bar" as const,
+          data: rows.map((row) => metricValue(row, metric)),
+        })),
+        {
+          name: "当前组净影响",
+          type: "line",
+          smooth: true,
+          data: rows.map((row) => viewNetImpact(row, view)),
+        },
       ],
     };
-  }, [rows]);
+  }, [rows, view]);
 
-  useEcharts(chartRef, buildOption, [rows, year], {
+  useEcharts(chartRef, buildOption, [rows, year, view], {
     enabled: monthly.isSuccess && rows.length > 0,
     onClick: (_chart, params) => {
       if (params.componentType !== "series" || params.dataIndex == null || params.seriesIndex == null) return;
-      if (params.seriesIndex >= METRICS.length) return;
-      const metric = METRICS[params.seriesIndex];
+      const metrics = VIEW_METRICS[view];
+      if (params.seriesIndex >= metrics.length) return;
+      const metric = metrics[params.seriesIndex];
       setSelection({ year, month: rows[params.dataIndex].月份, metric, label: LABELS[metric] });
     },
   });
 
   useEffect(() => {
     if (!selection) {
-      pinSelection(moduleOverviewSelection("other_pnl", "营业外与投资收益", year));
+      pinSelection(moduleOverviewSelection("other_pnl", "其他损益", year));
       return;
     }
     pinSelection({
       label: `${selection.year}年${periodLabel(selection.month)} · ${selection.label}`,
-      source_module: "营业外与投资收益",
-      source_view: "月度营业外与投资收益",
+      source_module: "其他损益",
+      source_view: "月度其他损益",
       selector: {
         kind: "other_pnl_month",
         year: selection.year,
@@ -142,7 +199,11 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
 
   return (
     <div className="module-panel">
-      <ModuleInsightCard projectId={project.project_id} moduleKey="营业外与投资收益" />
+      <ModuleInsightCard
+        projectId={project.project_id}
+        moduleKey="营业外与投资收益"
+        displayLabel="其他损益"
+      />
       <div className="filters">
         <label>
           年度
@@ -151,10 +212,21 @@ export function OtherPnlPanel({ project, preferredYear }: Props) {
           </select>
         </label>
       </div>
+      <div className="year-segmented" aria-label="其他损益分类">
+        <button type="button" className={view === "returns" ? "active" : ""} onClick={() => { setView("returns"); setSelection(null); }}>
+          投资及其他收益
+        </button>
+        <button type="button" className={view === "non_operating" ? "active" : ""} onClick={() => { setView("non_operating"); setSelection(null); }}>
+          营业外收支
+        </button>
+        <button type="button" className={view === "impairment_tax" ? "active" : ""} onClick={() => { setView("impairment_tax"); setSelection(null); }}>
+          减值与所得税
+        </button>
+      </div>
       <div className="chart-card">
-        <h3>投资收益与营业外收支</h3>
-        <p className="chart-hint muted">收入类按贷增借减、支出类按借增贷减；Period 13 单独展示。点击图形可回查分录。</p>
-        <ChartLoadingBar loading={monthly.isLoading} label="营业外与投资收益加载中" />
+        <h3>其他损益月度分析</h3>
+        <p className="chart-hint muted">收益类按贷增借减、损失及所得税按借增贷减；Period 13 单独展示。点击图形可回查分录。</p>
+        <ChartLoadingBar loading={monthly.isLoading} label="其他损益加载中" />
         <div ref={chartRef} className="chart-box" />
       </div>
       {selection && (

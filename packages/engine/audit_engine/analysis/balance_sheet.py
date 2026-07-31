@@ -20,7 +20,7 @@ def _category_rows(work: pd.DataFrame, category: str) -> pd.DataFrame:
 
 
 def _net_change(debit: float, credit: float, category: str) -> float:
-    if BALANCE_SHEET_SIDE.get(category) == "资产":
+    if BALANCE_SHEET_SIDE.get(category) in {"资产", "负债抵减", "清算"}:
         return debit - credit
     return credit - debit
 
@@ -76,7 +76,7 @@ def category_month_entries(work: pd.DataFrame, category: str, month: int, direct
         detail[amount_label] = -detail["_amount_raw"]
     elif direction == "net":
         amount_label = "净变动影响"
-        sign = 1.0 if BALANCE_SHEET_SIDE.get(category) == "资产" else -1.0
+        sign = 1.0 if BALANCE_SHEET_SIDE.get(category) in {"资产", "负债抵减", "清算"} else -1.0
         detail[amount_label] = sign * detail["_amount_raw"]
     else:
         return pd.DataFrame()

@@ -10,6 +10,7 @@ import { useModuleInsight } from "@/hooks/useModuleInsight";
 type Props = {
   projectId: string;
   moduleKey: string;
+  displayLabel?: string;
 };
 
 type Finding = {
@@ -31,7 +32,7 @@ function riskClass(level?: string) {
   return level === "高" ? "high" : level === "中" ? "mid" : "low";
 }
 
-export function ModuleInsightCard({ projectId, moduleKey }: Props) {
+export function ModuleInsightCard({ projectId, moduleKey, displayLabel }: Props) {
   const queryClient = useQueryClient();
   const { askAgent } = useAgent();
   const { selectedProfile } = useLlm();
@@ -66,7 +67,8 @@ export function ModuleInsightCard({ projectId, moduleKey }: Props) {
     });
   };
 
-  const prompt = `请基于已经生成的「${moduleKey}」模块 AI 风险分析结果，解释主要风险、证据边界和下一步审计程序。`;
+  const label = displayLabel ?? moduleKey;
+  const prompt = `请基于已经生成的「${label}」模块 AI 风险分析结果，解释主要风险、证据边界和下一步审计程序。`;
 
   return (
     <section className="insight-card">
@@ -76,7 +78,7 @@ export function ModuleInsightCard({ projectId, moduleKey }: Props) {
             <Sparkle size={14} weight="fill" />
             AI 风险分析
           </div>
-          <h3>{moduleKey}</h3>
+          <h3>{label}</h3>
           <p className="muted">
             基于序时账派生指标；不包含合同、发票、银行流水或 ERP 主数据证据。
           </p>
