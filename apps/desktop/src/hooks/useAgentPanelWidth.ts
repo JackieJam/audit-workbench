@@ -17,11 +17,13 @@ function readStoredWidth(): number {
 }
 
 function clampWidth(width: number, workspaceWidth: number): number {
-  const maxByWorkspace = Math.max(MIN_WIDTH, workspaceWidth - 360);
-  return Math.min(MAX_WIDTH, maxByWorkspace, Math.max(MIN_WIDTH, Math.round(width)));
+  // Keep room for the main pane; never force document-level overflow.
+  const maxByWorkspace = Math.max(200, workspaceWidth - 360);
+  const floor = Math.min(MIN_WIDTH, maxByWorkspace);
+  return Math.min(MAX_WIDTH, maxByWorkspace, Math.max(floor, Math.round(width)));
 }
 
-/** 右侧审计助手面板宽度（可拖拽，持久化）。 */
+/** 右侧审计助手面板宽度（可拖拽，持久化；窗口变化时自动回夹）。 */
 export function useAgentPanelWidth() {
   const [width, setWidth] = useState(readStoredWidth);
   const [collapsed, setCollapsed] = useState(false);
@@ -40,6 +42,20 @@ export function useAgentPanelWidth() {
     const workspace = workspaceRef.current;
     const workspaceWidth = workspace?.getBoundingClientRect().width ?? 1200;
     setWidth(clampWidth(next, workspaceWidth));
+  }, []);
+
+  // Reclamp when the workspace size changes (window resize / browser zoom).
+  useEffect(() => {
+    const el = workspaceRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const workspaceWidth = entry.contentRect.width;
+      setWidth((current) => clampWidth(current, workspaceWidth));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   const onSplitterPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -75,7 +91,7 @@ export function useAgentPanelWidth() {
     window.addEventListener("pointercancel", onUp);
   }, []);
 
-  const resetWidth = useCallback(() => setWidth(DEFAULT_WIDTH), []);
+  const resetWidth = useCallback(() => setClampedWidth(DEFAULT_WIDTH), [setClampedWidth]);
   const collapse = useCallback(() => setCollapsed(true), []);
   const expand = useCallback(() => setCollapsed(false), []);
 

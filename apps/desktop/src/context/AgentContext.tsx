@@ -20,6 +20,8 @@ type AgentContextValue = {
   focusAgentNonce: number;
   askAgent: (prompt: string) => void;
   clearDraftPrompt: () => void;
+  /** 开启新对话：清空历史消息，保留当前选中销。 */
+  startNewThread: () => Promise<void>;
 };
 
 const Ctx = createContext<AgentContextValue | null>(null);
@@ -109,6 +111,12 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
 
   const clearDraftPrompt = useCallback(() => setDraftPrompt(null), []);
 
+  const startNewThread = useCallback(async () => {
+    if (!projectId) return;
+    await api.clearAgentThread(projectId);
+    await queryClient.invalidateQueries({ queryKey: ["agent-state", projectId] });
+  }, [projectId, queryClient]);
+
   const value = useMemo(
     () => ({
       projectId,
@@ -121,6 +129,7 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
       focusAgentNonce,
       askAgent,
       clearDraftPrompt,
+      startNewThread,
     }),
     [
       projectId,
@@ -133,6 +142,7 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
       focusAgentNonce,
       askAgent,
       clearDraftPrompt,
+      startNewThread,
     ],
   );
 

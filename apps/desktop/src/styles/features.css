@@ -155,7 +155,7 @@
 }
 
 .quality-review__account {
-  min-width: 280px;
+  min-width: 0;
   display: grid;
   grid-template-columns: auto auto 1fr;
   align-items: center;
@@ -935,7 +935,7 @@
 
 .profile-diagnostic-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -1267,8 +1267,14 @@
 
 .llm-settings__body {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
   gap: 20px;
+}
+
+@media (max-width: 960px) {
+  .llm-settings__body {
+    grid-template-columns: 1fr;
+  }
 }
 
 .llm-profile-list h3 {

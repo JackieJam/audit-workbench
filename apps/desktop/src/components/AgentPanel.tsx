@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { CaretRight } from "@phosphor-icons/react";
+import { CaretRight, Plus } from "@phosphor-icons/react";
 import { api, type AgentChatResponse, type InsightJob } from "@/api/client";
 import { useAgent } from "@/context/AgentContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
@@ -144,6 +144,7 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
     draftPrompt,
     focusAgentNonce,
     clearDraftPrompt,
+    startNewThread,
   } = useAgent();
   const { applyUiActions } = useWorkspace();
   const { selectedProfileId, selectedProfile } = useLlm();
@@ -151,6 +152,7 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
   const [input, setInput] = useState("");
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [resolvedActions, setResolvedActions] = useState<Set<string>>(() => new Set());
+  const [clearing, setClearing] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -221,22 +223,50 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
     chat.mutate(msg);
   };
 
+  const onNewThread = async () => {
+    if (clearing || chat.isPending) return;
+    if (localMessages.length > 0) {
+      const ok = window.confirm("开启新对话？将清空当前问答历史，保留图表/模块选中销。");
+      if (!ok) return;
+    }
+    setClearing(true);
+    try {
+      await startNewThread();
+      setLocalMessages([]);
+      setResolvedActions(new Set());
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <aside className="agent-panel" ref={panelRef}>
       <header className="agent-panel__head">
         <div className="agent-panel__title-row">
           <h3>审计助手</h3>
-          {onCollapse ? (
+          <div className="agent-panel__title-actions">
             <button
               type="button"
-              className="agent-panel__collapse"
-              onClick={onCollapse}
-              title="收起助手，释放图表空间"
-              aria-label="收起审计助手"
+              className="agent-panel__new-thread"
+              onClick={() => void onNewThread()}
+              disabled={clearing || chat.isPending}
+              title="开启新对话，避免旧话题污染上下文"
             >
-              <CaretRight size={15} weight="bold" />
+              <Plus size={14} weight="bold" />
+              新对话
             </button>
-          ) : null}
+            {onCollapse ? (
+              <button
+                type="button"
+                className="agent-panel__collapse"
+                onClick={onCollapse}
+                title="收起助手，释放图表空间"
+                aria-label="收起审计助手"
+              >
+                <CaretRight size={15} weight="bold" />
+              </button>
+            ) : null}
+          </div>
         </div>
         <p className="muted">中枢 Agent · 可查询序时账、解释画像、复核口径并编排疑点与抽样</p>
         <details className="agent-boundary">
