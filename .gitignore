@@ -27,5 +27,7 @@ apps/desktop/src-tauri/target/
 
 # Packaged sidecars (built locally / CI)
 apps/desktop/src-tauri/binaries/audit-api*
+apps/desktop/src-tauri/resources/audit-api/
+apps/desktop/src-tauri/resources/audit-api.tar.gz
 apps/desktop/src-tauri/target/
 dist-sidecar/

@@ -33,9 +33,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/audit-api"],
     "resources": {
-      "../../../samples/demo_journal_2022.xlsx": "samples/demo_journal_2022.xlsx"
+      "resources/audit-api.tar.gz": "audit-api.tar.gz",
+      "resources/samples/demo_journal_2022.xlsx": "samples/demo_journal_2022.xlsx"
     },
     "macOS": {
       "minimumSystemVersion": "11.0"

@@ -1,20 +1,16 @@
-# Build Windows x64 audit-api sidecar for Tauri externalBin.
+# Build onedir audit-api into Tauri resources (Windows).
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
-$Dest = Join-Path $Root "apps/desktop/src-tauri/binaries"
-New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-
-$Triple = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
-if (-not $Triple) {
-  throw "无法检测 rustc host triple"
-}
+$DestRes = Join-Path $Root "apps/desktop/src-tauri/resources/audit-api"
+New-Item -ItemType Directory -Force -Path (Join-Path $Root "apps/desktop/src-tauri/binaries") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $Root "apps/desktop/src-tauri/resources") | Out-Null
 
 Write-Host "→ uv sync (含 pyinstaller)"
 uv sync --group dev
 
-Write-Host "→ PyInstaller audit-api (host=$Triple)"
+Write-Host "→ PyInstaller audit-api (onedir)"
 $Dist = Join-Path $Root "dist-sidecar"
 $Work = Join-Path $Root "build/audit_api_sidecar"
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
@@ -27,8 +23,11 @@ uv run pyinstaller `
   --workpath $Work `
   (Join-Path $Root "scripts/audit_api_sidecar.spec")
 
-$Src = Join-Path $Dist "audit-api.exe"
-$Out = Join-Path $Dest "audit-api-$Triple.exe"
-Copy-Item -Force $Src $Out
-Write-Host "→ sidecar: $Out"
-Get-Item $Out | Format-List Name, Length, FullName
+$SrcDir = Join-Path $Dist "audit-api"
+if (-not (Test-Path $SrcDir)) { throw "PyInstaller 未产出目录: $SrcDir" }
+
+if (Test-Path $DestRes) { Remove-Item -Recurse -Force $DestRes }
+Copy-Item -Recurse $SrcDir $DestRes
+
+Write-Host "→ resources sidecar: $DestRes"
+Get-ChildItem $DestRes | Select-Object -First 10 Name

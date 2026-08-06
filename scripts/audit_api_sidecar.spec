@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for audit-api sidecar (invoked from build-api-sidecar.*)."""
+"""PyInstaller onedir sidecar — more reliable on macOS than onefile."""
 
 from pathlib import Path
 
@@ -43,7 +43,7 @@ a = Analysis(  # noqa: F821
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["pytest", "pygments"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=None,
@@ -55,21 +55,28 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)  # noqa: F821
 exe = EXE(  # noqa: F821
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="audit-api",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(  # noqa: F821
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="audit-api",
 )
