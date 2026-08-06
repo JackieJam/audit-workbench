@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from audit_engine.llm_runtime import resolve_llm_runtime
 from audit_engine.module_insight import (
@@ -11,6 +10,7 @@ from audit_engine.module_insight import (
     run_module_insight_pipeline,
 )
 from audit_engine.module_insight_jobs import list_jobs
+from audit_engine.paths import config_dir
 from audit_engine.store import ProjectStore
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -21,8 +21,7 @@ from audit_api.routers.analysis import _manifest_or_404
 
 router = APIRouter(prefix="/projects", tags=["llm-insight"])
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_AUDIT_QUESTIONS_PATH = _REPO_ROOT / "config" / "audit_questions.json"
+_AUDIT_QUESTIONS_PATH = config_dir() / "audit_questions.json"
 
 
 def _load_questions(module: str) -> list[dict[str, str]]:

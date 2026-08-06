@@ -236,7 +236,14 @@ export default function App() {
   const apiStatus = health.isLoading
     ? { dot: "status-dot status-dot--pending", text: "正在连接 API…" }
     : health.isError
-      ? { dot: "status-dot status-dot--err", text: "API 未连接，请先运行 scripts/dev-api.sh" }
+      ? {
+          dot: "status-dot status-dot--err",
+          text:
+            typeof window !== "undefined" &&
+            ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+              ? "本地 API 未就绪，请重启应用"
+              : "API 未连接，请先运行 scripts/dev-api.sh",
+        }
       : {
           dot: "status-dot status-dot--ok",
           text: `API ${health.data?.version ?? ""} 已连接${

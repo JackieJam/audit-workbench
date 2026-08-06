@@ -1,6 +1,19 @@
-const base = import.meta.env.VITE_API_BASE ?? "/api";
+function resolveApiBase(): string {
+  if (import.meta.env.VITE_API_BASE) {
+    return import.meta.env.VITE_API_BASE;
+  }
+  // Packaged Tauri has no Vite /api proxy — talk to the local sidecar directly.
+  const isTauri =
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+  if (isTauri) {
+    return "http://127.0.0.1:29180";
+  }
+  return "/api";
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const base = resolveApiBase();
   const res = await fetch(`${base}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -16,6 +29,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function upload<T>(path: string, form: FormData): Promise<T> {
+  const base = resolveApiBase();
   const res = await fetch(`${base}${path}`, { method: "POST", body: form });
   if (!res.ok) {
     const text = await res.text();
@@ -934,7 +948,7 @@ export const api = {
   listAuditCases: (projectId: string) =>
     request<AuditCaseListResponse>(`/projects/${projectId}/audit-cases`),
   sourceDownloadUrl: (projectId: string, assetId: string) =>
-    `${base}/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(assetId)}/download`,
+    `${resolveApiBase()}/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(assetId)}/download`,
   getAuditCase: (projectId: string, caseId: string) =>
     request<AuditCaseMutationResponse>(
       `/projects/${projectId}/audit-cases/${encodeURIComponent(caseId)}`,
@@ -1250,11 +1264,14 @@ export const api = {
       key_source: string;
     }>(`/llm/active${profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""}`),
 
-  exportExcelUrl: (projectId: string) => `${base}/projects/${projectId}/pipeline/export`,
+  exportExcelUrl: (projectId: string) =>
+    `${resolveApiBase()}/projects/${projectId}/pipeline/export`,
 
   /** Fetch Excel as blob — avoids SPA navigation hang from raw `<a href>` downloads. */
   exportExcel: async (projectId: string): Promise<{ blob: Blob; filename: string }> => {
-    const res = await fetch(`${base}/projects/${projectId}/pipeline/export`);
+    const res = await fetch(
+      `${resolveApiBase()}/projects/${projectId}/pipeline/export`,
+    );
     if (!res.ok) {
       const text = await res.text();
       throw new Error(text || res.statusText);

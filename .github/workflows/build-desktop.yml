@@ -1,0 +1,59 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            desktop_script: bash scripts/build-desktop.sh
+            artifact_path: |
+              apps/desktop/src-tauri/target/release/bundle/dmg/*
+              apps/desktop/src-tauri/target/release/bundle/macos/*
+          - os: windows-latest
+            desktop_script: powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1
+            artifact_path: apps/desktop/src-tauri/target/release/bundle/nsis/*
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Generate demo sample
+        run: uv run python scripts/generate_demo_journal.py
+
+      - name: Build desktop package
+        run: ${{ matrix.desktop_script }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-workbench-${{ matrix.os }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: warn

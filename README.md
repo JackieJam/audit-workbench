@@ -30,7 +30,7 @@ packages/engine  audit_engine（无 UI 依赖）
 ~/.audit_tool/   Parquet + DuckDB + JSON 状态
 ```
 
-## 快速开始
+## 快速开始（开发）
 
 ```bash
 ./scripts/bootstrap.sh
@@ -55,6 +55,31 @@ packages/engine  audit_engine（无 UI 依赖）
 - 关闭 MutiAgentComm 相关标签，或确保审计 UI 只用 **5188**
 - 审计 API 是否正常：看 `/health`、`/projects` 是否为 **200**
 
+## 桌面安装包
+
+打包后的应用会**自动拉起本地 FastAPI sidecar**（`127.0.0.1:29180`），无需另开终端。
+
+| 平台 | 命令 | 产物 |
+|------|------|------|
+| macOS (arm64/x64 本机) | `./scripts/build-desktop.sh` | `apps/desktop/src-tauri/target/release/bundle/macos/`（`.app`）与 `bundle/dmg/` |
+| Windows x64 | `powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1` | `...\bundle\nsis\` |
+
+脚本会把 `CARGO_TARGET_DIR` 固定到仓库内 `apps/desktop/src-tauri/target`，避免产物落到沙箱缓存目录。
+
+前置：Rust（`rustup`）、Node 20+、`uv`。Windows 包须在 Windows 机或 GitHub Actions `windows-latest` 上构建（本仓库提供 [`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml)）。
+
+内部分发注意：未做 Apple 公证 / Windows 代码签名。macOS 若提示无法打开，可右键「打开」或执行 `xattr -cr /path/to/审计分析工作台.app`；Windows 可能出现 SmartScreen「仍要运行」。
+
+### 试用样例
+
+仓库内附带脱敏序时账：[`samples/demo_journal_2022.xlsx`](samples/demo_journal_2022.xlsx)（虚构数据，表头与真实 SAP 导出 44 列对齐）。
+
+1. 打开安装包或开发 UI  
+2. 新建项目 → 上传该文件  
+3. 进入「财务画像」查看收入成本等模块；需要时再跑规则 / 抽样 / Excel 导出  
+
+重新生成样例：`uv run python scripts/generate_demo_journal.py`
+
 ## 里程碑
 
 见 [docs/ROADMAP.md](docs/ROADMAP.md)。
@@ -63,8 +88,8 @@ packages/engine  audit_engine（无 UI 依赖）
 |------|------|
 | M0 | Monorepo、ProjectStore、/health、/projects、React 三页壳（完成） |
 | M1 | ingest + 收入成本模块完整交互（完成） |
-| **M2（当前）** | 可替代 Streamlit：规则 UI、疑点工作台、LLM 核验进 Excel（闭合） |
-| M3 | Tauri 打包、Key 管理 |
+| M2 | 可替代 Streamlit：规则 UI、疑点工作台、LLM 核验进 Excel（闭合） |
+| **M3（进行中）** | Tauri 安装包（macOS + Windows sidecar）、试用样例；Key 管理继续完善 |
 
 ## 环境变量
 
@@ -74,6 +99,8 @@ packages/engine  audit_engine（无 UI 依赖）
 | `AUDIT_UI_PORT` | 前端 Vite 端口，默认 `5188`（`26_MutiAgentComm` 占用 `5173`） |
 | `AUDIT_WORKBENCH_DATA_ROOT` | 覆盖数据根目录（测试用） |
 | `AUDIT_WORKBENCH_NAMESPACE` | 多用户隔离子目录 |
+| `AUDIT_WORKBENCH_CONFIG_ROOT` | 覆盖含 `config/` 的根（打包/sidecar 用） |
+| `VITE_API_BASE` | 前端 API 基址；未设时浏览器走 `/api` 代理，Tauri 走 `http://127.0.0.1:29180` |
 
 ## 旧项目
 

@@ -36,5 +36,7 @@
 
 ## M3 桌面产品化
 
-- Tauri 打包、Key 管理、旧 pickle 迁移工具
-- `aggregates/` 预聚合（性能）
+- [x] Tauri 安装包脚手架：API sidecar、macOS `build-desktop.sh`、Windows `build-desktop.ps1`、CI workflow
+- [x] 试用脱敏样例 `samples/demo_journal_2022.xlsx`
+- [ ] Key 管理打磨、旧 pickle 迁移工具
+- [ ] `aggregates/` 预聚合（性能）

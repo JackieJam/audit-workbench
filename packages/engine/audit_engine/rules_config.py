@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_RULES_PATH = _REPO_ROOT / "config" / "default_rules.json"
+from audit_engine.paths import config_dir
 
 
 @lru_cache(maxsize=1)
 def default_rules_config() -> dict:
-    if not _DEFAULT_RULES_PATH.exists():
+    path = config_dir() / "default_rules.json"
+    if not path.exists():
         return {"max_sample_size": 50}
-    return json.loads(_DEFAULT_RULES_PATH.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def merge_rules_config(base: dict | None, overrides: dict | None) -> dict:

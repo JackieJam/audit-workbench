@@ -23,3 +23,9 @@ apps/desktop/src-tauri/target/
 *.xlsx
 *.xls
 *.parquet
+!samples/**/*.xlsx
+
+# Packaged sidecars (built locally / CI)
+apps/desktop/src-tauri/binaries/audit-api*
+apps/desktop/src-tauri/target/
+dist-sidecar/

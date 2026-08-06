@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_QUESTIONS_PATH = _REPO_ROOT / "config" / "audit_questions.json"
+from audit_engine.paths import config_dir
 
 MODULE_ID_TO_KEY: dict[str, str] = {
     "income": "收入成本",
@@ -24,9 +22,10 @@ MODULE_KEY_TO_ID: dict[str, str] = {v: k for k, v in MODULE_ID_TO_KEY.items()}
 
 @lru_cache(maxsize=1)
 def _load_all() -> dict:
-    if not _QUESTIONS_PATH.exists():
+    path = config_dir() / "audit_questions.json"
+    if not path.exists():
         return {}
-    data = json.loads(_QUESTIONS_PATH.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
 
 

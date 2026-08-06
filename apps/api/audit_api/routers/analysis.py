@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
@@ -15,6 +14,7 @@ from audit_engine.analysis.income_cost import (
     monthly_revenue_cost,
 )
 from audit_engine.data_columns import analysis_quality_summary
+from audit_engine.paths import config_dir
 from audit_engine.store import ProjectStore
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -23,8 +23,7 @@ from audit_api.deps import get_store
 
 router = APIRouter(prefix="/projects", tags=["analysis"])
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_AUDIT_QUESTIONS_PATH = _REPO_ROOT / "config" / "audit_questions.json"
+_AUDIT_QUESTIONS_PATH = config_dir() / "audit_questions.json"
 
 
 def _df_records(df: pd.DataFrame) -> list[dict[str, Any]]:
