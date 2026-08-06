@@ -1,0 +1,14 @@
+# 本机真实测试数据备忘（勿提交）
+
+复制本文件为 `TEST_DATA.local.md` 后按需填写。该文件已被 `.gitignore` 忽略。
+
+```bash
+export AUDIT_REAL_CASE_DIR="/path/to/private/folder"
+```
+
+| 相对路径（相对 AUDIT_REAL_CASE_DIR） | 用途 |
+|------|------|
+| `...` | 较快集成测试 |
+| `...` | 大表压力 |
+| `...` | 余额表 adapter（待） |
+| `...` | 财务报表 adapter（待） |

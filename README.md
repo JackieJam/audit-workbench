@@ -72,7 +72,7 @@ packages/engine  audit_engine（无 UI 依赖）
 
 ### 试用样例
 
-仓库内附带脱敏序时账：[`samples/demo_journal_2022.xlsx`](samples/demo_journal_2022.xlsx)（虚构数据，表头与真实 SAP 导出 44 列对齐）。
+仓库内附带**虚构脱敏**序时账：[`samples/demo_journal_2022.xlsx`](samples/demo_journal_2022.xlsx)。真实客户账只能放本机私有目录（见 [docs/TEST_DATA.md](docs/TEST_DATA.md)），不会也不应提交。
 
 1. 打开安装包或开发 UI  
 2. 新建项目 → 上传该文件  

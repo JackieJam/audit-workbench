@@ -19,15 +19,27 @@ apps/desktop/src-tauri/target/
 .idea/
 .vscode/
 
-# Local data (never commit audit files)
+# Local data (never commit real audit files)
 *.xlsx
 *.xls
+*.xlsm
 *.parquet
+# Allow only the synthetic demo sample under samples/
+!samples/
+!samples/**
 !samples/**/*.xlsx
+
+# Private / machine-local notes and real-case dirs
+docs/TEST_DATA.local.md
+testdata/
+fixtures/real/
+local-data/
+**/序时账测试案例/**
 
 # Packaged sidecars (built locally / CI)
 apps/desktop/src-tauri/binaries/audit-api*
 apps/desktop/src-tauri/resources/audit-api/
 apps/desktop/src-tauri/resources/audit-api.tar.gz
+apps/desktop/src-tauri/resources/samples/*.xlsx
 apps/desktop/src-tauri/target/
 dist-sidecar/

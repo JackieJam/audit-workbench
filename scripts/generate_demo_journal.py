@@ -14,7 +14,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "samples" / "demo_journal_2022.xlsx"
 
-# 与 /Users/jackie_m/Downloads/序时账测试案例/2022年6-12月序时账.XLSX 表头一致
+# 与常见 SAP「序时账」导出表头对齐（44 列）；数据全部虚构。
 COLUMNS = [
     "公司代码",
     "凭证类型",

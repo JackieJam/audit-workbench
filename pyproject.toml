@@ -28,7 +28,7 @@ pythonpath = ["packages/engine", "apps/api"]
 testpaths = ["packages/engine/tests", "apps/api/tests"]
 addopts = "-q -m 'not slow'"
 markers = [
-    "slow: 使用本地 Downloads 序时账测试案例，较慢",
+    "slow: 使用本机 AUDIT_REAL_CASE_DIR 私有序时账，较慢",
     "integration: 跨模块集成测试",
 ]
 

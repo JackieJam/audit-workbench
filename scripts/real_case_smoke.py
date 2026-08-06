@@ -19,13 +19,14 @@ sys.path.insert(0, str(ROOT / "packages" / "engine"))
 from audit_api.deps import get_pipeline, get_store  # noqa: E402
 from audit_api.main import app  # noqa: E402
 from audit_engine.ingestion import load_files  # noqa: E402
+from audit_engine.real_case_paths import real_case_dir, real_case_file  # noqa: E402
 from audit_engine.store import ProjectStore  # noqa: E402
 
-TEST_DATA_DIR = Path("/Users/jackie_m/Downloads/序时账测试案例")
-JOURNAL_2022 = TEST_DATA_DIR / "2022年6-12月序时账.XLSX"
-JOURNAL_2023 = TEST_DATA_DIR / "1094 810序时账（23.1-23.12）.XLSX"
-JOURNAL_2024 = TEST_DATA_DIR / "1094 810序时账（24.1-24.12）.XLSX"
-APPEND_FILES = [JOURNAL_2023, JOURNAL_2024]
+TEST_DATA_DIR = real_case_dir()
+JOURNAL_2022 = real_case_file(os.environ.get("AUDIT_REAL_CASE_JOURNAL_2022", "2022年6-12月序时账.XLSX"))
+JOURNAL_2023 = real_case_file(os.environ.get("AUDIT_REAL_CASE_JOURNAL_2023", "journal_2023.xlsx"))
+JOURNAL_2024 = real_case_file(os.environ.get("AUDIT_REAL_CASE_JOURNAL_2024", "journal_2024.xlsx"))
+APPEND_FILES = [p for p in (JOURNAL_2023, JOURNAL_2024) if p is not None]
 
 client = TestClient(app)
 
@@ -49,8 +50,8 @@ def _file_payload(path: Path) -> tuple[str, bytes, str]:
 
 
 def main() -> int:
-    if not JOURNAL_2022.exists():
-        log(f"缺少测试文件: {JOURNAL_2022}")
+    if JOURNAL_2022 is None or not JOURNAL_2022.exists():
+        log("缺少真实案例文件。请设置 AUDIT_REAL_CASE_DIR（及可选 AUDIT_REAL_CASE_JOURNAL_2022）。")
         return 1
 
     total_t0 = time.perf_counter()
@@ -65,7 +66,7 @@ def main() -> int:
         log(f"  ✓ {time.perf_counter() - t0:.1f}s  project_id={pid}")
 
         t0 = time.perf_counter()
-        log("▶ 列名检测（2022 样本）")
+        log("▶ 列名检测（基准样本）")
         det = _ok(
             "detect",
             client.post(

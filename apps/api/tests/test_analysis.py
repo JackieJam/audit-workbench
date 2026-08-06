@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from audit_api.deps import get_pipeline, get_store
 from audit_api.main import app
+from audit_engine.real_case_paths import real_case_file
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
-TEST_DATA_DIR = Path("/Users/jackie_m/Downloads/序时账测试案例")
-JOURNAL_2022 = TEST_DATA_DIR / "2022年6-12月序时账.XLSX"
+# Optional private journal (set AUDIT_REAL_CASE_DIR). Filename override via env.
+JOURNAL_2022 = real_case_file(
+    os.environ.get("AUDIT_REAL_CASE_JOURNAL_2022", "2022年6-12月序时账.XLSX")
+)
 
 
 def _minimal_xlsx() -> io.BytesIO:
@@ -235,9 +239,10 @@ def test_multi_currency_scope_unblocks_charts_without_mixing_amounts(tmp_path, m
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not JOURNAL_2022.exists(), reason="本地测试案例目录不可用")
+@pytest.mark.skipif(JOURNAL_2022 is None or not JOURNAL_2022.exists(), reason="未设置 AUDIT_REAL_CASE_DIR 或文件不存在")
 def test_real_journal_2022_monthly(tmp_path, monkeypatch) -> None:
-    """使用 Downloads 序时账测试案例做集成验证（较慢）。"""
+    """使用本机私有序时账做集成验证（较慢；数据不在仓库内）。"""
+    assert JOURNAL_2022 is not None
     monkeypatch.setenv("AUDIT_WORKBENCH_DATA_ROOT", str(tmp_path))
     get_store.cache_clear()
     get_pipeline.cache_clear()
