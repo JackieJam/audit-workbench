@@ -21,6 +21,12 @@ from audit_engine.llm_profiles import (
     save_profile,
     set_default_profile,
 )
+from audit_engine.llm_endpoint_policy import (
+    endpoint_allowed,
+    extract_host,
+    load_endpoint_allowlist,
+    save_endpoint_allowlist,
+)
 from audit_engine.llm_runtime import resolve_llm_runtime
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -52,6 +58,12 @@ class PingRequest(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+
+
+class EndpointAllowlistBody(BaseModel):
+    enabled: bool = True
+    hosts: list[str] = Field(default_factory=list)
+    allow_all: bool = False
 
 
 def _profile_public(profile: dict[str, Any]) -> dict[str, Any]:
@@ -187,4 +199,23 @@ def llm_active(
         "base_url": runtime.base_url,
         "key_configured": bool(runtime.api_key),
         "key_source": runtime.key_source,
+        "endpoint_allowed": endpoint_allowed(runtime.base_url),
+        "endpoint_host": extract_host(runtime.base_url),
     }
+
+
+@router.get("/endpoint-allowlist")
+def llm_get_endpoint_allowlist() -> dict:
+    return load_endpoint_allowlist()
+
+
+@router.put("/endpoint-allowlist")
+def llm_put_endpoint_allowlist(body: EndpointAllowlistBody) -> dict:
+    try:
+        return save_endpoint_allowlist(
+            enabled=body.enabled,
+            hosts=body.hosts,
+            allow_all=body.allow_all,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

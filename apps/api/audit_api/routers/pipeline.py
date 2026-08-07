@@ -49,6 +49,8 @@ class VerifyRequest(BaseModel):
     profile_id: str = ""
     api_key: str = ""
     max_verify: int = Field(50, ge=1, le=200)
+    # none=原文外发；pseudonym=供应商/客户/用户名/凭证号伪名化（默认）
+    redaction: str = Field("pseudonym", pattern="^(none|pseudonym)$")
 
 
 @router.get("/{project_id}/rules")
@@ -237,6 +239,7 @@ def run_verify(
             model=runtime.model,
             base_url=runtime.base_url,
             max_verify=req.max_verify,
+            redaction=req.redaction,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

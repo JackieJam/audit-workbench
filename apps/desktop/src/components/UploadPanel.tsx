@@ -119,7 +119,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
       {error && <p className="error">{error}</p>}
       {detection && !busy && (
         <div className="detect-box">
-          <p className="muted">建议映射（{detection.file_label}）</p>
+          <p className="muted">建议映射（并集预览：{detection.file_label}）</p>
           <ul className="mapping-list">
             {Object.entries(detection.suggested_mapping).map(([std, src]) => (
               <li key={std}>
@@ -134,6 +134,35 @@ export function UploadPanel({ projectId, onImported }: Props) {
               </li>
             ))}
           </ul>
+          {(detection.per_file?.length ?? 0) > 1 && (
+            <div className="per-file-mapping">
+              <p className="muted">
+                各文件将独立解析映射（避免异构列名静默漏数）。导入时若并集偏好列在某文件不存在，自动回退该文件匹配。
+              </p>
+              {detection.per_file!.map((fileDet) => (
+                <details key={fileDet.file_label} className="per-file-mapping-item">
+                  <summary>
+                    <code>{fileDet.file_label}</code>
+                    <span className="muted"> · {Object.keys(fileDet.suggested_mapping).length} 列</span>
+                  </summary>
+                  <ul className="mapping-list">
+                    {Object.entries(fileDet.suggested_mapping).map(([std, src]) => (
+                      <li key={`${fileDet.file_label}-${std}`}>
+                        <code>{std}</code> ← <code>{src}</code>
+                        {fileDet.mapping_matches[std] && (
+                          <span className="muted">
+                            {" "}
+                            ({fileDet.mapping_matches[std].method}{" "}
+                            {(fileDet.mapping_matches[std].score * 100).toFixed(0)}%)
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ))}
+            </div>
+          )}
         </div>
       )}
       {result && !busy && (

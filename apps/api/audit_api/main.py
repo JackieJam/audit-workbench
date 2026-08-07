@@ -26,7 +26,10 @@ from audit_api.routers import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    from audit_engine.runtime import assert_storage_isolation
+
     configure_access_logging()
+    assert_storage_isolation()
     yield
 
 

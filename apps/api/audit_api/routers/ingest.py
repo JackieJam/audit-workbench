@@ -32,6 +32,13 @@ class ColumnMatchOut(BaseModel):
     method: str
 
 
+class FileDetectionOut(BaseModel):
+    file_label: str
+    source_columns: list[str]
+    suggested_mapping: dict[str, str]
+    mapping_matches: dict[str, ColumnMatchOut]
+
+
 class DetectResponse(BaseModel):
     file_label: str
     source_columns: list[str]
@@ -39,6 +46,7 @@ class DetectResponse(BaseModel):
     mapping_matches: dict[str, ColumnMatchOut]
     standard_columns: list[dict[str, str]]
     sample_rows: list[dict[str, Any]] = Field(default_factory=list)
+    per_file: list[FileDetectionOut] = Field(default_factory=list)
 
 
 class YearSummaryOut(BaseModel):
@@ -59,6 +67,13 @@ class IngestResponse(BaseModel):
     aliases_recorded: int
 
 
+def _matches_out(matches: dict) -> dict[str, ColumnMatchOut]:
+    return {
+        std: ColumnMatchOut(source=m.source, score=m.score, method=m.method)
+        for std, m in matches.items()
+    }
+
+
 def _detection_to_response(det: DetectionResult) -> DetectResponse:
     sample = det.sample.head(5)
     for col in sample.columns:
@@ -69,15 +84,21 @@ def _detection_to_response(det: DetectionResult) -> DetectResponse:
         file_label=det.file_label,
         source_columns=det.source_columns,
         suggested_mapping=det.suggested_mapping,
-        mapping_matches={
-            std: ColumnMatchOut(source=m.source, score=m.score, method=m.method)
-            for std, m in det.mapping_matches.items()
-        },
+        mapping_matches=_matches_out(det.mapping_matches),
         standard_columns=[
             {"name": c.name, "tier": c.tier, "description": c.description}
             for c in STANDARD_COLUMNS
         ],
         sample_rows=sample.to_dict(orient="records") if not sample.empty else [],
+        per_file=[
+            FileDetectionOut(
+                file_label=item.file_label,
+                source_columns=item.source_columns,
+                suggested_mapping=item.suggested_mapping,
+                mapping_matches=_matches_out(item.mapping_matches),
+            )
+            for item in det.per_file
+        ],
     )
 
 
@@ -151,8 +172,9 @@ async def commit_ingest(
         raise HTTPException(status_code=400, detail="column_mapping 不是合法 JSON") from exc
 
     buffers = await _read_uploads(files)
+    learned = learned_column_aliases()
     if not mapping:
-        det = detect_columns(buffers, learned_aliases=learned_column_aliases())
+        det = detect_columns(buffers, learned_aliases=learned)
         mapping = det.suggested_mapping
 
     # 过滤无此列
@@ -161,7 +183,15 @@ async def commit_ingest(
         if v and v != NO_COLUMN_SENTINEL
     }
 
-    _df, year_map, missing = load_files(buffers, column_mapping=mapping)
+    try:
+        # load_files 按文件独立解析映射；mapping 仅作偏好，缺失源列时回退该文件自动匹配
+        _df, year_map, missing = load_files(
+            buffers,
+            column_mapping=mapping,
+            learned_aliases=learned,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not year_map:
         raise HTTPException(status_code=400, detail="未能从文件中识别出任何年度数据")
 

@@ -47,6 +47,9 @@ def test_detect_and_commit_ingest(tmp_path, monkeypatch) -> None:
     body = det.json()
     assert "凭证编号" in body["suggested_mapping"]
     assert body["source_columns"]
+    assert isinstance(body.get("per_file"), list)
+    assert len(body["per_file"]) >= 1
+    assert body["per_file"][0]["file_label"]
 
     xlsx2 = _minimal_xlsx()
     commit = client.post(

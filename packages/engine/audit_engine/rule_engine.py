@@ -342,6 +342,12 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
     min_total: float = c.get("min_total", 500_000)
     window_days: int = c.get("window_days", 14)
     min_count: int = c.get("min_txn_count", 5)
+    try:
+        burst_multiplier = float(c.get("burst_multiplier", 3.0))
+    except (TypeError, ValueError):
+        burst_multiplier = 3.0
+    if burst_multiplier < 1.0:
+        burst_multiplier = 1.0
 
     result = RuleResult(rule_name="化整为零")
     if not c.get("enabled", True):
@@ -363,7 +369,7 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
     flagged: set[str] = set()
 
-    # 维度1：同日同供应商 — 金额高度相似（差异≤15%）才是化整为零的核心特征
+    # 维度1：同日同供应商 — 金额高度相似（差异≤15%）且当日笔数超过该供应商日均 burst_multiplier 倍
     day_grouped = pay.groupby(["_vendor", "_date"], sort=False, dropna=False)
     day_stats = day_grouped["_abs"].agg(["size", "sum", "mean", "min", "max"])
     day_stats = day_stats[
@@ -377,11 +383,31 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
             (day_stats["min"] - day_stats["mean"]).abs(),
         ).div(day_stats["mean"]) <= 0.15
     ]
+    # 供应商各日笔数：burst 与「其他日期」的日均比较；无历史基线时不拦（仅靠金额相似）
+    vendor_daily_counts = (
+        pay.dropna(subset=["_date"])
+        .groupby(["_vendor", "_date"], sort=False)
+        .size()
+    )
     day_groups = day_grouped.indices
     vkeys = pay["_vkey"].to_numpy(dtype=object)
     vids = pay["_vid"].to_numpy(dtype=object)
     lines = pay["_line"].to_numpy()
     for (vendor, day), stats in day_stats.iterrows():
+        avg_daily = 0.0
+        burst_ratio = None
+        try:
+            vendor_days = vendor_daily_counts.loc[vendor]
+            if isinstance(vendor_days, pd.Series) and len(vendor_days) > 1:
+                other = vendor_days.drop(labels=[day], errors="ignore")
+                if len(other) > 0:
+                    avg_daily = float(other.mean())
+                    if avg_daily > 0:
+                        burst_ratio = float(stats["size"]) / avg_daily
+                        if burst_ratio < burst_multiplier:
+                            continue
+        except (KeyError, TypeError, ValueError):
+            pass
         positions = day_groups.get((vendor, day))
         if positions is None:
             continue
@@ -392,6 +418,12 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 flagged.add(vkey)
                 voucher_mask = group_vkeys == vkey
                 vid = str(group_vids[voucher_mask][0])
+                burst_note = (
+                    f"；当日笔数{int(stats['size'])}为其余日均{avg_daily:.1f}的"
+                    f"{burst_ratio:.1f}倍（阈值{burst_multiplier:g}倍）"
+                    if burst_ratio is not None
+                    else f"；无历史日均基线，已按金额相似命中（burst_multiplier={burst_multiplier:g}）"
+                )
                 result.hits.append(RuleHit(
                     voucher_id=vid,
                     voucher_key=str(vkey),
@@ -399,6 +431,7 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
                     evidence=(
                         f"供应商{vendor}同日{int(stats['size'])}笔金额相似"
                         f"（均值{stats['mean']:,.0f}，差异≤15%），合计{stats['sum']:,.0f}"
+                        f"{burst_note}"
                     ),
                     line_indices=tuple(lines[positions][voucher_mask].tolist()),
                     priority=5,

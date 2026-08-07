@@ -1407,6 +1407,59 @@
   font-size: 0.8rem;
 }
 
+.llm-allowlist {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+
+.llm-allowlist__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.llm-allowlist__head h3 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+}
+
+.llm-allowlist__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.llm-allowlist__textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-size: 0.86rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.45;
+}
+
+.llm-allowlist__textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.llm-allowlist__textarea:disabled {
+  opacity: 0.65;
+}
+
 /* ---------- 分析进度 ---------- */
 
 .analysis-progress {

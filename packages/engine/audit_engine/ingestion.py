@@ -145,11 +145,42 @@ class ColumnMatch:
 @dataclass
 class DetectionResult:
     """探测阶段的结果，用于驱动 UI 映射。"""
-    source_columns: list[str]                             # 源文件实际列
+    source_columns: list[str]                             # 源文件实际列（多文件为并集，便于 UI）
     suggested_mapping: dict[str, str]                     # 标准列 -> 源列（无匹配则不在 dict 内）
     file_label: str = ""                                  # 用于 UI 显示
     sample: pd.DataFrame = field(default_factory=pd.DataFrame)
     mapping_matches: dict[str, ColumnMatch] = field(default_factory=dict)  # 标准列 -> 匹配详情（含置信度）
+    per_file: list[DetectionResult] = field(default_factory=list)  # 各文件独立探测结果
+
+
+def resolve_file_mapping(
+    source_columns: list[str],
+    preferred_mapping: dict[str, str] | None = None,
+    learned_aliases: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """为单个文件解析列映射，避免多文件共用一套 mapping 导致静默漏数。
+
+    优先使用 preferred_mapping 中「本文件实际存在」的源列；
+    否则回退到该文件自己的自动匹配（含别名/模糊/学习别名）。
+    """
+    source_set = set(source_columns)
+    auto = suggest_mapping_with_confidence(source_columns, learned=learned_aliases)
+    preferred = preferred_mapping or {}
+    resolved: dict[str, str] = {}
+
+    for std_name, match in auto.items():
+        preferred_src = preferred.get(std_name)
+        if preferred_src and preferred_src != NO_COLUMN_SENTINEL and preferred_src in source_set:
+            resolved[std_name] = preferred_src
+        else:
+            resolved[std_name] = match.source
+
+    for std_name, src in preferred.items():
+        if not src or src == NO_COLUMN_SENTINEL or std_name in resolved:
+            continue
+        if src in source_set:
+            resolved[std_name] = src
+    return resolved
 
 
 def detect_columns(
@@ -158,8 +189,10 @@ def detect_columns(
 ) -> DetectionResult:
     """读取文件表头并给出建议映射。
 
-    多文件场景下会以「并集」形式展示所有源列，建议映射按"任一文件出现即采纳"。
-    后续 load_files() 用同一份 mapping 处理所有文件。
+    多文件场景：
+    - 顶层仍返回列名并集 + 合并建议（兼容现有 UI）
+    - ``per_file`` 携带每个文件的独立映射；``load_files()`` 按文件各自解析，
+      不再把一套 mapping 硬套到所有文件上。
 
     learned_aliases: {归一化源列名 -> 标准列名}，由调用方从经验库取得后注入。
     ingestion 保持纯函数、不直接依赖 knowledge_base，便于离线测试。
@@ -167,14 +200,25 @@ def detect_columns(
     all_source_cols: list[str] = []
     sample_frames: list[pd.DataFrame] = []
     labels: list[str] = []
+    per_file: list[DetectionResult] = []
 
     for src in sources:
         sample = _read_header_only(src)
         sample_frames.append(sample)
-        for col in sample.columns:
+        label = _source_label(src)
+        labels.append(label)
+        file_cols = list(sample.columns)
+        for col in file_cols:
             if col not in all_source_cols:
                 all_source_cols.append(col)
-        labels.append(_source_label(src))
+        file_matches = suggest_mapping_with_confidence(file_cols, learned=learned_aliases)
+        per_file.append(DetectionResult(
+            source_columns=file_cols,
+            suggested_mapping={std: m.source for std, m in file_matches.items()},
+            file_label=label,
+            sample=sample,
+            mapping_matches=file_matches,
+        ))
 
     matches = suggest_mapping_with_confidence(all_source_cols, learned=learned_aliases)
     suggested = {std: m.source for std, m in matches.items()}
@@ -186,33 +230,46 @@ def detect_columns(
         file_label=" / ".join(labels),
         sample=sample_df,
         mapping_matches=matches,
+        per_file=per_file,
     )
 
 
 def load_files(
     sources: list[str | Path | IO],
     column_mapping: dict[str, str] | None = None,
+    learned_aliases: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, dict[int, pd.DataFrame], list[str]]:
-    """加载文件并应用列映射。
+    """加载文件并**按文件独立**应用列映射后合并。
 
     Args:
         sources: 文件路径或文件流列表。
-        column_mapping: 标准列名 -> 源列名；值为 None / NO_COLUMN_SENTINEL 表示用户确认无此列。
-                        传 None 时使用自动检测的 suggested_mapping。
+        column_mapping: 用户确认的「偏好」映射（标准列 -> 源列）；
+                        仅当该源列在当前文件中存在时才采用，否则回退该文件自动匹配。
+                        传 None 时每个文件各自自动检测。
+        learned_aliases: 经验库别名，注入各文件自动匹配。
 
     Returns:
-        df_unified: 合并后的全部数据（含 _year, _is_period13 列）。
+        df_unified: 合并后的全部数据（含 _year, _is_period13, _source_file, _source_sheet）。
         year_map: {year: df_for_that_year}
         missing_columns: 加载完成后仍缺失的标准列（用于下游分析降级提示）。
     """
-    if column_mapping is None:
-        detection = detect_columns(sources)
-        column_mapping = detection.suggested_mapping
-
+    preferred = column_mapping
     frames: list[pd.DataFrame] = []
+    amount_gaps: list[str] = []
     for src in sources:
-        df = _read_single_file(src, column_mapping)
+        df = _read_single_file(src, preferred, learned_aliases=learned_aliases)
+        # 先做借贷/金额合成，再查缺口，避免「仅有借方/贷方金额」被误拦
+        df = _ensure_amount_ready(df)
+        gap = _detect_amount_mapping_gap(df, _source_label(src))
+        if gap:
+            amount_gaps.append(gap)
         frames.append(df)
+
+    if amount_gaps:
+        label = "列映射存在金额字段静默缺失，已阻断导入："
+        if len(sources) > 1:
+            label = "多文件" + label
+        raise ValueError(label + "；".join(amount_gaps))
 
     if len(frames) > 1:
         df_all = pd.concat(frames, ignore_index=True)
@@ -220,7 +277,8 @@ def load_files(
     else:
         # 单文件场景：相信用户给的就是事实，不做去重
         df_all = frames[0].copy()
-    df_all, missing = _post_process(df_all, column_mapping)
+    # post_process 用偏好映射做占位决策；真实列已在各文件独立映射后存在
+    df_all, missing = _post_process(df_all, preferred or {})
     df_all = _tag_years(df_all)
 
     year_map = {
@@ -365,8 +423,86 @@ def _read_header_only(src) -> pd.DataFrame:
                 pass
 
 
-def _read_single_file(src, mapping: dict[str, str]) -> pd.DataFrame:
-    """读取单个文件并应用列映射，返回标准化后的 DataFrame。"""
+_AMOUNT_STD_COLS = ("凭证货币价值", "公司代码货币价值")
+# 可由借/贷方金额合成，不算「未映射金额」
+_SYNTHESIZABLE_AMOUNT_COLS = {
+    "借方金额", "贷方金额", "借方", "贷方", "Debit", "Credit", "借方发生额", "贷方发生额",
+}
+# 币种代码列含「货币」但不含金额语义，禁止当残留金额列
+_CURRENCY_CODE_NORM_TOKENS = (
+    "货币代码", "currencycode", "currency", "waers", "hwaer", "本位币代码",
+)
+
+
+def _is_currency_code_column(name: str) -> bool:
+    norm = _normalize(name)
+    if any(token in norm for token in _CURRENCY_CODE_NORM_TOKENS):
+        return True
+    # 「凭证货币代码」「公司代码货币代码」等
+    return norm.endswith("代码") and "货币" in norm
+
+
+def _is_amount_like_column(name: str) -> bool:
+    """严格金额列名：避免把货币代码误判为金额。"""
+    if name in _SYNTHESIZABLE_AMOUNT_COLS or name in _AMOUNT_STD_COLS:
+        return True
+    if _is_currency_code_column(name):
+        return False
+    norm = _normalize(name)
+    return any(token in norm for token in ("amount", "金额", "价值", "dmbtr", "wrbtr"))
+
+
+def _ensure_amount_ready(df: pd.DataFrame) -> pd.DataFrame:
+    """单文件级借贷标识/金额合成，供缺口检测在 post_process 之前使用。"""
+    work = df.copy()
+    if "借/贷标识" in work.columns:
+        work["借/贷标识"] = _normalize_dc_indicator(work["借/贷标识"])
+    if "借/贷标识" not in work.columns:
+        work = _synthesize_dc_from_amounts(work)
+    if "借/贷标识" not in work.columns:
+        work = _synthesize_dc_from_sign(work)
+    if "凭证货币价值" not in work.columns and "借/贷标识" in work.columns:
+        work = _synthesize_amount_from_dc(work)
+    return work
+
+
+def _detect_amount_mapping_gap(df: pd.DataFrame, file_label: str) -> str | None:
+    """检测「金额标准列为空，但源文件仍残留未映射金额列」——典型静默漏数。"""
+    has_usable = False
+    for col in _AMOUNT_STD_COLS:
+        if col in df.columns and pd.to_numeric(df[col], errors="coerce").notna().any():
+            has_usable = True
+            break
+    if has_usable:
+        return None
+
+    # 仍可用借/贷方金额合成（_ensure_amount_ready 之后一般已合成；双保险）
+    for col in _SYNTHESIZABLE_AMOUNT_COLS:
+        if col in df.columns and pd.to_numeric(df[col], errors="coerce").notna().any():
+            return None
+
+    leftover_amount_cols = [
+        col for col in df.columns
+        if not str(col).startswith("_")
+        and col not in _AMOUNT_STD_COLS
+        and col not in _SYNTHESIZABLE_AMOUNT_COLS
+        and _is_amount_like_column(str(col))
+        and pd.to_numeric(df[col], errors="coerce").notna().any()
+    ]
+    if not leftover_amount_cols:
+        return None
+    return (
+        f"{file_label} 的金额列未映射到标准字段"
+        f"（残留列：{', '.join(leftover_amount_cols[:3])}）"
+    )
+
+
+def _read_single_file(
+    src,
+    preferred_mapping: dict[str, str] | None,
+    learned_aliases: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """读取单个文件，按该文件实际列独立解析映射后标准化。"""
     if hasattr(src, "seek"):
         src.seek(0)
     try:
@@ -395,7 +531,12 @@ def _read_single_file(src, mapping: dict[str, str]) -> pd.DataFrame:
     )
     df["_source_sheet"] = str(sheet_name)
 
-    df = _apply_mapping(df, mapping)
+    file_mapping = resolve_file_mapping(
+        list(original_columns),
+        preferred_mapping=preferred_mapping,
+        learned_aliases=learned_aliases,
+    )
+    df = _apply_mapping(df, file_mapping)
 
     for col in DATE_COLUMNS:
         if col in df.columns:
@@ -603,13 +744,21 @@ def _synthesize_amount_from_dc(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     dc = df["借/贷标识"].astype(str).str.strip()
-    df["凭证货币价值"] = 0.0
-    df.loc[dc == "S", "凭证货币价值"] = debit_vals[dc == "S"]
-    df.loc[dc == "H", "凭证货币价值"] = credit_vals[dc == "H"]
-    mask_both = (dc != "S") & (dc != "H")
-    df.loc[mask_both, "凭证货币价值"] = (
-        debit_vals[mask_both].combine(credit_vals[mask_both], max)
-    )
+    amount = pd.Series(0.0, index=df.index, dtype="float64")
+    debit_mask = dc.eq("S")
+    credit_mask = dc.eq("H")
+    if debit_mask.any():
+        amount.loc[debit_mask] = debit_vals.loc[debit_mask].astype(float)
+    if credit_mask.any():
+        amount.loc[credit_mask] = credit_vals.loc[credit_mask].astype(float)
+    mask_both = ~(debit_mask | credit_mask)
+    if mask_both.any():
+        amount.loc[mask_both] = (
+            debit_vals.loc[mask_both]
+            .combine(credit_vals.loc[mask_both], max)
+            .astype(float)
+        )
+    df["凭证货币价值"] = amount
     return df
 
 

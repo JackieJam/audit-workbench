@@ -175,8 +175,13 @@ export function SamplingPage({ project }: Props) {
       api.runVerify(project!.project_id, {
         profile_id: selectedProfileId ?? "",
         max_verify: 50,
+        redaction: "pseudonym",
       }),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      if (data.data_boundary?.warning) {
+        // 明示外发边界；不阻断流程（用户已主动点击核验）
+        console.info("[LLM data boundary]", data.data_boundary.warning);
+      }
       queryClient.invalidateQueries({ queryKey: ["verify-status", project?.project_id] });
       queryClient.invalidateQueries({ queryKey: ["rule-results", project?.project_id] });
     },
@@ -593,7 +598,11 @@ export function SamplingPage({ project }: Props) {
         </button>
         {verifySummary && verifyStatus.data?.has_judgments && (
           <span className="muted">
-            已辅助核验 {verifySummary.confirmed} 条 · 高风险 {verifySummary.high} · 回退 {verifySummary.fallback}
+            已确认 {verifySummary.confirmed} · 待核验 {verifySummary.pending_review ?? verifySummary.fallback} · 高风险 {verifySummary.high}
+            {typeof verifySummary.confirmation_rate === "number"
+              ? ` · 确认率 ${(verifySummary.confirmation_rate * 100).toFixed(0)}%`
+              : ""}
+            （明细已伪名化外发）
           </span>
         )}
         <button

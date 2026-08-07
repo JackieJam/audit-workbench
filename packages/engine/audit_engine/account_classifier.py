@@ -7,14 +7,18 @@
 
 匹配规则：
 - 单向、按优先级顺序，先命中先终止；
-- 名称为空 / 不命中任何规则 → "未分类"，相关分析自动跳过；
-- 用户可针对个别科目编号在 UI 中手动覆盖（per-project，跟随项目状态保存）。
+- 长关键词（≥3字）允许子串命中；短/裸关键词要求分段命中，降低系统性误判；
+- 生产成本/制造费用 → 「制造成本」（独立口径，不进毛利与期间费用）；
+- 投资收益、营业外收支等有独立类别，不进入经营收入/成本/费用；
+- 名称为空 / 不命中任何规则 → "未分类"；
+- 用户可针对个别科目编号手动覆盖（per-project）；系统保护类口径优先于历史覆盖。
 
 不依赖 streamlit；脱离 UI 也能调用 auto_classify 和 classify_dataframe。
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import pandas as pd
@@ -370,12 +374,34 @@ _PRIORITY_RULES: tuple[_Rule, ...] = (
 # 公开 API
 # ─────────────────────────────────────────────
 
+# 短/裸关键词：子串误伤面大，要求按分隔符分段命中。
+# 例如「销售费用-现金折扣」不得因「现金」进货币资金；「研发」仍可命中「研发支出」。
+_BARE_KEYWORDS: frozenset[str] = frozenset({
+    "收入", "成本", "费用", "应收", "应付", "预收", "预付", "借款", "研发", "现金",
+})
+_SEGMENT_SPLIT = re.compile(r"[-_/|·，,、\s（）()【】\[\]]+")
+
+
+def _keyword_matches(name: str, keyword: str) -> bool:
+    """长关键词子串命中；短/裸关键词要求落在分段内，降低系统性分类偏差。"""
+    if not keyword or keyword not in name:
+        return False
+    if len(keyword) >= 3 and keyword not in _BARE_KEYWORDS:
+        return True
+    segments = [seg for seg in _SEGMENT_SPLIT.split(name) if seg]
+    if not segments:
+        return name == keyword
+    for seg in segments:
+        if seg == keyword or seg.startswith(keyword) or seg.endswith(keyword):
+            return True
+    return False
+
 
 def auto_classify(account_name: str | None) -> str:
     """按科目名称自动分类。
 
     - 名称为空、None、NaN → "未分类"
-    - 生产成本等排除项 → "未分类"（避免污染毛利与期间费用）
+    - 生产成本/制造费用 → 「制造成本」（独立口径）
     - 投资收益、营业外收支 → 各自独立分类（不进入经营收入/成本/费用）
     - 不命中任一关键词 → "未分类"
     """
@@ -386,7 +412,7 @@ def auto_classify(account_name: str | None) -> str:
         return CAT_UNCATEGORIZED
     for rule in _PRIORITY_RULES:
         for keyword in rule.keywords:
-            if keyword in name:
+            if _keyword_matches(name, keyword):
                 return rule.category
     return CAT_UNCATEGORIZED
 
@@ -415,12 +441,27 @@ def apply_prefix_category(account_code: object, current_category: str) -> str:
     return _PREFIX_CATEGORY_EXACT4.get(acct4, current_category)
 
 
-def uncategorized_reason(account_code: object, account_name: object) -> str:
-    """解释科目为何仍为未分类，供数据质量复核使用。"""
+def uncategorized_reason(
+    account_code: object,
+    account_name: object,
+    *,
+    automatic_category: str | None = None,
+) -> str:
+    """解释科目为何仍为未分类 / 不可映射到通用分类，供数据质量复核使用。"""
     code = _as_text(account_code)
     name = _as_text(account_name)
     if not code and not name:
         return "missing_identity"
+    auto = automatic_category
+    if auto is None:
+        auto = apply_prefix_category(code, auto_classify(name))
+    # 系统保护类或制造/合同成本等独立口径：不允许再映射进宽泛经营分类
+    if is_system_protected_category(auto) or auto in {
+        CAT_MANUFACTURING_COST,
+        CAT_COST_VARIANCE,
+        CAT_CONTRACT_COST,
+    }:
+        return "intentional_exclusion"
     return "needs_mapping"
 
 

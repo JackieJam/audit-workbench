@@ -93,9 +93,13 @@ def get_default_profile() -> dict[str, Any] | None:
 
 
 def save_profile(profile: dict[str, Any], *, set_default: bool = False) -> dict[str, Any]:
+    from audit_engine.llm_endpoint_policy import assert_llm_endpoint_allowed
+
     profile_name = str(profile.get("profile_name", "")).strip()
     if not profile_name:
         raise ValueError("方案名称不能为空")
+    base_url = str(profile.get("base_url", "")).strip() or DEFAULT_LLM_CONFIG["base_url"]
+    assert_llm_endpoint_allowed(base_url)
 
     with file_lock(_profiles_lock_path(), exclusive=True):
         profiles = _load_profiles()

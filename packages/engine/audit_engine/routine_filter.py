@@ -190,9 +190,25 @@ def apply_routine_exclusion(
     purpose: str = "rules",
     selector: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """返回 (保留, 排除)。"""
+    """返回 (保留, 排除)。
+
+    purpose=rules 时**不按行删除**，避免破坏凭证完整性：
+    仅剔除「纯常规凭证」（噪声行占比达阈值），混合凭证保留全部行。
+    candidates/export 仍可按行排除常规分录。
+    """
     if df.empty:
         return df.copy(), df.iloc[0:0].copy()
+
+    if purpose == "rules":
+        work = ensure_voucher_identity(df)
+        pure_ids = pure_routine_voucher_ids(
+            work, cfg, purpose="rules", selector=selector, stable=True,
+        )
+        if not pure_ids:
+            return work.copy(), work.iloc[0:0].copy()
+        keep = ~work[VOUCHER_KEY_COLUMN].astype(str).isin(pure_ids)
+        return work.loc[keep].copy(), work.loc[~keep].copy()
+
     mask = routine_line_mask(df, cfg, purpose=purpose, selector=selector)
     return df[~mask].copy(), df[mask].copy()
 

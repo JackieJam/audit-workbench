@@ -402,6 +402,25 @@
   overflow: auto;
 }
 
+.per-file-mapping {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.per-file-mapping-item {
+  margin-top: 6px;
+}
+
+.per-file-mapping-item summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.per-file-mapping-item .mapping-list {
+  max-height: 120px;
+}
+
 /* ---------- 工作区 ---------- */
 
 .workspace {

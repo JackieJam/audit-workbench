@@ -39,6 +39,18 @@ SAMPLE_COLS = [
     ("核查结论", 20),  # 留给审计师填写
 ]
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def excel_safe_value(value: Any) -> Any:
+    """防止 spreadsheet formula injection：对危险前缀文本加撇号转义。"""
+    if not isinstance(value, str) or not value:
+        return value
+    check = value.lstrip(" \t\r\n")
+    if check and check[0] in _FORMULA_PREFIXES:
+        return "'" + check
+    return value
+
 
 def generate_report_bytes(
     df: pd.DataFrame,
@@ -161,15 +173,15 @@ def generate_report(
 
 
 def _build_judgment_lookup(llm_judgments: dict) -> dict[str, Any]:
+    """仅纳入 status=confirmed；pending/rejected/fallback 不进样本主表。"""
     lookup: dict = {}
     for judgments in llm_judgments.values():
         for j in judgments:
-            if j.confirmed and j.voucher_id not in lookup:
+            status = getattr(j, "status", "")
+            if status != "confirmed":
+                continue
+            if j.voucher_id not in lookup or j.risk_level == "高":
                 lookup[j.voucher_id] = j
-            elif j.confirmed and j.voucher_id in lookup:
-                # 取风险级别更高的
-                if j.risk_level == "高":
-                    lookup[j.voucher_id] = j
     return lookup
 
 
@@ -366,7 +378,7 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
             )
 
             for col_idx, val in enumerate(values, 1):
-                cell = ws.cell(row=row_num, column=col_idx, value=val)
+                cell = ws.cell(row=row_num, column=col_idx, value=excel_safe_value(val))
                 cell.border = THIN_BORDER
                 cell.alignment = WRAP
                 if fill:
@@ -435,7 +447,7 @@ def _write_manual_final_sheet(wb, df, manual_final_samples):
                 row.get("用户名"),
             ]
             for col_idx, value in enumerate(values, 1):
-                cell = ws.cell(row=row_num, column=col_idx, value=value)
+                cell = ws.cell(row=row_num, column=col_idx, value=excel_safe_value(value))
                 cell.border = THIN_BORDER
                 cell.alignment = WRAP
                 cell.fill = MED_FILL
@@ -446,9 +458,11 @@ def _write_manual_final_sheet(wb, df, manual_final_samples):
 
 
 def _write_stats_sheet(wb, rule_results, llm_judgments):
+    from audit_engine.llm_verifier import JUDGMENT_CONFIRMED, confirmation_rate
+
     ws = wb.create_sheet("规则统计")
-    headers = ["规则名称", "命中凭证数", "LLM确认数", "确认率", "高风险", "中风险"]
-    widths = [22, 14, 14, 10, 10, 10]
+    headers = ["规则名称", "命中凭证数", "LLM确认数", "确认率", "待核验", "高风险", "中风险"]
+    widths = [22, 14, 14, 10, 10, 10, 10]
 
     for col_idx, (h, w) in enumerate(zip(headers, widths, strict=True), 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
@@ -458,7 +472,7 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
         cell.border = THIN_BORDER
         ws.column_dimensions[get_column_letter(col_idx)].width = w
 
-    total_hits = total_confirmed = total_high = total_med = 0
+    total_hits = total_confirmed = total_pending = total_high = total_med = 0
 
     for row_idx, rr in enumerate(rule_results, 2):
         voucher_count = len({
@@ -466,22 +480,36 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
             for h in rr.hits
         })
         judgments = llm_judgments.get(rr.rule_name, [])
-        confirmed = len(judgments)
-        high = sum(1 for j in judgments if j.risk_level == "高")
-        med = sum(1 for j in judgments if j.risk_level == "中")
-        rate = f"{confirmed / voucher_count:.0%}" if voucher_count > 0 else "N/A"
+        confirmed = sum(1 for j in judgments if getattr(j, "status", "") == JUDGMENT_CONFIRMED)
+        pending = sum(1 for j in judgments if getattr(j, "status", "") == "pending_review")
+        high = sum(
+            1 for j in judgments
+            if getattr(j, "status", "") == JUDGMENT_CONFIRMED and j.risk_level == "高"
+        )
+        med = sum(
+            1 for j in judgments
+            if getattr(j, "status", "") == JUDGMENT_CONFIRMED and j.risk_level == "中"
+        )
+        # 分母用模型已决数（确认+驳回），不用命中总体，避免把未核实混进确认率
+        rate_value = confirmation_rate(judgments)
+        rate = f"{rate_value:.0%}" if rate_value is not None else "N/A"
 
-        for col_idx, val in enumerate([rr.rule_name, voucher_count, confirmed, rate, high, med], 1):
-            ws.cell(row=row_idx, column=col_idx, value=val).border = THIN_BORDER
+        for col_idx, val in enumerate(
+            [rr.rule_name, voucher_count, confirmed, rate, pending, high, med], 1
+        ):
+            ws.cell(row=row_idx, column=col_idx, value=excel_safe_value(val)).border = THIN_BORDER
 
         total_hits += voucher_count
         total_confirmed += confirmed
+        total_pending += pending
         total_high += high
         total_med += med
 
     total_row = len(rule_results) + 2
     total_rate = f"{total_confirmed / total_hits:.0%}" if total_hits > 0 else "N/A"
-    for col_idx, val in enumerate(["合计", total_hits, total_confirmed, total_rate, total_high, total_med], 1):
+    for col_idx, val in enumerate(
+        ["合计", total_hits, total_confirmed, total_rate, total_pending, total_high, total_med], 1
+    ):
         cell = ws.cell(row=total_row, column=col_idx, value=val)
         cell.font = Font(bold=True)
         cell.border = THIN_BORDER
@@ -524,7 +552,7 @@ def _write_rules_sheet(wb, rule_results):
                 ],
                 1,
             ):
-                ws.cell(row=row_num, column=col_idx, value=val).border = THIN_BORDER
+                ws.cell(row=row_num, column=col_idx, value=excel_safe_value(val)).border = THIN_BORDER
             row_num += 1
 
     ws.freeze_panes = "A2"

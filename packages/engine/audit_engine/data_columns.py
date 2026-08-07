@@ -252,18 +252,87 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
             "message": "公司代码缺失的行使用显式占位符降级，无法区分同年度多主体同号凭证",
         })
 
+    currency_dist: dict[str, int] = {}
     if amount_col == "凭证货币价值" and "凭证货币代码" in df.columns:
         currencies = {
             str(value).strip().upper()
             for value in df.loc[amount_valid, "凭证货币代码"].dropna()
             if str(value).strip() and str(value).strip().lower() not in {"nan", "none"}
         }
+        currency_dist = (
+            df.loc[amount_valid, "凭证货币代码"]
+            .astype("string").fillna("").str.strip().str.upper()
+            .replace({"": "(空)", "NAN": "(空)", "NONE": "(空)"})
+            .value_counts()
+            .astype(int)
+            .to_dict()
+        )
         if len(currencies) > 1:
             issues.append({
                 "code": "mixed_document_currencies",
                 "severity": "blocking",
                 "message": f"检测到多种凭证币 {sorted(currencies)} 且未使用本位币金额，禁止合并规则分析",
             })
+
+    company_dist: dict[str, int] = {}
+    if "公司代码" in df.columns:
+        company_dist = (
+            _identity_text(df["公司代码"])
+            .replace({"": "(空)"})
+            .value_counts()
+            .astype(int)
+            .head(20)
+            .to_dict()
+        )
+        if len(company_dist) > 1 and "(空)" in company_dist:
+            issues.append({
+                "code": "multi_company_incomplete_codes",
+                "severity": "warning",
+                "message": "多公司代码并存且存在空公司代码，金额/凭证唯一性可能失真",
+            })
+
+    # 借贷平衡粗检：按凭证汇总有符号金额，显著不平衡的凭证占比
+    unbalanced_vouchers = 0
+    voucher_count = int(voucher[voucher.ne("")].nunique()) if voucher.ne("").any() else 0
+    if amount_col and "借/贷标识" in df.columns and voucher_count > 0:
+        try:
+            signed = normalize_signed_amount(df[amount_col], df["借/贷标识"], voucher)
+            balance = pd.DataFrame({"v": voucher, "amt": signed}).groupby("v", sort=False)["amt"].sum()
+            unbalanced_vouchers = int((balance.abs() > 0.01).sum())
+            unbalanced_rate = unbalanced_vouchers / max(len(balance), 1)
+            if unbalanced_rate > 0.05:
+                issues.append({
+                    "code": "voucher_unbalanced",
+                    "severity": "warning",
+                    "message": (
+                        f"{unbalanced_vouchers} 张凭证借贷不平衡"
+                        f"（{unbalanced_rate:.1%}），请核对金额符号/借贷标识"
+                    ),
+                    "row_count": unbalanced_vouchers,
+                })
+        except Exception:
+            pass
+
+    # 来源文件字段完整率（多文件异构映射风险）
+    source_file_coverage: dict[str, Any] = {}
+    if "_source_file" in df.columns and amount_col:
+        for src_file, grp in df.groupby("_source_file", dropna=False):
+            amt_ok = int(pd.to_numeric(grp[amount_col], errors="coerce").notna().sum())
+            source_file_coverage[str(src_file or "(unknown)")] = {
+                "rows": int(len(grp)),
+                "amount_non_null": amt_ok,
+                "amount_fill_rate": round(amt_ok / max(len(grp), 1), 4),
+            }
+            if len(grp) > 0 and amt_ok / len(grp) < 0.5:
+                issues.append({
+                    "code": "source_file_amount_gap",
+                    "severity": "blocking",
+                    "message": (
+                        f"来源文件 {src_file} 金额可用率仅 {amt_ok / len(grp):.0%}，"
+                        f"疑似列映射静默漏数"
+                    ),
+                    "row_count": int(len(grp) - amt_ok),
+                })
 
     usable = masks["voucher"] & masks["year"] & masks["dc"] & masks["amount"]
     usable &= masks["posting_date"] & masks["account"]
@@ -273,7 +342,12 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
         "status": status,
         "row_count": total,
         "usable_rows": int(usable.sum()),
+        "voucher_count": voucher_count,
         "amount_column": amount_col,
+        "currency_distribution": currency_dist,
+        "company_distribution": company_dist,
+        "unbalanced_vouchers": unbalanced_vouchers,
+        "source_file_coverage": source_file_coverage,
         "issues": issues,
     }
 

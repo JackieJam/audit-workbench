@@ -735,12 +735,19 @@ class AnalysisPipeline:
         model: str,
         base_url: str,
         max_verify: int = 50,
+        redaction: str | None = None,
     ) -> dict[str, Any]:
         from audit_engine.llm_verifier import (
+            RedactionMode,
+            describe_llm_verify_boundary,
             judgments_to_state,
             summarize_judgments,
             verify_with_llm,
         )
+
+        mode: RedactionMode | None = None
+        if redaction in {"none", "pseudonym"}:
+            mode = redaction  # type: ignore[assignment]
 
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
@@ -771,8 +778,13 @@ class AnalysisPipeline:
                 latest["llm_judgments"] = {}
                 return latest
 
+            boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
             self._store.update_state(project_id, clear)
-            return {"summary": summarize_judgments({}), "judgments": {}}
+            return {
+                "summary": summarize_judgments({}),
+                "judgments": {},
+                "data_boundary": boundary,
+            }
 
         judgments = verify_with_llm(
             unified,
@@ -781,13 +793,20 @@ class AnalysisPipeline:
             model=model,
             base_url=base_url,
             max_verify=max_verify,
+            redaction=mode,
         )
         serialized = judgments_to_state(judgments)
+        boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
 
         def update(latest: dict[str, Any]) -> dict[str, Any]:
             _assert_analysis_token(latest, expected_token)
             latest["llm_judgments"] = serialized
+            latest["llm_verify_boundary"] = boundary
             return latest
 
         self._store.update_state(project_id, update)
-        return {"summary": summarize_judgments(judgments), "judgments": serialized}
+        return {
+            "summary": summarize_judgments(judgments),
+            "judgments": serialized,
+            "data_boundary": boundary,
+        }

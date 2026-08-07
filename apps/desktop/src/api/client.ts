@@ -52,12 +52,20 @@ export type ProjectSummary = {
   updated_at: string;
 };
 
+export type FileDetection = {
+  file_label: string;
+  source_columns: string[];
+  suggested_mapping: Record<string, string>;
+  mapping_matches: Record<string, { source: string; score: number; method: string }>;
+};
+
 export type DetectResponse = {
   file_label: string;
   source_columns: string[];
   suggested_mapping: Record<string, string>;
   mapping_matches: Record<string, { source: string; score: number; method: string }>;
   sample_rows: Record<string, unknown>[];
+  per_file?: FileDetection[];
 };
 
 export type YearSummary = {
@@ -259,6 +267,16 @@ export type LlmModelsResponse = {
   source: string;
   count: number;
   warning?: string;
+};
+
+export type LlmEndpointAllowlist = {
+  enabled: boolean;
+  hosts: string[];
+  allow_all: boolean;
+  source: "env" | "file" | "default" | string;
+  seed_hosts: string[];
+  env_overrides_file: boolean;
+  updated_at?: string;
 };
 
 export type InsightStage = { id: string; label: string; percent: number };
@@ -1174,27 +1192,46 @@ export const api = {
       summary: {
         total: number;
         confirmed: number;
+        rejected?: number;
+        pending_review?: number;
         high: number;
         medium: number;
         fallback: number;
+        confirmation_rate?: number | null;
         rules: number;
       };
       has_judgments: boolean;
     }>(`/projects/${projectId}/pipeline/verify`),
   runVerify: (
     projectId: string,
-    body?: { profile_id?: string; api_key?: string; max_verify?: number },
+    body?: {
+      profile_id?: string;
+      api_key?: string;
+      max_verify?: number;
+      redaction?: "none" | "pseudonym";
+    },
   ) =>
     request<{
       summary: {
         total: number;
         confirmed: number;
+        rejected?: number;
+        pending_review?: number;
         high: number;
         medium: number;
         fallback: number;
+        confirmation_rate?: number | null;
         rules: number;
       };
       judgments: Record<string, unknown[]>;
+      data_boundary?: {
+        endpoint: string;
+        model: string;
+        fields: string[];
+        redaction: string;
+        redaction_note?: string;
+        warning: string;
+      };
     }>(`/projects/${projectId}/pipeline/verify`, {
       method: "POST",
       body: JSON.stringify(body ?? {}),
@@ -1293,7 +1330,20 @@ export const api = {
       base_url: string;
       key_configured: boolean;
       key_source: string;
+      endpoint_allowed?: boolean;
+      endpoint_host?: string;
     }>(`/llm/active${profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""}`),
+
+  getLlmEndpointAllowlist: () => request<LlmEndpointAllowlist>("/llm/endpoint-allowlist"),
+  saveLlmEndpointAllowlist: (body: {
+    enabled: boolean;
+    hosts: string[];
+    allow_all: boolean;
+  }) =>
+    request<LlmEndpointAllowlist>("/llm/endpoint-allowlist", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   exportExcelUrl: (projectId: string) =>
     `${resolveApiBase()}/projects/${projectId}/pipeline/export`,

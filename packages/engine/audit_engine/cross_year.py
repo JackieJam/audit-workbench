@@ -20,7 +20,12 @@ from audit_engine.account_classifier import (
     CAT_TAX_SURCHARGE,
 )
 from audit_engine.config.accounts import AUTO_VOUCHER_TYPES
-from audit_engine.data_columns import VOUCHER_KEY_COLUMN, ensure_category, ensure_voucher_identity
+from audit_engine.data_columns import (
+    VOUCHER_KEY_COLUMN,
+    ensure_category,
+    ensure_voucher_identity,
+    normalize_signed_amount,
+)
 
 
 @dataclass
@@ -60,7 +65,7 @@ _CROSS_YEAR_DETECTION_DEFAULTS: dict[str, float] = {
     "accrual_min_amount": 10_000.0,               # 预提金额下限，低于则忽略
     "accrual_mismatch_tolerance": 0.05,           # 冲回金额不符容差（|coverage-1|）
     "accrual_high_severity_amount": 1_000_000.0,  # 悬空金额高危分级线
-    "balance_buildup_growth_ratio": 1.5,          # 期末余额逐年累积的增幅倍数
+    "balance_buildup_growth_ratio": 1.5,          # 应收累计净发生逐年累积的增幅倍数
     "circular_large_amount": 500_000.0,           # 对手方资金循环单笔大额线
     "circular_match_ratio": 0.7,                  # 进出金额匹配度
     "circular_max_vouchers": 15.0,                # 单对手方最多保留凭证数
@@ -158,8 +163,120 @@ def run_cross_year_analysis(
 
 
 # ─────────────────────────────────────────────
-# 1. 预提-冲回跨年配对
+# 1. 预提-冲回跨年配对（逐笔匹配，非总额覆盖）
 # ─────────────────────────────────────────────
+
+def _party_key(row: pd.Series) -> str:
+    for col in ("供应商编号", "客户", "成本中心"):
+        if col not in row.index:
+            continue
+        value = row.get(col)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"nan", "none", "未维护", "0"}:
+            return f"{col}:{text}"
+    return ""
+
+
+def _match_accrual_reversals(
+    accruals: pd.DataFrame,
+    reversals: pd.DataFrame,
+    *,
+    amount_tolerance: float,
+) -> tuple[list[dict[str, Any]], pd.DataFrame]:
+    """一对一贪心配对：科目前缀 + 对手方 + 相反借贷 + 金额容差。
+
+    返回 (pairs, unmatched_accruals)。无关冲回不会“覆盖”未匹配预提。
+    """
+    if accruals.empty:
+        return [], accruals.copy()
+
+    work_rev = reversals.copy()
+    if work_rev.empty:
+        return [], accruals.copy()
+
+    def _acct4(frame: pd.DataFrame) -> pd.Series:
+        if "总账科目" in frame.columns:
+            return frame["总账科目"].astype(str).str[:4]
+        return pd.Series("", index=frame.index, dtype="string")
+
+    def _dc(frame: pd.DataFrame) -> pd.Series:
+        if "借/贷标识" in frame.columns:
+            return frame["借/贷标识"].astype(str).str.strip()
+        return pd.Series("", index=frame.index, dtype="string")
+
+    work_rev["_match_amt"] = _amount_abs(work_rev).fillna(0)
+    work_rev["_match_date"] = pd.to_datetime(work_rev["过账日期"], errors="coerce")
+    work_rev["_acct4"] = _acct4(work_rev)
+    work_rev["_party"] = work_rev.apply(_party_key, axis=1)
+    work_rev["_dc"] = _dc(work_rev)
+    used: set[Any] = set()
+    pairs: list[dict[str, Any]] = []
+    unmatched_idx: list[Any] = []
+
+    ordered = accruals.assign(
+        _match_amt=_amount_abs(accruals).fillna(0),
+        _match_date=pd.to_datetime(accruals["过账日期"], errors="coerce"),
+        _acct4=_acct4(accruals),
+        _party=accruals.apply(_party_key, axis=1),
+        _dc=_dc(accruals),
+    ).sort_values("_match_amt", ascending=False)
+
+    for idx, accrual in ordered.iterrows():
+        amt = float(accrual["_match_amt"])
+        if amt <= 0:
+            unmatched_idx.append(idx)
+            continue
+        accrual_dc = str(accrual["_dc"])
+        opposite = "H" if accrual_dc == "S" else "S"
+        available = work_rev.loc[~work_rev.index.isin(used)].copy()
+        candidates = available[available["_acct4"].eq(str(accrual["_acct4"]))].copy()
+        if accrual_dc in {"S", "H"}:
+            candidates = candidates[
+                candidates["_dc"].eq(opposite) | candidates["_dc"].eq("")
+            ]
+        if candidates.empty:
+            unmatched_idx.append(idx)
+            continue
+        # 先按金额容差过滤，再优先同对手方——避免「同对手方错误金额」挡住正确配对，
+        # 也避免「不同对手方同金额」把无关冲回当成覆盖。
+        candidates = candidates.assign(
+            _tol=(candidates["_match_amt"] - amt).abs() / amt
+        )
+        amount_ok = candidates[candidates["_tol"].le(amount_tolerance)]
+        if amount_ok.empty:
+            unmatched_idx.append(idx)
+            continue
+
+        accrual_party = str(accrual["_party"])
+        if accrual_party:
+            same_party = amount_ok[amount_ok["_party"].eq(accrual_party)]
+            if same_party.empty:
+                # 预提有明确对手方时，不允许用其他对手方冲回“顶替”
+                unmatched_idx.append(idx)
+                continue
+            pool = same_party
+        else:
+            pool = amount_ok
+
+        best = pool.sort_values(["_tol", "_match_date"]).iloc[0]
+        used.add(best.name)
+        pairs.append({
+            "accrual_voucher": str(accrual.get("凭证编号", "")),
+            "accrual_key": str(accrual.get(VOUCHER_KEY_COLUMN, accrual.get("凭证编号", ""))),
+            "reversal_voucher": str(best.get("凭证编号", "")),
+            "reversal_key": str(best.get(VOUCHER_KEY_COLUMN, best.get("凭证编号", ""))),
+            "accrual_amount": round(amt, 2),
+            "reversal_amount": round(float(best["_match_amt"]), 2),
+            "tolerance": round(float(best["_tol"]), 4),
+            "account_prefix": str(accrual["_acct4"]),
+            "party": accrual_party,
+        })
+
+    unmatched = accruals.loc[[i for i in unmatched_idx if i in accruals.index]].copy()
+    return pairs, unmatched
+
 
 def _accrual_reversal_pairs(
     year_map: dict[int, pd.DataFrame],
@@ -172,6 +289,8 @@ def _accrual_reversal_pairs(
     year_map = {year: ensure_voucher_identity(df) for year, df in year_map.items()}
     findings = []
     years = sorted(year_map.keys())
+    # 金额容差：沿用 mismatch_tolerance（默认 5%），避免无关冲回“总额冲销”掩盖悬空预提
+    amount_tolerance = max(float(mismatch_tolerance), 0.01)
 
     for i in range(len(years) - 1):
         yr_n, yr_n1 = years[i], years[i + 1]
@@ -179,11 +298,13 @@ def _accrual_reversal_pairs(
         df_n1 = year_map[yr_n1]
 
         # 年末预提：12月，文本含"预提"，非冲销
+        text_n = df_n["文本"].astype(str) if "文本" in df_n.columns else pd.Series("", index=df_n.index)
         dec_accruals = df_n[
             (df_n["过账日期"].dt.month == 12)
-            & df_n["文本"].str.contains("预提", na=False)
-            & ~df_n["文本"].str.contains("冲销|冲回|红字", na=False)
+            & text_n.str.contains("预提", na=False, regex=False)
+            & ~text_n.str.contains("冲销|冲回|红字", na=False, regex=True)
         ].copy()
+        dec_accruals = dec_accruals[_amount_abs(dec_accruals).fillna(0).ge(min_amount)]
 
         if dec_accruals.empty:
             continue
@@ -193,51 +314,82 @@ def _accrual_reversal_pairs(
         window_end = window_start + pd.Timedelta(days=window_days - 1)
         window_label = f"{yr_n1}年1月1日起{window_days}天内"
 
-        # 次年指定窗口内冲回：文本含"冲销"或"冲回"
+        text_n1 = df_n1["文本"].astype(str) if "文本" in df_n1.columns else pd.Series("", index=df_n1.index)
         reversals = df_n1[
             (df_n1["过账日期"] >= window_start)
             & (df_n1["过账日期"] <= window_end)
-            & df_n1["文本"].str.contains("冲销|冲回|红字", na=False)
+            & text_n1.str.contains("冲销|冲回|红字", na=False, regex=True)
         ].copy()
 
-        total_accrual = _amount_abs(dec_accruals).sum()
-        total_reversal = _amount_abs(reversals).sum() if not reversals.empty else 0.0
+        pairs, unmatched = _match_accrual_reversals(
+            dec_accruals, reversals, amount_tolerance=amount_tolerance,
+        )
+        total_accrual = float(_amount_abs(dec_accruals).sum())
+        matched_amount = float(sum(p["accrual_amount"] for p in pairs))
+        unmatched_amount = float(_amount_abs(unmatched).sum()) if not unmatched.empty else 0.0
+        coverage = matched_amount / total_accrual if total_accrual > 0 else 0.0
 
         if total_accrual < min_amount:
             continue
 
-        coverage = total_reversal / total_accrual if total_accrual > 0 else 0
-        unmatched = total_accrual - total_reversal
+        pair_sample = pairs[:8]
+        unmatched_vids = (
+            unmatched["凭证编号"].astype(str).unique().tolist()
+            if not unmatched.empty and "凭证编号" in unmatched.columns
+            else []
+        )
+        unmatched_keys = (
+            unmatched[VOUCHER_KEY_COLUMN].astype(str).unique().tolist()
+            if not unmatched.empty and VOUCHER_KEY_COLUMN in unmatched.columns
+            else []
+        )
 
-        # 悬空预提（冲回覆盖率低于阈值）
+        # 悬空预提：逐笔未匹配金额占比过高
         if coverage < coverage_threshold:
             findings.append(CrossYearFinding(
                 category="预提冲回配对",
-                description=f"{yr_n}年末预提{total_accrual:,.0f}，{window_label}仅冲回{total_reversal:,.0f}（{coverage:.0%}），悬空{unmatched:,.0f}",
+                description=(
+                    f"{yr_n}年末预提{total_accrual:,.0f}（{len(dec_accruals)}笔），"
+                    f"{window_label}逐笔配对冲回{matched_amount:,.0f}（{len(pairs)}笔，覆盖{coverage:.0%}），"
+                    f"未匹配悬空{unmatched_amount:,.0f}（{len(unmatched)}笔）"
+                ),
                 years_involved=[yr_n, yr_n1],
-                voucher_ids=dec_accruals["凭证编号"].unique().tolist(),
-                voucher_keys=dec_accruals[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
-                amount=unmatched,
-                severity="高" if unmatched > high_severity_amount else "中",
+                voucher_ids=unmatched_vids or dec_accruals["凭证编号"].astype(str).unique().tolist(),
+                voucher_keys=unmatched_keys or dec_accruals[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
+                amount=unmatched_amount,
+                severity="高" if unmatched_amount > high_severity_amount else "中",
                 evidence={
                     "accrual_amount": round(total_accrual, 2),
-                    "reversal_amount": round(total_reversal, 2),
+                    "matched_amount": round(matched_amount, 2),
+                    "unmatched_amount": round(unmatched_amount, 2),
                     "coverage_ratio": round(coverage, 4),
-                    "threshold_used": coverage_threshold,  # 审计留痕：实际生效阈值
+                    "matched_pairs": len(pairs),
+                    "unmatched_accruals": len(unmatched),
+                    "pair_sample": pair_sample,
+                    "threshold_used": coverage_threshold,
                     "match_window_days": window_days,
+                    "amount_tolerance": amount_tolerance,
+                    "pairing_mode": "voucher_level",
                 },
             ))
-        # 金额不等的冲回（调节利润）
-        elif abs(coverage - 1.0) > mismatch_tolerance:
+        elif abs(coverage - 1.0) > mismatch_tolerance and unmatched_amount > 0:
             findings.append(CrossYearFinding(
                 category="预提冲回金额不符",
-                description=f"{yr_n}年末预提与{window_label}冲回金额差异{abs(coverage-1):.0%}，疑似调节跨年损益",
+                description=(
+                    f"{yr_n}年末预提与{window_label}逐笔配对后覆盖率{coverage:.0%}，"
+                    f"未匹配{unmatched_amount:,.0f}，疑似调节跨年损益"
+                ),
                 years_involved=[yr_n, yr_n1],
-                voucher_ids=dec_accruals["凭证编号"].unique().tolist(),
-                voucher_keys=dec_accruals[VOUCHER_KEY_COLUMN].astype(str).unique().tolist(),
-                amount=abs(total_accrual - total_reversal),
+                voucher_ids=unmatched_vids,
+                voucher_keys=unmatched_keys,
+                amount=unmatched_amount,
                 severity="中",
-                evidence={"coverage_ratio": round(coverage, 4), "match_window_days": window_days},
+                evidence={
+                    "coverage_ratio": round(coverage, 4),
+                    "match_window_days": window_days,
+                    "pair_sample": pair_sample,
+                    "pairing_mode": "voucher_level",
+                },
             ))
 
     return findings
@@ -305,7 +457,7 @@ def _revenue_timing_drift(
 
 
 # ─────────────────────────────────────────────
-# 3. 期末余额异常堆积（应收/预付/其他应收）
+# 3. 应收累计净发生持续累积（无期初时的近似期末余额）
 # ─────────────────────────────────────────────
 
 def _yearend_balance_buildup(
@@ -313,7 +465,8 @@ def _yearend_balance_buildup(
     growth_ratio: float = _CROSS_YEAR_DETECTION_DEFAULTS["balance_buildup_growth_ratio"],
 ) -> list[CrossYearFinding]:
     findings = []
-    # 跟踪应收类科目的期末余额异常堆积。命中分类 = 自动从科目名称识别。
+    # 序时账无期初余额：用「截至该年末的累计净发生额」近似期末余额。
+    # 严禁把 12 月绝对发生额当成余额——借贷对冲后净额可能接近 0。
     watch_categories = {
         "应收账款": CAT_AR,
         "其他应收": CAT_OTHER_RECEIVABLE,
@@ -321,34 +474,79 @@ def _yearend_balance_buildup(
 
     for acct_name, category in watch_categories.items():
         year_end_balances: dict[int, float] = {}
-        year_avg_balances: dict[int, float] = {}
+        active_years: list[int] = []
+        cumulative = 0.0
 
-        for yr, df in year_map.items():
-            df = ensure_category(df)
+        for yr in sorted(year_map.keys()):
+            raw = year_map[yr]
+            if raw is None or raw.empty:
+                year_end_balances[yr] = cumulative
+                continue
+            df = ensure_category(raw)
             acct_rows = df[df["_acct_category"].eq(category)]
             if acct_rows.empty:
+                year_end_balances[yr] = cumulative
                 continue
-            dec_rows = acct_rows[acct_rows["过账日期"].dt.month == 12]
-            year_end_balances[yr] = float(_amount_abs(dec_rows).sum())
-            year_avg_balances[yr] = float(_amount_abs(acct_rows).sum() / 12)
 
-        if len(year_end_balances) < 2:
+            # 优先用已标准化的有符号金额，避免对 _amount_raw 再次做借贷归一化导致双重取反
+            if "_amount_raw" in acct_rows.columns and pd.to_numeric(
+                acct_rows["_amount_raw"], errors="coerce"
+            ).notna().any():
+                year_net = float(
+                    pd.to_numeric(acct_rows["_amount_raw"], errors="coerce").fillna(0).sum()
+                )
+            else:
+                if "公司代码货币价值" in acct_rows.columns and pd.to_numeric(
+                    acct_rows["公司代码货币价值"], errors="coerce"
+                ).notna().any():
+                    amount_col = "公司代码货币价值"
+                elif "凭证货币价值" in acct_rows.columns:
+                    amount_col = "凭证货币价值"
+                else:
+                    year_end_balances[yr] = cumulative
+                    continue
+
+                if "借/贷标识" in acct_rows.columns:
+                    year_net = float(
+                        normalize_signed_amount(
+                            acct_rows[amount_col],
+                            acct_rows["借/贷标识"],
+                            acct_rows["凭证编号"] if "凭证编号" in acct_rows.columns else None,
+                        ).sum()
+                    )
+                else:
+                    year_net = float(
+                        pd.to_numeric(acct_rows[amount_col], errors="coerce").fillna(0).sum()
+                    )
+            cumulative += year_net
+            year_end_balances[yr] = cumulative
+            active_years.append(yr)
+
+        if len(active_years) < 2:
             continue
 
-        # 检测余额逐年递增
         bal_list = [(yr, year_end_balances[yr]) for yr in sorted(year_end_balances.keys())]
-        if all(bal_list[i][1] < bal_list[i+1][1] for i in range(len(bal_list)-1)):
+        if all(bal_list[i][1] < bal_list[i + 1][1] for i in range(len(bal_list) - 1)):
             last_yr, last_bal = bal_list[-1]
             first_yr, first_bal = bal_list[0]
             if first_bal > 0 and last_bal / first_bal > growth_ratio:
                 findings.append(CrossYearFinding(
-                    category="期末余额持续累积",
-                    description=f"{acct_name}年末余额从{first_yr}到{last_yr}持续增长，累计增幅{last_bal/first_bal:.1f}x，疑似虚增资产或收入造假积累",
+                    category="应收累计净发生持续累积",
+                    description=(
+                        f"{acct_name}累计净发生额（无科目余额表期初时的近似期末余额）"
+                        f"从{first_yr}到{last_yr}持续增长，累计增幅{last_bal / first_bal:.1f}x，"
+                        f"疑似虚增资产或收入造假积累。"
+                        f"注意：此指标不是12月发生额，也不是真正期末余额。"
+                    ),
                     years_involved=list(year_end_balances.keys()),
                     voucher_ids=[],
                     amount=last_bal - first_bal,
                     severity="中",
-                    evidence={yr: round(b, 2) for yr, b in bal_list},
+                    evidence={
+                        **{yr: round(b, 2) for yr, b in bal_list},
+                        "metric": "cumulative_net_occurrence",
+                        "opening_balance_available": False,
+                    },
                 ))
 
     return findings
@@ -510,11 +708,25 @@ def _manual_entry_trend(
     findings = []
 
     year_ratios: dict[int, float] = {}
+    year_row_ratios: dict[int, float] = {}
     for yr, df in year_map.items():
         if "凭证类型" not in df.columns or df.empty:
             continue
-        manual = (~df["凭证类型"].isin(AUTO_VOUCHER_TYPES)).sum()
-        year_ratios[yr] = round(manual / len(df), 4)
+        # 口径：按凭证数占比（不是行数）。一行多行分录不能当成多笔交易。
+        if "凭证编号" in df.columns:
+            voucher_types = (
+                df.groupby("凭证编号", sort=False)["凭证类型"]
+                .agg(lambda s: str(s.iloc[0]))
+            )
+            if voucher_types.empty:
+                continue
+            manual_vouchers = (~voucher_types.isin(AUTO_VOUCHER_TYPES)).sum()
+            year_ratios[yr] = round(float(manual_vouchers / len(voucher_types)), 4)
+        else:
+            manual = (~df["凭证类型"].isin(AUTO_VOUCHER_TYPES)).sum()
+            year_ratios[yr] = round(manual / len(df), 4)
+        manual_rows = (~df["凭证类型"].isin(AUTO_VOUCHER_TYPES)).sum()
+        year_row_ratios[yr] = round(float(manual_rows / len(df)), 4)
 
     if len(year_ratios) < 2:
         return findings
@@ -526,12 +738,19 @@ def _manual_entry_trend(
         if delta > delta_threshold:
             findings.append(CrossYearFinding(
                 category="手工凭证占比持续上升",
-                description=f"手工凭证占比从{ratios[0][0]}年的{ratios[0][1]:.1%}逐年上升至{ratios[-1][0]}年的{ratios[-1][1]:.1%}，内控可能在弱化",
+                description=(
+                    f"手工凭证数占比从{ratios[0][0]}年的{ratios[0][1]:.1%}"
+                    f"逐年上升至{ratios[-1][0]}年的{ratios[-1][1]:.1%}，内控可能在弱化"
+                ),
                 years_involved=[r[0] for r in ratios],
                 voucher_ids=[],
                 amount=0,
                 severity="中",
-                evidence={str(yr): round(r, 4) for yr, r in ratios},
+                evidence={
+                    **{str(yr): round(r, 4) for yr, r in ratios},
+                    "basis": "voucher_count",
+                    "row_ratios": {str(yr): year_row_ratios.get(yr) for yr, _ in ratios},
+                },
             ))
 
     return findings

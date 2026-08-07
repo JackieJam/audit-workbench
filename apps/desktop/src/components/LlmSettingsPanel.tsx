@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type LlmPreset, type LlmProfile } from "@/api/client";
 import { useLlm } from "@/context/LlmContext";
 
@@ -11,7 +11,19 @@ const EMPTY_FORM = {
   set_default: true,
 };
 
+function hostFromUrl(value: string): string {
+  const text = value.trim();
+  if (!text) return "";
+  try {
+    const withScheme = text.includes("://") ? text : `https://${text}`;
+    return (new URL(withScheme).hostname || "").toLowerCase();
+  } catch {
+    return text.toLowerCase();
+  }
+}
+
 export function LlmSettingsPanel() {
+  const queryClient = useQueryClient();
   const { profiles, selectedProfileId, setSelectedProfileId, refreshProfiles, secretBackend } = useLlm();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -19,8 +31,23 @@ export function LlmSettingsPanel() {
   const [models, setModels] = useState<string[]>([]);
   const [modelsWarning, setModelsWarning] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
+  const [allowHostsText, setAllowHostsText] = useState("");
+  const [allowEnabled, setAllowEnabled] = useState(false);
+  const [allowAll, setAllowAll] = useState(false);
 
   const presetsQ = useQuery({ queryKey: ["llm-presets"], queryFn: api.getLlmPresets });
+  const allowlistQ = useQuery({
+    queryKey: ["llm-endpoint-allowlist"],
+    queryFn: api.getLlmEndpointAllowlist,
+  });
+
+  useEffect(() => {
+    const data = allowlistQ.data;
+    if (!data) return;
+    setAllowEnabled(!!data.enabled);
+    setAllowAll(!!data.allow_all);
+    setAllowHostsText((data.hosts ?? []).join("\n"));
+  }, [allowlistQ.data]);
 
   const activeProfile = useMemo(
     () => profiles.find((p) => p.profile_id === editingId) ?? null,
@@ -126,6 +153,30 @@ export function LlmSettingsPanel() {
     onError: (err) => setStatusMsg(String(err)),
   });
 
+  const saveAllowlist = useMutation({
+    mutationFn: () => {
+      const hosts = allowHostsText
+        .split(/[\n,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return api.saveLlmEndpointAllowlist({
+        enabled: allowEnabled,
+        allow_all: allowAll,
+        hosts,
+      });
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["llm-endpoint-allowlist"], data);
+      setStatusMsg(
+        data.enabled
+          ? data.allow_all
+            ? "白名单已保存：允许全部 endpoint"
+            : `白名单已保存：${data.hosts.length} 个 host`
+          : "白名单已关闭（不强制拦截）",
+      );
+    },
+  });
+
   const applyPreset = (preset: LlmPreset) => {
     if (!preset.base_url) return;
     setForm((f) => ({
@@ -135,7 +186,48 @@ export function LlmSettingsPanel() {
     }));
   };
 
+  const seedAllowlistHosts = () => {
+    const seeds = allowlistQ.data?.seed_hosts ?? [];
+    const current = new Set(
+      allowHostsText
+        .split(/[\n,]/)
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    for (const host of seeds) current.add(host);
+    setAllowHostsText([...current].join("\n"));
+    setAllowEnabled(true);
+    setAllowAll(false);
+  };
+
+  const addCurrentBaseUrlHost = () => {
+    const host = hostFromUrl(form.base_url);
+    if (!host) return;
+    const lines = allowHostsText
+      .split(/[\n,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!lines.map((h) => h.toLowerCase()).includes(host)) {
+      setAllowHostsText([...lines, host].join("\n"));
+    }
+    setAllowEnabled(true);
+    setAllowAll(false);
+  };
+
   const presets = presetsQ.data?.presets ?? [];
+  const allowlist = allowlistQ.data;
+  const envLocked = !!allowlist?.env_overrides_file;
+  const currentHost = hostFromUrl(form.base_url);
+  const hostAllowed =
+    !allowEnabled ||
+    allowAll ||
+    (currentHost
+      ? allowHostsText
+          .split(/[\n,]/)
+          .map((item) => item.trim().toLowerCase())
+          .filter(Boolean)
+          .includes(currentHost)
+      : false);
 
   return (
     <div className="llm-settings">
@@ -150,6 +242,83 @@ export function LlmSettingsPanel() {
           新建方案
         </button>
       </header>
+
+      <section className="llm-allowlist">
+        <div className="llm-allowlist__head">
+          <div>
+            <h3>Endpoint 白名单</h3>
+            <p className="muted">
+              启用后，保存方案 / 拉取模型 / 测试连接 / 凭证核实只会访问列表中的 host。
+              {envLocked
+                ? " 当前由环境变量 AUDIT_WORKBENCH_LLM_ENDPOINT_ALLOWLIST 接管，UI 只读。"
+                : " 未启用时不强制拦截（兼容本地开发）。"}
+            </p>
+          </div>
+          <span className="llm-badge">
+            来源：{allowlist?.source ?? "…"}
+            {allowlist?.enabled ? (allowlist.allow_all ? " · 全放行" : " · 已启用") : " · 未启用"}
+          </span>
+        </div>
+
+        <div className="llm-allowlist__controls">
+          <label className="llm-checkbox">
+            <input
+              type="checkbox"
+              checked={allowEnabled}
+              disabled={envLocked}
+              onChange={(e) => setAllowEnabled(e.target.checked)}
+            />
+            启用白名单强制校验
+          </label>
+          <label className="llm-checkbox">
+            <input
+              type="checkbox"
+              checked={allowAll}
+              disabled={envLocked || !allowEnabled}
+              onChange={(e) => setAllowAll(e.target.checked)}
+            />
+            允许全部 endpoint（等同 *）
+          </label>
+        </div>
+
+        <label>
+          允许的 Host（每行一个，或逗号分隔）
+          <textarea
+            className="llm-allowlist__textarea"
+            value={allowHostsText}
+            disabled={envLocked || allowAll}
+            onChange={(e) => setAllowHostsText(e.target.value)}
+            rows={5}
+            placeholder={"api.deepseek.com\napi.openai.com\nlocalhost"}
+          />
+        </label>
+
+        <div className="llm-form__actions">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={envLocked || saveAllowlist.isPending}
+            onClick={() => saveAllowlist.mutate()}
+          >
+            {saveAllowlist.isPending ? "保存中…" : "保存白名单"}
+          </button>
+          <button type="button" className="btn-ghost" disabled={envLocked} onClick={seedAllowlistHosts}>
+            填入预设 Host
+          </button>
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={envLocked || !currentHost}
+            onClick={addCurrentBaseUrlHost}
+          >
+            加入当前 Base URL
+          </button>
+        </div>
+        {saveAllowlist.isError && <p className="error">{String(saveAllowlist.error)}</p>}
+        {allowEnabled && !allowAll && editingId && !hostAllowed && (
+          <p className="error">当前 Base URL 的 host「{currentHost || "空"}」不在白名单中，保存/连接将被拒绝。</p>
+        )}
+      </section>
 
       <div className="llm-settings__body">
         <aside className="llm-profile-list">

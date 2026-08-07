@@ -106,7 +106,7 @@ export const PARAM_LABELS: Record<string, string> = {
   accrual_min_amount: "预提金额下限",
   accrual_mismatch_tolerance: "预提不符容差",
   accrual_high_severity_amount: "悬空高危金额",
-  balance_buildup_growth_ratio: "余额累积倍率",
+  balance_buildup_growth_ratio: "累计净发生累积倍率",
   circular_large_amount: "资金循环单笔门槛",
   circular_match_ratio: "资金循环匹配度",
   circular_max_vouchers: "资金循环凭证上限",
