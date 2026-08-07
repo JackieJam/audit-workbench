@@ -167,6 +167,7 @@ export function SamplingPage({ project }: Props) {
     onSuccess: (data, plan) => {
       setLastSubmittedPlan(data.requested_plan ?? plan);
       queryClient.setQueryData(["samples", project?.project_id], data);
+      queryClient.invalidateQueries({ queryKey: ["verify-status", project?.project_id] });
     },
   });
 
@@ -179,16 +180,18 @@ export function SamplingPage({ project }: Props) {
     plaintext_fields?: string[];
     pseudonym_fields?: string[];
     policy_version?: string;
+    boundary_hash?: string;
     warning: string;
   } | null>(null);
   const [boundaryLoading, setBoundaryLoading] = useState(false);
   const [boundaryError, setBoundaryError] = useState<string | null>(null);
+  const [pendingBoundaryHash, setPendingBoundaryHash] = useState<string | null>(null);
 
-  const consentKey = (endpoint: string, policyVersion: string) =>
-    `audit-llm-boundary-consent:${endpoint}|${policyVersion}`;
+  const consentKey = (endpoint: string, policyVersion: string, boundaryHash: string) =>
+    `audit-llm-boundary-consent:${endpoint}|${policyVersion}|${boundaryHash}`;
 
   const runVerify = useMutation({
-    mutationFn: () => {
+    mutationFn: (opts?: { boundary_hash?: string }) => {
       const sampleCount =
         (extract.data ?? samples.data)?.samples?.length
         ?? (extract.data ?? samples.data)?.voucher_count
@@ -199,14 +202,15 @@ export function SamplingPage({ project }: Props) {
         redaction: "pseudonym",
         confirm_data_boundary: true,
         verification_scope: "current_sample",
+        boundary_hash: opts?.boundary_hash || pendingBoundaryHash || undefined,
       });
     },
     onSuccess: (data) => {
       const boundary = data.data_boundary;
-      if (boundary?.endpoint && boundary.policy_version) {
+      if (boundary?.endpoint && boundary.policy_version && boundary.boundary_hash) {
         try {
           localStorage.setItem(
-            consentKey(boundary.endpoint, boundary.policy_version),
+            consentKey(boundary.endpoint, boundary.policy_version, boundary.boundary_hash),
             new Date().toISOString(),
           );
         } catch {
@@ -215,6 +219,7 @@ export function SamplingPage({ project }: Props) {
       }
       setBoundaryPreview(null);
       setBoundaryError(null);
+      setPendingBoundaryHash(null);
       queryClient.invalidateQueries({ queryKey: ["verify-status", project?.project_id] });
       queryClient.invalidateQueries({ queryKey: ["rule-results", project?.project_id] });
     },
@@ -230,12 +235,15 @@ export function SamplingPage({ project }: Props) {
         profile_id: selectedProfileId ?? "",
         redaction: "pseudonym",
       });
+      const hash = boundary.boundary_hash || "";
+      setPendingBoundaryHash(hash || null);
       const remembered =
         !!boundary.endpoint &&
         !!boundary.policy_version &&
-        !!localStorage.getItem(consentKey(boundary.endpoint, boundary.policy_version));
+        !!hash &&
+        !!localStorage.getItem(consentKey(boundary.endpoint, boundary.policy_version, hash));
       if (remembered) {
-        runVerify.mutate();
+        runVerify.mutate({ boundary_hash: hash });
         return;
       }
       setBoundaryPreview(boundary);
@@ -665,7 +673,12 @@ export function SamplingPage({ project }: Props) {
             {typeof verifySummary.confirmation_rate === "number"
               ? ` · 确认率 ${(verifySummary.confirmation_rate * 100).toFixed(0)}%`
               : ""}
-            （明细已伪名化外发）
+            （当前样本核验 · 明细已伪名化外发）
+          </span>
+        )}
+        {verifyStatus.data?.verification_freshness?.status === "stale" && (
+          <span className="muted">
+            历史 LLM 核验已过期（与当前抽样不一致），请重新核验当前样本
           </span>
         )}
         <button
@@ -717,7 +730,11 @@ export function SamplingPage({ project }: Props) {
               type="button"
               className="btn-primary"
               disabled={runVerify.isPending}
-              onClick={() => runVerify.mutate()}
+              onClick={() =>
+                runVerify.mutate({
+                  boundary_hash: boundaryPreview.boundary_hash || pendingBoundaryHash || undefined,
+                })
+              }
             >
               确认并发送
             </button>

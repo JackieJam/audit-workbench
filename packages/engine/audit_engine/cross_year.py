@@ -183,9 +183,9 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
     """把含「预提/冲回」文本的 journal line 折叠为经济预提实体。
 
     Accrual Economic Entity =
-      voucher_key + liability account + counterparty + amount
+      voucher_key + full liability account + counterparty + amount
 
-    一张凭证可产生多个实体（例如双供应商预提）。
+    一张凭证可产生多个实体（例如双供应商预提，或同供应商不同负债科目）。
     优先取暂估负债科目（22*）腿；冲回凭证上负债通常在借方，
     不再对平衡凭证默认取 credit leg（那会错拿费用贷方）。
     """
@@ -213,10 +213,10 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
         if not liability_lines.empty:
             # 按负债科目前缀 + 对手方 拆成多个经济实体
             liability_work = liability_lines.copy()
-            liability_work["_entity_acct4"] = acct.loc[liability_lines.index].str[:4]
+            liability_work["_entity_acct"] = acct.loc[liability_lines.index].astype(str).str.strip()
             liability_work["_entity_party"] = liability_work.apply(_party_key, axis=1)
-            for (_acct4, _party), entity_grp in liability_work.groupby(
-                ["_entity_acct4", "_entity_party"], sort=False, dropna=False,
+            for (_acct, _party), entity_grp in liability_work.groupby(
+                ["_entity_acct", "_entity_party"], sort=False, dropna=False,
             ):
                 selected_amt = float(_amount_abs(entity_grp).fillna(0).sum())
                 if selected_amt <= 0:
@@ -234,7 +234,8 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
                 row["_accrual_entity_amount"] = selected_amt
                 row["_accrual_line_count"] = int(len(grp))
                 row["_accrual_entity_party"] = str(_party or "")
-                row["_accrual_entity_acct4"] = str(_acct4 or "")
+                row["_accrual_entity_acct"] = str(_acct or "")
+                row["_accrual_entity_acct4"] = str(_acct or "")[:4]
                 entities.append(row)
             continue
 

@@ -317,6 +317,31 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
                         "禁止合并规则分析"
                     ),
                 })
+        unknown_currency_rows = int(
+            currency_series.astype("string").fillna("").str.strip().str.upper()
+            .isin({"", "NAN", "NONE", "未维护", "(空)"})
+            .sum()
+        )
+        if unknown_currency_rows > 0 and currencies:
+            issues.append({
+                "code": "missing_analysis_currency",
+                "severity": "blocking",
+                "message": (
+                    f"{unknown_currency_rows} 行金额可用但币种未知/未维护，"
+                    f"与已知币种 {sorted(currencies)} 并存，禁止直接合计"
+                ),
+                "row_count": unknown_currency_rows,
+            })
+        elif unknown_currency_rows > 0 and not currencies:
+            issues.append({
+                "code": "missing_analysis_currency",
+                "severity": "warning",
+                "message": (
+                    f"{unknown_currency_rows} 行金额可用但币种全部未知/未维护；"
+                    "正式金额汇总前请补齐币种或确认公司本位币主数据"
+                ),
+                "row_count": unknown_currency_rows,
+            })
 
     company_dist: dict[str, int] = {}
     if "公司代码" in work.columns:

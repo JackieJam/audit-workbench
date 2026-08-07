@@ -1236,3 +1236,231 @@ def test_dq_balance_uses_voucher_key_not_bare_id() -> None:
     # 两张凭证各自不平衡 → unbalanced_vouchers == 2（按 voucher_key）
     assert quality["voucher_count"] == 2
     assert quality["unbalanced_vouchers"] == 2
+
+
+# ── Review workflow invariants (2026-08 round 3) ──────────────
+
+
+def test_multi_file_identical_lines_are_preserved_not_deleted() -> None:
+    """两文件各含相同业务字段的 journal line → 不得静默删除，仅标记候选。"""
+    from audit_engine.ingestion import _flag_duplicate_candidates
+
+    row = {
+        "凭证编号": "A001",
+        "公司代码": "1000",
+        "过账日期": pd.Timestamp("2025-03-01"),
+        "总账科目": "6601",
+        "借/贷标识": "S",
+        "凭证货币价值": 10_000.0,
+        "文本": "服务费",
+    }
+    df = pd.DataFrame([
+        {**row, "_source_file": "a.xlsx", "_source_row": 2, "_source_sheet": "Sheet1"},
+        {**row, "_source_file": "b.xlsx", "_source_row": 5, "_source_sheet": "Sheet1"},
+    ])
+    flagged, report = _flag_duplicate_candidates(df)
+    assert len(flagged) == 2
+    assert int(flagged["_duplicate_candidate"].sum()) == 2
+    assert report["candidate_groups"] == 1
+    assert report["policy"] == "preserve_first_detect_only"
+
+
+def test_verification_freshness_stale_after_selection_change() -> None:
+    """Sample A → Verify A → Sample B：核验必须 stale，不得冒充当前样本。"""
+    from audit_engine.analysis_context import verification_freshness
+
+    fresh = verification_freshness(
+        verification_context={
+            "verification_run_id": "vr_aaa",
+            "selection_id": "sel_A",
+            "verified_at": "2026-08-07T00:00:00Z",
+        },
+        sampling_plan={"selection_trace": {"selection_id": "sel_A"}},
+    )
+    assert fresh["fresh"] is True
+    assert fresh["status"] == "fresh"
+
+    stale = verification_freshness(
+        verification_context={
+            "verification_run_id": "vr_aaa",
+            "selection_id": "sel_A",
+            "verified_at": "2026-08-07T00:00:00Z",
+        },
+        sampling_plan={"selection_trace": {"selection_id": "sel_B"}},
+    )
+    assert stale["fresh"] is False
+    assert stale["status"] == "stale"
+
+
+def test_amount_analysis_blocks_mixed_and_unknown_currency() -> None:
+    """已知币 + 未知币并存 → 金额分析门禁阻断。"""
+    from audit_engine.analysis_context import assert_amount_analysis_ready
+    from audit_engine.data_columns import ensure_analysis_columns
+
+    known = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "C1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 100.0,
+            "凭证货币代码": "CNY",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "有币种",
+        },
+    ]))
+    unknown = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "U1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-02"),
+            "凭证货币价值": 200.0,
+            "凭证货币代码": "",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "无币种",
+        },
+    ]))
+    with pytest.raises(ValueError, match="币种未知|多种分析币种"):
+        assert_amount_analysis_ready([known, unknown], selected_currency=None)
+
+
+def test_same_vendor_two_liability_accounts_are_two_entities() -> None:
+    """同凭证同供应商、两个完整负债科目 → 两个 economic entities。"""
+    lines = pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提运费",
+            "总账科目": "6601010001",
+            "借/贷标识": "S",
+            "供应商编号": "VA",
+            "凭证货币价值": 600_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提服务费",
+            "总账科目": "6602010001",
+            "借/贷标识": "S",
+            "供应商编号": "VA",
+            "凭证货币价值": 400_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提运费",
+            "总账科目": "2202010001",
+            "借/贷标识": "H",
+            "供应商编号": "VA",
+            "凭证货币价值": 600_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提服务费",
+            "总账科目": "2202020001",
+            "借/贷标识": "H",
+            "供应商编号": "VA",
+            "凭证货币价值": 400_000.0,
+        },
+    ])
+    entities = _collapse_to_accrual_entities(lines)
+    assert len(entities) == 2
+    accts = set(entities["总账科目"].astype(str).tolist())
+    assert accts == {"2202010001", "2202020001"}
+
+
+def test_current_sample_merges_multi_rule_context() -> None:
+    """同一样本凭证命中多规则 → 合并为一个核验实体，保留全部风险上下文。"""
+    from audit_engine.llm_verifier import _select_verify_hits
+    from audit_engine.rule_engine import RuleResult
+
+    key = "VK|1000|2025|A001"
+    results = [
+        RuleResult(
+            rule_name="大额异常",
+            hits=[RuleHit(
+                voucher_id="A001", rule_type="大额整数", evidence="100万",
+                line_indices=(0,), priority=5, year=2025, voucher_key=key,
+            )],
+        ),
+        RuleResult(
+            rule_name="异常周末过账",
+            hits=[RuleHit(
+                voucher_id="A001", rule_type="周末过账", evidence="周六",
+                line_indices=(0,), priority=3, year=2025, voucher_key=key,
+            )],
+        ),
+        RuleResult(
+            rule_name="敏感费用",
+            hits=[RuleHit(
+                voucher_id="A001", rule_type="敏感费用", evidence="咨询费",
+                line_indices=(0,), priority=4, year=2025, voucher_key=key,
+            )],
+        ),
+    ]
+    selected = _select_verify_hits(
+        results,
+        max_verify=50,
+        voucher_keys={key},
+        verification_scope="current_sample",
+    )
+    assert len(selected) == 1
+    _name, hit = selected[0]
+    evidence = str(hit.evidence)
+    assert "100万" in evidence
+    assert "周六" in evidence or "咨询费" in evidence
+    factors = set(hit.risk_factors or ())
+    assert "大额异常" in factors or "大额整数" in str(hit.rule_type)
+
+
+def test_boundary_consent_hash_changes_with_endpoint() -> None:
+    """endpoint 变化 → boundary_hash 必须变化（可证明知情确认）。"""
+    from audit_engine.llm_verifier import boundary_consent_hash, describe_llm_verify_boundary
+
+    a = describe_llm_verify_boundary("https://api.a.example/v1", "model-a", redaction="pseudonym")
+    b = describe_llm_verify_boundary("https://api.b.example/v1", "model-a", redaction="pseudonym")
+    assert a["boundary_hash"]
+    assert a["boundary_hash"] != b["boundary_hash"]
+    assert boundary_consent_hash(a) == a["boundary_hash"]
+
+
+def test_profiler_counts_distinct_voucher_keys() -> None:
+    """同号跨公司 → profile total_vouchers 必须按 voucher_key 计为 2。"""
+    from audit_engine.profiler import _overview
+
+    df = ensure_voucher_identity(pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 100.0,
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "A",
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "2000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 200.0,
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "B",
+        },
+    ]))
+    overview = _overview(df)
+    assert overview["total_vouchers"] == 2

@@ -53,6 +53,8 @@ class VerifyRequest(BaseModel):
     redaction: str = Field("pseudonym", pattern="^(none|pseudonym)$")
     # 发送前数据边界知情确认；未确认时接口拒绝外发
     confirm_data_boundary: bool = False
+    # GET boundary 返回的 boundary_hash；若提供则必须与服务端重算一致
+    boundary_hash: str = ""
     # current_sample=核验当前抽样；risk_signals=按规则高风险信号取 top N
     verification_scope: Literal["current_sample", "risk_signals"] = "current_sample"
 
@@ -204,11 +206,22 @@ def get_samples(project_id: str, store: ProjectStore = Depends(get_store)) -> di
 
 @router.get("/{project_id}/pipeline/verify")
 def get_verify_status(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
+    from audit_engine.analysis_context import verification_freshness
     from audit_engine.llm_verifier import judgments_from_state, summarize_judgments
 
     _manifest_or_404(store, project_id)
-    judgments = judgments_from_state(store.load_state(project_id).get("llm_judgments"))
-    return {"summary": summarize_judgments(judgments), "has_judgments": bool(judgments)}
+    state = store.load_state(project_id)
+    freshness = verification_freshness(
+        verification_context=state.get("verification_run_context"),
+        sampling_plan=state.get("sampling_plan"),
+    )
+    judgments = judgments_from_state(state.get("llm_judgments")) if freshness.get("fresh") else {}
+    return {
+        "summary": summarize_judgments(judgments),
+        "has_judgments": bool(judgments) and bool(freshness.get("fresh")),
+        "verification_freshness": freshness,
+        "verification_run_context": state.get("verification_run_context") if freshness.get("fresh") else None,
+    }
 
 
 @router.get("/{project_id}/pipeline/verify/boundary")
@@ -272,6 +285,7 @@ def run_verify(
             max_verify=req.max_verify,
             redaction=req.redaction,
             verification_scope=req.verification_scope,
+            boundary_hash=req.boundary_hash or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

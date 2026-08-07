@@ -283,13 +283,17 @@ def load_files(
 
     if len(frames) > 1:
         df_all = pd.concat(frames, ignore_index=True)
-        df_all = _deduplicate(df_all)
+        # Preserve first：永不因业务字段相同而静默删除原始事实
+        df_all, _duplicate_report = _flag_duplicate_candidates(df_all)
     else:
         # 单文件场景：相信用户给的就是事实，不做去重
         df_all = frames[0].copy()
+        _duplicate_report = {"candidate_groups": 0, "candidate_rows": 0, "groups": []}
     # post_process 用偏好映射做占位决策；真实列已在各文件独立映射后存在
     df_all, missing = _post_process(df_all, preferred or {})
     df_all = _tag_years(df_all)
+    # 把重复候选摘要挂到 missing 旁的返回约定：第 4 项可选；保持三元组兼容
+    df_all.attrs["duplicate_candidates"] = _duplicate_report
 
     year_map = {
         year: df_all[df_all["_year"] == year].copy()
@@ -803,29 +807,85 @@ def _synthesize_amount_from_dc(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
-    """跨文件合并后的去重。
+def _flag_duplicate_candidates(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """检测跨文件业务字段完全相同的重复候选，但永不删除原始事实。
 
-    设计目标：
-    - 多文件场景下，若同一行被两个文件都包含（边界期间重叠），合并后去掉一份
-    - 单文件场景下，绝对不能因为"伪相似"折叠同一凭证内的多条分录
+    第一性原理：字段相同 ≠ 同一个事实。真实 SAP 凭证可有两行完全相同的
+    journal line。来源坐标 (_source_*) 恰好证明它们是不同坐标上的事实。
 
-    策略：来源坐标不参与业务行相等判断；其余列完全一致时视为重复，并保留
-    第一份来源坐标。这样既延续原有财务去重语义，也不会因文件名/行号不同而
-    让重叠期间的相同行失去去重能力。
+    返回 (原 DataFrame 加标记列, 候选摘要)。
     """
-    if df.empty:
-        return df
-    before = len(df)
+    out = df.copy().reset_index(drop=True)
+    report: dict = {"candidate_groups": 0, "candidate_rows": 0, "groups": []}
+    if out.empty:
+        out["_duplicate_group_id"] = pd.Series(dtype="string")
+        out["_duplicate_candidate"] = False
+        return out, report
+
     comparison_columns = [
-        column for column in df.columns if not column.startswith("_source_")
+        column for column in out.columns
+        if not str(column).startswith("_")
     ]
-    df = df.drop_duplicates(subset=comparison_columns or None)
-    removed = before - len(df)
-    if removed > 0:
+    if not comparison_columns:
+        out["_duplicate_group_id"] = ""
+        out["_duplicate_candidate"] = False
+        return out, report
+
+    out["_duplicate_group_id"] = ""
+    out["_duplicate_candidate"] = False
+    groups_out: list[dict] = []
+    group_seq = 0
+    for _, grp in out.groupby(comparison_columns, dropna=False, sort=False):
+        if len(grp) < 2:
+            continue
+        group_seq += 1
+        gid = f"dup_{group_seq:04d}"
+        out.loc[grp.index, "_duplicate_group_id"] = gid
+        out.loc[grp.index, "_duplicate_candidate"] = True
+        sources = []
+        for idx in grp.index:
+            sources.append({
+                "source_file": str(out.at[idx, "_source_file"]) if "_source_file" in out.columns else "",
+                "source_sheet": str(out.at[idx, "_source_sheet"]) if "_source_sheet" in out.columns else "",
+                "source_row": (
+                    int(out.at[idx, "_source_row"])
+                    if "_source_row" in out.columns and pd.notna(out.at[idx, "_source_row"])
+                    else None
+                ),
+                "source_asset_id": (
+                    str(out.at[idx, "_source_asset_id"])
+                    if "_source_asset_id" in out.columns
+                    else ""
+                ),
+            })
+        groups_out.append({
+            "duplicate_group_id": gid,
+            "row_count": int(len(grp)),
+            "confidence": "high" if len({s["source_file"] for s in sources}) > 1 else "medium",
+            "reason": "business_fields_identical_across_rows",
+            "sources": sources[:20],
+        })
+
+    report = {
+        "candidate_groups": group_seq,
+        "candidate_rows": int(out["_duplicate_candidate"].sum()),
+        "groups": groups_out[:100],
+        "policy": "preserve_first_detect_only",
+    }
+    if group_seq > 0:
         import warnings
-        warnings.warn(f"去重移除 {removed} 行整行重复记录", stacklevel=2)
-    return df
+        warnings.warn(
+            f"检测到 {group_seq} 组重复候选（{int(out['_duplicate_candidate'].sum())} 行），"
+            "已保留全部原始事实待确认",
+            stacklevel=2,
+        )
+    return out, report
+
+
+def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
+    """兼容旧调用：不再删除行，仅标记重复候选。"""
+    flagged, _ = _flag_duplicate_candidates(df)
+    return flagged
 
 
 def _tag_years(df: pd.DataFrame) -> pd.DataFrame:

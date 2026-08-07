@@ -29,9 +29,22 @@ from audit_engine.analysis.statistical_profile import (
     first_digit,
 )
 from audit_engine.config.accounts import AUTO_VOUCHER_TYPES, classify_expense_subcategory
-from audit_engine.data_columns import analysis_quality_summary, ensure_analysis_columns
+from audit_engine.data_columns import (
+    VOUCHER_KEY_COLUMN,
+    analysis_quality_summary,
+    ensure_analysis_columns,
+    ensure_voucher_identity,
+)
 
 PROFILE_SCHEMA_VERSION = 2
+
+
+def _voucher_id_col(df: pd.DataFrame) -> str:
+    """凭证级聚合必须用 voucher_key；仅在缺失时降级到展示编号。"""
+    work = df if VOUCHER_KEY_COLUMN in df.columns else ensure_voucher_identity(df)
+    if VOUCHER_KEY_COLUMN in work.columns:
+        return VOUCHER_KEY_COLUMN
+    return "凭证编号"
 
 # ── 主函数 ──
 
@@ -56,23 +69,26 @@ def build_profile(df: pd.DataFrame, year: int) -> dict[str, Any]:
 # ── 画像子函数 ──
 
 def _overview(df: pd.DataFrame) -> dict:
-    total_vouchers = df["凭证编号"].nunique()
+    work = ensure_voucher_identity(df)
+    vcol = _voucher_id_col(work)
+    total_vouchers = int(work[vcol].nunique())
     return {
-        "total_rows": len(df),
+        "total_rows": len(work),
         "total_vouchers": total_vouchers,
-        "avg_rows_per_voucher": round(len(df) / total_vouchers, 1) if total_vouchers > 0 else 0,
+        "avg_rows_per_voucher": round(len(work) / total_vouchers, 1) if total_vouchers > 0 else 0,
         "date_range": {
-            "start": str(df["过账日期"].min().date()),
-            "end": str(df["过账日期"].max().date()),
+            "start": str(work["过账日期"].min().date()),
+            "end": str(work["过账日期"].max().date()),
         },
-        "period13_rows": int(df.get("_is_period13", pd.Series(False, index=df.index)).sum()),
-        "currencies": df["凭证货币代码"].value_counts().to_dict() if "凭证货币代码" in df.columns else {},
+        "period13_rows": int(work.get("_is_period13", pd.Series(False, index=work.index)).sum()),
+        "currencies": work["凭证货币代码"].value_counts().to_dict() if "凭证货币代码" in work.columns else {},
     }
 
 
 def _amount_distribution(df: pd.DataFrame) -> dict:
     """金额分布：行级 + 凭证级（凭证级更有审计意义）。"""
     work = ensure_analysis_columns(df)
+    vcol = _voucher_id_col(work)
     amt = work["_amount_abs"].dropna()
     nonzero = amt[amt > 0]
 
@@ -90,10 +106,10 @@ def _amount_distribution(df: pd.DataFrame) -> dict:
             "mean": round(float(s.mean()), 2),
         }
 
-    # 凭证级金额：每张凭证的借方合计（=贷方合计绝对值）
+    # 凭证级金额：每张凭证的借方合计（按 voucher_key）
     voucher_debit = (
         work[work["_dc"] == "S"]
-        .groupby("凭证编号")["_amount_abs"]
+        .groupby(vcol)["_amount_abs"]
         .sum()
     )
     voucher_nonzero = voucher_debit[voucher_debit > 0]
@@ -193,10 +209,11 @@ def _benford_first_digit(df: pd.DataFrame) -> dict:
 def _temporal_patterns(df: pd.DataFrame) -> dict:
     """时间规律：月度、月末集中度、异常时段过账。"""
     df = ensure_analysis_columns(df).copy()
+    vcol = _voucher_id_col(df)
     df["_dom"] = df["过账日期"].dt.day
     df["_dow"] = df["过账日期"].dt.dayofweek  # 0=Mon
 
-    monthly_count = df.groupby("_month")["凭证编号"].nunique()
+    monthly_count = df.groupby("_month")[vcol].nunique()
     monthly_amount = df[df["_dc"].eq("S")].groupby("_month")["_amount_abs"].apply(
         lambda values: round(float(values.sum()), 2)
     )
@@ -206,7 +223,7 @@ def _temporal_patterns(df: pd.DataFrame) -> dict:
     for m, grp in df.groupby("_month"):
         if int(m) == 13:
             continue
-        vouchers = grp[["凭证编号", "过账日期"]].drop_duplicates("凭证编号")
+        vouchers = grp[[vcol, "过账日期"]].drop_duplicates(vcol)
         last_day = vouchers["过账日期"].dt.days_in_month
         is_end = vouchers["过账日期"].dt.day > (last_day - 5)
         month_end_ratios[int(m)] = round(float(is_end.sum() / len(vouchers)), 4) if len(vouchers) > 0 else 0
@@ -255,7 +272,7 @@ def _voucher_type_structure(df: pd.DataFrame) -> dict:
     counts = df["凭证类型"].value_counts()
 
     # 凭证级统计
-    voucher_type_count = df.groupby("凭证类型")["凭证编号"].nunique()
+    voucher_type_count = df.groupby("凭证类型")[_voucher_id_col(df)].nunique()
 
     manual_types: dict[str, int] = {}
     auto_types: dict[str, int] = {}
@@ -382,11 +399,12 @@ def _vendor_patterns(df: pd.DataFrame) -> dict:
 
     # 每供应商的交易频率和金额
     vendor_df = df[df["供应商编号"].notna()].copy()
+    vcol = _voucher_id_col(vendor_df)
     vendor_stats = vendor_df.groupby("供应商编号").agg(
         txn_count=("凭证货币价值", "count"),
         total_amount=("凭证货币价值", lambda x: round(float(x.abs().sum()), 2)),
         avg_amount=("凭证货币价值", lambda x: round(float(x.abs().mean()), 2)),
-        unique_vouchers=("凭证编号", "nunique"),
+        unique_vouchers=(vcol, "nunique"),
     )
 
     # 同日多笔供应商（化整为零候选）
@@ -461,8 +479,9 @@ def _manual_entry_ratio(df: pd.DataFrame) -> dict:
     total = len(df)
 
     # 凭证级：手工凭证的凭证数
-    manual_vouchers = df[manual_mask]["凭证编号"].nunique()
-    total_vouchers = df["凭证编号"].nunique()
+    vcol = _voucher_id_col(df)
+    manual_vouchers = int(df.loc[manual_mask, vcol].nunique())
+    total_vouchers = int(df[vcol].nunique())
 
     return {
         "manual_row_count": manual_count,

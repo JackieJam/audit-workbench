@@ -290,13 +290,23 @@ class AnalysisPipeline:
         return merged
 
     def build_profiles(self, project_id: str) -> dict[int, dict]:
+        from audit_engine.analysis_context import assert_amount_analysis_ready
+        from audit_engine.runtime import workbench_version
+
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
         expected_token = _analysis_token(state)
+        year_map = {
+            year: self._store.get_analysis_work_df(project_id, year)
+            for year in manifest.years
+        }
+        assert_amount_analysis_ready(
+            year_map.values(),
+            selected_currency=self._store.current_analysis_currency(project_id),
+        )
         profiles: dict[int, dict] = {}
         financials: dict[int, dict] = {}
-        for year in manifest.years:
-            work = self._store.get_analysis_work_df(project_id, year)
+        for year, work in year_map.items():
             if work.empty:
                 continue
             profiles[year] = build_profile(work, year)
@@ -305,13 +315,18 @@ class AnalysisPipeline:
             _assert_analysis_token(latest, expected_token)
             latest["profiles"] = profiles
             latest["financials"] = financials
+            latest["profile_context"] = {
+                "data_version": self._store.current_data_version(project_id),
+                "currency_scope": self._store.current_analysis_currency(project_id),
+                "engine_revision": workbench_version(),
+            }
             return latest
 
         self._store.update_state(project_id, update)
         return profiles
 
     def run_cross_year(self, project_id: str) -> list[dict]:
-        from audit_engine.data_columns import collect_analysis_currencies
+        from audit_engine.analysis_context import assert_amount_analysis_ready
 
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
@@ -322,14 +337,10 @@ class AnalysisPipeline:
             year: self._store.get_analysis_work_df(project_id, year)
             for year in manifest.years
         }
-        # 币种不变量：任何参与跨期金额比较的数据，_amount_currency 不得 > 1
-        currencies = collect_analysis_currencies(year_map.values())
-        selected = self._store.current_analysis_currency(project_id)
-        if len(currencies) > 1 and not selected:
-            raise ValueError(
-                f"跨年金额分析被阻断：检测到多种分析币种 {sorted(currencies)}。"
-                "请先在财务画像选择单一报告币种（不做汇率折算）。"
-            )
+        assert_amount_analysis_ready(
+            year_map.values(),
+            selected_currency=self._store.current_analysis_currency(project_id),
+        )
         findings = run_cross_year_analysis(year_map, rules, category_overrides=overrides)
         serialized = [_finding_to_dict(f) for f in findings]
         def update(latest: dict[str, Any]) -> dict[str, Any]:
@@ -687,11 +698,35 @@ class AnalysisPipeline:
 
         def update(latest: dict[str, Any]) -> dict[str, Any]:
             _assert_analysis_token(latest, expected_token)
+            previous_plan = latest.get("sampling_plan") or {}
+            previous_selection = str(
+                ((previous_plan.get("selection_trace") or {}).get("selection_id")) or ""
+            )
+            new_selection = str(trace.get("selection_id") or "")
             latest["samples"] = samples
             latest["sampling_plan"] = plan_record
             history = list(latest.get("sampling_plan_history") or [])
             history.append(plan_record)
             latest["sampling_plan_history"] = history[-100:]
+            # Sample A → Sample B：旧 LLM 核验不得冒充当前样本核验
+            if previous_selection and previous_selection != new_selection:
+                latest["llm_judgments"] = {}
+                stale_ctx = dict(latest.get("verification_run_context") or {})
+                if stale_ctx:
+                    stale_ctx["status"] = "stale"
+                    stale_ctx["stale_reason"] = (
+                        f"抽样已从 {previous_selection} 变更为 {new_selection}"
+                    )
+                    stale_history = list(latest.get("verification_run_history") or [])
+                    stale_history.append(stale_ctx)
+                    latest["verification_run_history"] = stale_history[-50:]
+                latest.pop("verification_run_context", None)
+                latest.pop("llm_verify_boundary", None)
+            elif not previous_selection and latest.get("llm_judgments"):
+                # 无旧 selection 记录但仍有 judgments → 也清空，避免孤儿核验
+                latest["llm_judgments"] = {}
+                latest.pop("verification_run_context", None)
+                latest.pop("llm_verify_boundary", None)
             return latest
 
         self._store.update_state(project_id, update)
@@ -704,6 +739,7 @@ class AnalysisPipeline:
         }
 
     def export_excel(self, project_id: str) -> tuple[bytes, dict]:
+        from audit_engine.analysis_context import verification_freshness
         from audit_engine.llm_verifier import judgments_from_state
 
         manifest = self._store.load_manifest(project_id)
@@ -727,15 +763,31 @@ class AnalysisPipeline:
             g for g in self._store.load_candidate_pool(project_id)
             if g.get("status") == MANUAL_FINAL_STATUS
         ]
-        return generate_report_bytes(
+        freshness = verification_freshness(
+            verification_context=state.get("verification_run_context"),
+            sampling_plan=state.get("sampling_plan"),
+        )
+        # stale 核验不得写入当前正式底稿
+        llm_judgments = (
+            judgments_from_state(state.get("llm_judgments"))
+            if freshness.get("fresh")
+            else {}
+        )
+        data, stats = generate_report_bytes(
             unified,
             rule_results,
-            llm_judgments=judgments_from_state(state.get("llm_judgments")),
+            llm_judgments=llm_judgments,
             max_sample_size=int(rules.get("max_sample_size", 50)),
             manual_final_samples=manual_final,
             explicit_samples=list(state.get("samples") or []) if "samples" in state else None,
             rules_config=rules,
         )
+        stats["verification_freshness"] = freshness
+        stats["selection_id"] = freshness.get("current_selection_id")
+        stats["verification_run_id"] = (
+            freshness.get("verification_run_id") if freshness.get("fresh") else None
+        )
+        return data, stats
 
     def verify_with_llm(
         self,
@@ -747,16 +799,22 @@ class AnalysisPipeline:
         max_verify: int = 50,
         redaction: str | None = None,
         verification_scope: str = "current_sample",
+        boundary_hash: str | None = None,
     ) -> dict[str, Any]:
+        import uuid
         from datetime import UTC, datetime
 
         from audit_engine.llm_verifier import (
+            LLM_BOUNDARY_POLICY_VERSION,
             RedactionMode,
+            SYSTEM_PROMPT,
+            boundary_consent_hash,
             describe_llm_verify_boundary,
             judgments_to_state,
             summarize_judgments,
             verify_with_llm,
         )
+        from audit_engine.runtime import workbench_version
 
         mode: RedactionMode | None = None
         if redaction in {"none", "pseudonym"}:
@@ -800,7 +858,6 @@ class AnalysisPipeline:
                     "或改用 verification_scope=risk_signals 核验规则高风险信号"
                 )
             scoped_keys: set[str] | None = set(sample_voucher_keys)
-            # 核验对象 = 当前样本；max_verify 至少覆盖样本规模
             effective_max = max(int(max_verify), len(sample_voucher_keys))
         else:
             scoped_keys = None
@@ -817,21 +874,42 @@ class AnalysisPipeline:
         selection_trace = sampling_plan.get("selection_trace") or {}
         population_snapshot = sampling_plan.get("population_snapshot") or {}
         rule_run_context = state.get("rule_run_context") or {}
-        verification_run_id = "vr_" + hashlib.sha256(
+        boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
+        expected_boundary_hash = boundary_consent_hash(boundary)
+        if boundary_hash is not None and str(boundary_hash).strip():
+            if str(boundary_hash).strip() != expected_boundary_hash:
+                raise ValueError(
+                    "数据边界已变化，请重新确认后再发送。"
+                    f"（expected={expected_boundary_hash[:12]}…）"
+                )
+
+        engine_rev = workbench_version()
+        prompt_revision = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]
+        sample_digest = hashlib.sha256(
+            ",".join(sorted(scoped_keys or sample_voucher_keys)).encode()
+        ).hexdigest()[:16]
+        context_hash = hashlib.sha256(
             "|".join([
                 scope,
                 str(selection_trace.get("selection_id") or ""),
                 str(population_snapshot.get("population_id") or ""),
                 str(rule_run_context.get("rule_run_id") or ""),
                 str(state.get("data_version") or ""),
-                ",".join(sorted(scoped_keys or [])),
+                sample_digest,
                 model,
                 base_url,
                 mode or "pseudonym",
+                str(boundary.get("policy_version") or LLM_BOUNDARY_POLICY_VERSION),
+                prompt_revision,
+                engine_rev,
             ]).encode()
         ).hexdigest()[:16]
-        run_context = {
+        # 每次执行唯一 ID（非确定性 LLM 输出不得复用同一 run id）
+        verification_run_id = "vr_" + uuid.uuid4().hex[:16]
+        requested_at = datetime.now(UTC).isoformat()
+        run_context: dict[str, Any] = {
             "verification_run_id": verification_run_id,
+            "verification_context_hash": context_hash,
             "verification_scope": scope,
             "selection_id": selection_trace.get("selection_id"),
             "population_id": population_snapshot.get("population_id"),
@@ -839,23 +917,30 @@ class AnalysisPipeline:
             "data_version": state.get("data_version"),
             "sample_voucher_keys": list(scoped_keys) if scoped_keys is not None else sample_voucher_keys,
             "sample_voucher_count": len(scoped_keys) if scoped_keys is not None else len(sample_voucher_keys),
+            "sample_keys_digest": sample_digest,
             "model": model,
             "endpoint": base_url,
             "redaction": mode or "pseudonym",
-            "boundary_policy_version": describe_llm_verify_boundary(
-                base_url, model, redaction=mode,
-            ).get("policy_version"),
-            "verified_at": datetime.now(UTC).isoformat(),
+            "boundary_policy_version": boundary.get("policy_version"),
+            "boundary_hash": expected_boundary_hash,
+            "prompt_revision": prompt_revision,
+            "engine_revision": engine_rev,
+            "status": "fresh",
+            "requested_at": requested_at,
         }
 
         if scope == "risk_signals" and not any(rr.hits for rr in rule_results):
+            run_context["completed_at"] = datetime.now(UTC).isoformat()
+            run_context["verified_voucher_keys"] = []
+            run_context["verified_voucher_count"] = 0
+
             def clear(latest: dict[str, Any]) -> dict[str, Any]:
                 _assert_analysis_token(latest, expected_token)
                 latest["llm_judgments"] = {}
                 latest["verification_run_context"] = run_context
+                latest["llm_verify_boundary"] = boundary
                 return latest
 
-            boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
             self._store.update_state(project_id, clear)
             return {
                 "summary": summarize_judgments({}),
@@ -875,17 +960,41 @@ class AnalysisPipeline:
             voucher_keys=scoped_keys,
             verification_scope=scope,  # type: ignore[arg-type]
         )
-        # 记录实际核验的 voucher_key 集合
         verified_keys = sorted({
             str(getattr(j, "voucher_key", "") or "")
             for items in judgments.values()
             for j in items
             if str(getattr(j, "voucher_key", "") or "").strip()
         })
+        serialized = judgments_to_state(judgments)
+        completed_at = datetime.now(UTC).isoformat()
         run_context["verified_voucher_keys"] = verified_keys
         run_context["verified_voucher_count"] = len(verified_keys)
-        serialized = judgments_to_state(judgments)
-        boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
+        run_context["completed_at"] = completed_at
+        run_context["verified_at"] = completed_at
+        summary = summarize_judgments(judgments)
+
+        artifact_payload = {
+            "verification_run_id": verification_run_id,
+            "verification_context_hash": context_hash,
+            "context": {k: v for k, v in run_context.items() if k != "sample_voucher_keys"},
+            "sample_voucher_keys": run_context["sample_voucher_keys"],
+            "judgments": serialized,
+            "summary": summary,
+            "data_boundary": boundary,
+        }
+        result_payload = json.dumps(
+            artifact_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        )
+        result_hash = hashlib.sha256(result_payload.encode()).hexdigest()
+        artifact_path = self._store.persist_verification_run(
+            project_id,
+            verification_run_id,
+            artifact_payload,
+            expected_hash=result_hash,
+        )
+        run_context["result_artifact"] = artifact_path
+        run_context["result_hash"] = result_hash
 
         def update(latest: dict[str, Any]) -> dict[str, Any]:
             _assert_analysis_token(latest, expected_token)
@@ -893,13 +1002,21 @@ class AnalysisPipeline:
             latest["llm_verify_boundary"] = boundary
             latest["verification_run_context"] = run_context
             history = list(latest.get("verification_run_history") or [])
-            history.append(run_context)
+            history.append({
+                "verification_run_id": verification_run_id,
+                "verification_context_hash": context_hash,
+                "selection_id": run_context.get("selection_id"),
+                "result_artifact": artifact_path,
+                "result_hash": result_hash,
+                "completed_at": completed_at,
+                "summary": summary,
+            })
             latest["verification_run_history"] = history[-50:]
             return latest
 
         self._store.update_state(project_id, update)
         return {
-            "summary": summarize_judgments(judgments),
+            "summary": summary,
             "judgments": serialized,
             "data_boundary": boundary,
             "verification_run_context": run_context,

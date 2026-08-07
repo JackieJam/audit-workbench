@@ -1202,6 +1202,14 @@ export const api = {
         rules: number;
       };
       has_judgments: boolean;
+      verification_freshness?: {
+        status: string;
+        fresh: boolean;
+        reason?: string;
+        current_selection_id?: string | null;
+        verification_selection_id?: string | null;
+        verification_run_id?: string;
+      };
     }>(`/projects/${projectId}/pipeline/verify`),
   getVerifyBoundary: (
     projectId: string,
@@ -1221,6 +1229,7 @@ export const api = {
         plaintext_fields?: string[];
         pseudonym_fields?: string[];
         policy_version?: string;
+        boundary_hash?: string;
         warning: string;
       };
       has_api_key: boolean;
@@ -1234,6 +1243,7 @@ export const api = {
       max_verify?: number;
       redaction?: "none" | "pseudonym";
       confirm_data_boundary?: boolean;
+      boundary_hash?: string;
       verification_scope?: "current_sample" | "risk_signals";
     },
   ) =>
@@ -1259,10 +1269,12 @@ export const api = {
         plaintext_fields?: string[];
         pseudonym_fields?: string[];
         policy_version?: string;
+        boundary_hash?: string;
         warning: string;
       };
       verification_run_context?: {
         verification_run_id?: string;
+        verification_context_hash?: string;
         verification_scope?: string;
         selection_id?: string;
         population_id?: string;

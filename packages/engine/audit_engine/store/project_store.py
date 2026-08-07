@@ -172,6 +172,74 @@ class ProjectStore:
             raise ValueError("规则结果事实文件结构无效")
         return decoded
 
+    def persist_verification_run(
+        self,
+        project_id: str,
+        verification_run_id: str,
+        payload: dict[str, Any],
+        *,
+        expected_hash: str,
+    ) -> str:
+        """按运行 ID 保存不可变 VerificationRun artifact，返回项目内相对路径。"""
+        run_id = str(verification_run_id).strip()
+        suffix = run_id.removeprefix("vr_")
+        if not run_id.startswith("vr_") or not suffix or not all(c.isalnum() for c in suffix):
+            raise ValueError("核验运行 ID 非法")
+        encoded = json.dumps(
+            self._jsonable(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        actual_hash = hashlib.sha256(encoded).hexdigest()
+        if actual_hash != str(expected_hash):
+            raise ValueError("核验结果哈希与待保存内容不一致")
+
+        pdir = self.project_dir(project_id).resolve()
+        relative_path = Path("aggregates") / "verification_runs" / f"{run_id}.json.gz"
+        destination = (pdir / relative_path).resolve()
+        if pdir not in destination.parents:
+            raise ValueError("核验结果保存路径越界")
+        if destination.exists():
+            existing = gzip.decompress(destination.read_bytes())
+            if hashlib.sha256(existing).hexdigest() != actual_hash:
+                raise ValueError("相同核验运行 ID 已存在不同结果")
+            return relative_path.as_posix()
+
+        compressed = gzip.compress(encoded, compresslevel=6, mtime=0)
+        self._write_atomic_bytes(destination, compressed)
+        return relative_path.as_posix()
+
+    def load_verification_run(
+        self,
+        project_id: str,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """读取并核验当前 VerificationRun 不可变产物。"""
+        current_state = state if isinstance(state, dict) else self.load_state(project_id)
+        context = current_state.get("verification_run_context") or {}
+        if not isinstance(context, dict) or not context.get("result_artifact"):
+            return None
+        pdir = self.project_dir(project_id).resolve()
+        source = (pdir / str(context["result_artifact"])).resolve()
+        if pdir not in source.parents:
+            raise ValueError("核验结果读取路径越界")
+        if not source.exists():
+            raise ValueError("核验结果事实文件缺失")
+        try:
+            payload = gzip.decompress(source.read_bytes())
+        except (OSError, EOFError) as exc:
+            raise ValueError("核验结果事实文件损坏") from exc
+        actual_hash = hashlib.sha256(payload).hexdigest()
+        if actual_hash != str(context.get("result_hash") or ""):
+            raise ValueError("核验结果事实文件哈希校验失败")
+        decoded = json.loads(payload.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("核验结果事实文件结构无效")
+        return decoded
+
     def current_classification_revision(self, project_id: str) -> str:
         """返回分类口径版本；无人工决策也提供稳定基线指纹。"""
         state = self.load_state(project_id)

@@ -292,7 +292,7 @@ def describe_llm_verify_boundary(
             "模型仅回传 verify_id；「文本/摘要」仍为原文"
         )
     policy = load_endpoint_allowlist()
-    return {
+    boundary = {
         "endpoint": base_url,
         "model": model,
         "fields": fields,
@@ -308,6 +308,23 @@ def describe_llm_verify_boundary(
             f"请确认该 endpoint 已纳入允许范围。"
         ),
     }
+    boundary["boundary_hash"] = boundary_consent_hash(boundary)
+    return boundary
+
+
+def boundary_consent_hash(boundary: dict[str, Any]) -> str:
+    """可证明知情确认：endpoint+model+fields+redaction+policy 的稳定哈希。"""
+    payload = {
+        "endpoint": str(boundary.get("endpoint") or ""),
+        "model": str(boundary.get("model") or ""),
+        "fields": list(boundary.get("fields") or []),
+        "redaction": str(boundary.get("redaction") or ""),
+        "policy_version": str(boundary.get("policy_version") or ""),
+        "plaintext_fields": list(boundary.get("plaintext_fields") or []),
+        "pseudonym_fields": list(boundary.get("pseudonym_fields") or []),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:32]
 
 
 def _hit_identity_key(hit: Any) -> str:
@@ -357,6 +374,52 @@ def _synthetic_sample_hit(voucher_key: str) -> RuleHit:
     )
 
 
+def _merge_hits_for_voucher(
+    voucher_key: str,
+    items: list[tuple[str, RuleHit]],
+) -> tuple[str, RuleHit]:
+    """把同一 voucher 的多规则命中合并为单一核验实体（完整风险上下文）。"""
+    if len(items) == 1:
+        return items[0]
+    primary_name, primary = max(items, key=lambda x: x[1].priority)
+    rule_labels = list(dict.fromkeys(
+        [name for name, _ in items] + [h.rule_type for _, h in items if h.rule_type]
+    ))
+    evidences = list(dict.fromkeys(
+        str(h.evidence) for _, h in items if str(h.evidence or "").strip()
+    ))
+    line_indices = tuple(dict.fromkeys(
+        idx for _, h in items for idx in (h.line_indices or ())
+    ))
+    related_ids = tuple(dict.fromkeys(
+        vid for _, h in items for vid in (h.related_voucher_ids or ())
+    ))
+    related_keys = tuple(dict.fromkeys(
+        key for _, h in items for key in (h.related_voucher_keys or ())
+    ))
+    merged = RuleHit(
+        voucher_id=primary.voucher_id,
+        rule_type=" | ".join(dict.fromkeys(h.rule_type for _, h in items if h.rule_type)),
+        evidence="；".join(evidences)[:500],
+        line_indices=line_indices,
+        priority=max(h.priority for _, h in items),
+        year=primary.year,
+        group_id=primary.group_id,
+        related_voucher_ids=related_ids,
+        relation_evidence="；".join(
+            str(h.relation_evidence) for _, h in items if h.relation_evidence
+        )[:300],
+        voucher_key=voucher_key or primary.voucher_key,
+        related_voucher_keys=related_keys,
+        sample_eligible=primary.sample_eligible,
+        risk_score=primary.risk_score,
+        risk_factors=tuple(dict.fromkeys(
+            [*primary.risk_factors, *rule_labels]
+        )),
+    )
+    return ("样本综合核验", merged)
+
+
 def _select_verify_hits(
     rule_results: list[RuleResult],
     *,
@@ -375,16 +438,16 @@ def _select_verify_hits(
     scoped = voucher_keys or set()
 
     if verification_scope == "current_sample" and scoped:
-        hit_by_key: dict[str, tuple[str, RuleHit]] = {}
+        hits_by_key: dict[str, list[tuple[str, RuleHit]]] = {}
         for rule_name, hit in all_hits:
             key = _hit_voucher_key(hit)
-            if key in scoped and key not in hit_by_key:
-                hit_by_key[key] = (rule_name, hit)
+            if key in scoped:
+                hits_by_key.setdefault(key, []).append((rule_name, hit))
         for key in sorted(scoped):
             if len(top_hits) >= max_verify:
                 break
-            if key in hit_by_key:
-                top_hits.append(hit_by_key[key])
+            if key in hits_by_key:
+                top_hits.append(_merge_hits_for_voucher(key, hits_by_key[key]))
             else:
                 top_hits.append(("抽样核验", _synthetic_sample_hit(key)))
         return top_hits
@@ -627,7 +690,7 @@ def _build_voucher_groups(
                     fiscal_year = _year_from_row(sample)
 
         verify_id = make_verify_id(voucher_key, run_secret=run_secret)
-        groups.append({
+        group_payload = {
             "verify_id": verify_id,
             "凭证编号": display_vid,
             "_raw_voucher_key": voucher_key,
@@ -644,7 +707,11 @@ def _build_voucher_groups(
             "组合证据": hit.relation_evidence,
             "主凭证行项目": _cached_rows(voucher_key, 8),
             "关联凭证行项目": related_rows,
-        })
+        }
+        risk_signals = [str(x) for x in (getattr(hit, "risk_factors", ()) or ()) if str(x).strip()]
+        if risk_signals:
+            group_payload["风险信号"] = risk_signals
+        groups.append(group_payload)
     return groups
 
 
