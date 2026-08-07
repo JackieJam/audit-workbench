@@ -1,0 +1,72 @@
+﻿项目进度（累进）	项目节点	一级任务	二级任务	节点项目进度（累进）	月度
+	审计分析工作台改造				
+	选型与架构地基（M0）				
+		技术选型确认	对比 Streamlit 演进 vs engine+API+React/Tauri	8%	7月
+			确定本地桌面产品路线（禁 engine 引 Streamlit）	15%	7月
+		Monorepo 立仓	搭建 packages/engine + apps/api + apps/desktop	30%	7月
+			约定数据目录 ~/.audit_tool 与配置读取方式	40%	7月
+		ProjectStore	Parquet 落盘 + DuckDB 分页查询	60%	7月
+			manifest / state 项目元数据与状态	70%	7月
+		API 与前端壳	FastAPI /health、/projects	85%	7月
+			React 三页导航（画像/疑点/抽样）+ API 连通	95%	7月
+12%		开发环境脚本	bootstrap / dev-api / dev-ui 端口约定	100%	7月
+	财务画像 MVP（M1）				
+		序时账摄入迁移	迁移 ingestion + 列名学习库	15%	7月
+			detect / commit API	30%	7月
+		上传交互	侧边栏上传序时账	45%	7月
+			列映射建议与确认	55%	7月
+		收入成本模块	月度图 + 客户 Top + 审计关注点	75%	7月
+			选中态 → 疑点入库（解释→行动）	90%	7月
+25%		M1 联调冒烟	真实上传→画像可看	100%	7月
+	可替代 Streamlit 交付（M2）				
+		分析引擎迁移	profiler / cross_year / rule_engine / reporter / pipeline	12%	7月
+			Pipeline API（画像/跨年/规则/抽样/Excel）	22%	7月
+		财务画像子模块	统计画像、跨年稽核	35%	7月
+			费用 / 暂估 / 资产负债 / 调账等面板	48%	7月
+		疑点工作台	列表、筛选、展开明细	58%	7月
+			编辑理由/标签/状态、直入最终样本	65%	7月
+		抽样底稿	规则配置 UI（启停/频率）	72%	7月
+			规则执行 + 多种抽样 + Excel 下载	80%	7月
+			改规则后失效命中/样本/缓存纪律	85%	7月
+		LLM 核验接入	凭证核实 → state.llm_judgments → Excel 列	90%	7月
+		Agent 初版	上下文读取、工具日志、写操作人工审批	96%	7月
+55%		M2 全链路闭合	画像→疑点→规则→抽样→（可选）核验→Excel，不再依赖 Streamlit	100%	7月
+	可信审计与 Agent 深化				
+		数据质量与分类	分类复核环（map/exclude/defer）	15%	7月
+			金额借贷方向、币种口径、混币禁跨币合计	30%	7月
+		可信事实契约	凭证键/来源坐标/三层总体（Population/RiskSignal/Sample）文档与实现起步	45%	7月
+			可重放抽样、规则 run 哈希	55%	7月
+		AuditCase	案件页与证据/结论模型起步	70%	7月
+		科目口径增强	营业外独立分类、成本差异分析	85%	7月
+		Agent 可追溯	可追踪查询、质量决策与 Agent 扩展	95%	7月
+70%		阶段检查点	保留 agent 与财务分析改进 checkpoint	100%	7月
+	桌面产品化（M3）				
+		Tauri 打包脚手架	macOS build-desktop.sh / Windows ps1 / CI workflow	15%	8月
+		API sidecar	PyInstaller onedir + resources 打包	35%	8月
+			应用启动自动拉起 127.0.0.1:29180	50%	8月
+		冷启动体验	窗口先开、API 后台就绪，避免假死	65%	8月
+		试用样例与合规	虚构脱敏 demo 样例；真实账不进仓	75%	8月
+		桌面体验	流式布局、Agent 新会话控件	85%	8月
+		多会话 Agent	Codex 风格多 session 管理	95%	8月
+85%		安装包实装	产出 .app / DMG（aarch64）并可分发试用	100%	8月
+	审计正确性与 LLM 治理				
+		深度 Review 整改	对照 P0–P1 审计语义问题清单落地	8%	8月
+		摄入正确性	多文件独立列映射 + 金额缺口门禁 + per_file 可见	20%	8月
+			DQ Gate（币种/公司/借贷不平衡等）	28%	8月
+		跨年与预提	「期末余额」改为累计净发生语义	38%	8月
+			预提-冲回凭证级真配对	48%	8月
+		规则与抽样语义	Population 不被 max_sample 截断；导出才截断	55%	8月
+			混合凭证白名单保留整单	62%	8月
+		LLM 判断治理	三态 confirmed/rejected/pending；fallback 不进确认率	72%	8月
+			默认伪名化脱敏 + data_boundary 明示	78%	8月
+		科目分类器升级	分段匹配、制造成本独立口径、保护类不可降级	86%	8月
+		Endpoint 白名单	持久化策略 + API + 设置页 UI；env 可接管	94%	8月
+		隔离与健康	namespace 强制、health 暴露数据边界	97%	8月
+95%		打包提交推送	全量测试通过、DMG 打包、推送 GitHub	100%	8月
+	V1.0 收尾与增强（进行中）				
+		映射体验	列映射上传前可编辑（M2.1）	10%	待定
+		正式余额输入	科目余额表 / 财务报表 adapter	25%	待定
+		案件深度	AuditCase 证据链与复核签署补齐	40%	待定
+		运维与性能	Key 管理打磨、旧 pickle 迁移、aggregates 预聚合	55%	待定
+		分发合规	Apple 公证 / Windows 代码签名	70%	待定
+100%	V1.1 正式交付	对外可安装签署包 + 余额驱动期末口径		100%	待定
