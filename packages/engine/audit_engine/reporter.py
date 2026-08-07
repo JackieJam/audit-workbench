@@ -35,7 +35,7 @@ SAMPLE_COLS = [
     ("总账科目", 12), ("总账科目名称", 22), ("借/贷", 8), ("金额", 16),
     ("文本", 30), ("供应商", 22), ("客户", 22), ("用户名", 12),
     ("规则类型", 20), ("触发证据", 35), ("组合证据", 50),
-    ("LLM风险级别", 12), ("LLM判断理由", 35), ("建议核查程序", 35),
+    ("LLM状态", 12), ("LLM来源", 12), ("LLM风险级别", 12), ("LLM判断理由", 35), ("建议核查程序", 35),
     ("核查结论", 20),  # 留给审计师填写
 ]
 
@@ -107,12 +107,25 @@ def generate_report(
             max_size=max_sample_size,
         )
     elif judgment_lookup:
-        # 有 LLM 核实：按风险级别排序，取 top N（lookup 键已是 voucher_key）
+        # 有 LLM 核实但无显式样本：优先 confirmed，按风险级别排序
         confirmed_primary_keys = sorted(
-            judgment_lookup.keys(),
+            [
+                key for key, j in judgment_lookup.items()
+                if getattr(j, "status", "") == "confirmed"
+            ],
             key=lambda v: judgment_lookup[v].risk_level == "高",
             reverse=True,
         )
+        if not confirmed_primary_keys:
+            # 无 confirmed 时仍导出有 LLM 结果的凭证（rejected/pending 也留痕）
+            confirmed_primary_keys = sorted(
+                judgment_lookup.keys(),
+                key=lambda v: (
+                    getattr(judgment_lookup[v], "status", "") == "pending_review",
+                    judgment_lookup[v].risk_level == "高",
+                ),
+                reverse=True,
+            )
         available_keys = set(work[VOUCHER_KEY_COLUMN].dropna().astype(str)) if VOUCHER_KEY_COLUMN in work.columns else set()
         confirmed_vids = []
         for primary_key in confirmed_primary_keys:
@@ -175,9 +188,18 @@ def generate_report(
         "sample_vouchers": len(confirmed_vids),
         "total_rule_hits": sum(r.count for r in rule_results),
         "total_unique_vouchers": total_unique_vouchers,
-        "llm_confirmed": len(judgment_lookup),
-        "high_risk": sum(1 for j in judgment_lookup.values() if j.risk_level == "高") if judgment_lookup else 0,
-        "medium_risk": sum(1 for j in judgment_lookup.values() if j.risk_level == "中") if judgment_lookup else 0,
+        "llm_confirmed": sum(
+            1 for j in judgment_lookup.values()
+            if getattr(j, "status", "") == "confirmed"
+        ),
+        "high_risk": sum(
+            1 for j in judgment_lookup.values()
+            if getattr(j, "status", "") == "confirmed" and j.risk_level == "高"
+        ) if judgment_lookup else 0,
+        "medium_risk": sum(
+            1 for j in judgment_lookup.values()
+            if getattr(j, "status", "") == "confirmed" and j.risk_level == "中"
+        ) if judgment_lookup else 0,
         "manual_final_vouchers": len({
             str(vid)
             for group in manual_final_samples or []
@@ -187,20 +209,26 @@ def generate_report(
 
 
 def _build_judgment_lookup(llm_judgments: dict) -> dict[str, Any]:
-    """仅纳入 status=confirmed；pending/rejected/fallback 不进样本主表。
+    """纳入全部 LLM 状态（confirmed/rejected/pending）；查找键优先 voucher_key。
 
-    查找键优先 voucher_key（稳定身份），避免同号凭证跨年/跨公司扩散。
+    同 key 多条时：confirmed 优先于 pending/rejected；同状态时高风险优先。
     """
+    status_rank = {"confirmed": 3, "rejected": 2, "pending_review": 1}
+
+    def _better(candidate: Any, existing: Any) -> bool:
+        c_status = str(getattr(candidate, "status", "") or "")
+        e_status = str(getattr(existing, "status", "") or "")
+        if status_rank.get(c_status, 0) != status_rank.get(e_status, 0):
+            return status_rank.get(c_status, 0) > status_rank.get(e_status, 0)
+        return getattr(candidate, "risk_level", "") == "高" and getattr(existing, "risk_level", "") != "高"
+
     lookup: dict = {}
     for judgments in llm_judgments.values():
         for j in judgments:
-            status = getattr(j, "status", "")
-            if status != "confirmed":
-                continue
             key = str(getattr(j, "voucher_key", "") or getattr(j, "voucher_id", "") or "").strip()
             if not key:
                 continue
-            if key not in lookup or j.risk_level == "高":
+            if key not in lookup or _better(j, lookup[key]):
                 lookup[key] = j
     return lookup
 
@@ -336,7 +364,7 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
             if "凭证编号" in voucher_rows.columns and not voucher_rows.empty
             else str(voucher_key)
         )
-        judgment = judgment_lookup.get(display_id)
+        judgment = judgment_lookup.get(voucher_key)
         voucher_rows = filter_export_voucher_rows(
             voucher_rows,
             rules_config,
@@ -366,6 +394,12 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
                     year = int(year_value)
                     break
 
+        llm_status = getattr(judgment, "status", "") if judgment else ""
+        llm_source = getattr(judgment, "source", "") if judgment else ""
+        llm_risk = judgment.risk_level if judgment else ""
+        llm_reason = judgment.reason if judgment else ""
+        llm_procedures = judgment.audit_procedures if judgment else ""
+
         for _, row in voucher_rows.iterrows():
             amt = row.get("_amount_raw", row.get("凭证货币价值"))
             values = [
@@ -387,14 +421,16 @@ def _write_sample_sheet(wb, df, confirmed_vids, hit_lookup, judgment_lookup, rul
                 rule_types,
                 evidences[:100],
                 relation_evidences[:200],
-                judgment.risk_level if judgment else "",
-                judgment.reason if judgment else "",
-                judgment.audit_procedures if judgment else "",
+                llm_status,
+                llm_source,
+                llm_risk,
+                llm_reason,
+                llm_procedures,
                 "",  # 核查结论留白
             ]
 
-            fill = HIGH_FILL if (judgment and judgment.risk_level == "高") else (
-                MED_FILL if judgment else None
+            fill = HIGH_FILL if (judgment and judgment.risk_level == "高" and llm_status == "confirmed") else (
+                MED_FILL if judgment and llm_status == "confirmed" else None
             )
 
             for col_idx, val in enumerate(values, 1):

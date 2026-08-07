@@ -300,14 +300,29 @@ def load_files(
 
 def summarize_years(df_unified: pd.DataFrame) -> list[dict]:
     """返回各年份摘要，供 UI 确认展示。"""
+    from audit_engine.data_columns import VOUCHER_KEY_COLUMN, ensure_voucher_identity
+
+    work = ensure_voucher_identity(df_unified)
     rows = []
-    for year, grp in df_unified.groupby("_year"):
+    for year, grp in work.groupby("_year"):
+        if VOUCHER_KEY_COLUMN in grp.columns:
+            voucher_count = int(grp[VOUCHER_KEY_COLUMN].nunique())
+        elif "凭证编号" in grp.columns:
+            voucher_count = int(grp["凭证编号"].nunique())
+        else:
+            voucher_count = 0
+        # 优先公司代码货币价值（分析口径），否则凭证货币价值
+        amount_total = 0.0
+        for col in ("公司代码货币价值", "凭证货币价值", "_amount_abs"):
+            if col in grp.columns and pd.to_numeric(grp[col], errors="coerce").notna().any():
+                amount_total = float(pd.to_numeric(grp[col], errors="coerce").abs().sum())
+                break
         rows.append({
             "年份": int(year),
             "行数": len(grp),
-            "凭证数": grp["凭证编号"].nunique() if "凭证编号" in grp.columns else 0,
-            "Period13行数": int(grp["_is_period13"].sum()),
-            "金额合计": grp["凭证货币价值"].abs().sum() if "凭证货币价值" in grp.columns else 0,
+            "凭证数": voucher_count,
+            "Period13行数": int(grp["_is_period13"].sum()) if "_is_period13" in grp.columns else 0,
+            "金额合计": amount_total,
             "日期范围": f"{grp['过账日期'].min().date()} ~ {grp['过账日期'].max().date()}",
         })
     return rows

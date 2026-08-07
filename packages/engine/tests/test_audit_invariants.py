@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from io import BytesIO
 
 import pandas as pd
@@ -43,6 +44,7 @@ from audit_engine.llm_verifier import (
     _build_voucher_groups,
     _fallback_judgments_for_hits,
     _hit_identity_key,
+    _hit_voucher_key,
     confirmation_rate,
     summarize_judgments,
 )
@@ -725,3 +727,512 @@ def test_no_column_sentinel_is_hard_veto() -> None:
         preferred_mapping={"凭证货币价值": NO_COLUMN_SENTINEL},
     )
     assert "凭证货币价值" not in resolved
+
+
+# ── Review P0/P1 invariants (2026-08 round 2) ─────────────────
+
+
+def test_current_sample_verify_keys_must_match_sample_set() -> None:
+    """随机抽样凭证集合 → LLM 核验对象必须等于该 sample voucher_key 集合。"""
+    from audit_engine.llm_verifier import _select_verify_hits
+    from audit_engine.rule_engine import RuleResult
+
+    sample_keys = {
+        "VK|1000|2025|A01",
+        "VK|1000|2025|A02",
+        "VK|1000|2025|A03",
+    }
+    # 规则命中是另一批高风险凭证
+    high_risk = RuleResult(
+        rule_name="大额异常",
+        hits=[
+            RuleHit(
+                voucher_id="B99",
+                rule_type="大额整数",
+                evidence="高风险",
+                line_indices=(0,),
+                priority=5,
+                year=2025,
+                voucher_key="VK|1000|2025|B99",
+            ),
+        ],
+    )
+    # 样本中仅 A01 有规则命中
+    sample_hit = RuleResult(
+        rule_name="化整为零",
+        hits=[
+            RuleHit(
+                voucher_id="A01",
+                rule_type="化整为零(同日拆分)",
+                evidence="样本命中",
+                line_indices=(1,),
+                priority=3,
+                year=2025,
+                voucher_key="VK|1000|2025|A01",
+            ),
+        ],
+    )
+    selected = _select_verify_hits(
+        [high_risk, sample_hit],
+        max_verify=50,
+        voucher_keys=sample_keys,
+        verification_scope="current_sample",
+    )
+    selected_keys = {_hit_voucher_key(h) for _, h in selected}
+    assert selected_keys == sample_keys
+    assert "VK|1000|2025|B99" not in selected_keys
+
+
+def test_verify_id_unique_for_same_display_voucher_across_entities() -> None:
+    """同号跨公司/跨年 → verify_id 必须唯一且能 round-trip。"""
+    from audit_engine.llm_verifier import (
+        _build_judgments_from_response,
+        make_verify_id,
+    )
+
+    hits = [
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="A",
+            line_indices=(0,),
+            priority=3,
+            year=2024,
+            voucher_key="VK|1000|2024|000123",
+        ),
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="B",
+            line_indices=(1,),
+            priority=3,
+            year=2025,
+            voucher_key="VK|2000|2025|000123",
+        ),
+    ]
+    df = ensure_voucher_identity(pd.DataFrame([
+        {
+            "凭证编号": "000123",
+            "公司代码": "1000",
+            "会计年度": 2024,
+            "过账日期": pd.Timestamp("2024-06-01"),
+            "凭证货币价值": 1.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "A",
+        },
+        {
+            "凭证编号": "000123",
+            "公司代码": "2000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-06-01"),
+            "凭证货币价值": 2.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "B",
+        },
+    ]))
+    secret = "test-run-secret"
+    groups = _build_voucher_groups(df, hits, redaction="pseudonym", run_secret=secret)
+    verify_ids = [g["verify_id"] for g in groups]
+    assert len(verify_ids) == 2
+    assert len(set(verify_ids)) == 2
+    assert all(vid.startswith("VERIFY_") for vid in verify_ids)
+
+    verify_to_identity = {
+        g["verify_id"]: {
+            "voucher_key": g["_raw_voucher_key"],
+            "voucher_id": g["_raw_voucher_id"],
+            "company_code": g["_company_code"],
+            "fiscal_year": g["_fiscal_year"],
+        }
+        for g in groups
+    }
+    response = json.dumps([
+        {
+            "verify_id": verify_ids[0],
+            "confirmed": True,
+            "risk_level": "高",
+            "reason": "ok",
+            "audit_procedures": "查",
+        },
+        {
+            "verify_id": verify_ids[1],
+            "confirmed": False,
+            "reason": "排除",
+            "audit_procedures": "无",
+        },
+    ])
+    judgments = _build_judgments_from_response(
+        response,
+        batch_hits=hits,
+        allowed_voucher_keys={h.voucher_key for h in hits},
+        verify_to_identity=verify_to_identity,
+    )
+    by_key = {j.voucher_key: j for j in judgments}
+    assert by_key["VK|1000|2024|000123"].status == "confirmed"
+    assert by_key["VK|2000|2025|000123"].status == "rejected"
+    # 同 secret 下 make_verify_id 稳定
+    assert make_verify_id("VK|1000|2024|000123", run_secret=secret) == verify_ids[0]
+
+
+def test_two_vendor_accrual_voucher_yields_two_entities() -> None:
+    """一张凭证两个供应商预提 → 必须生成两个 economic entities。"""
+    lines = pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提运费",
+            "总账科目": "6601010001",
+            "借/贷标识": "S",
+            "供应商编号": "VA",
+            "凭证货币价值": 600_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提咨询费",
+            "总账科目": "6602010001",
+            "借/贷标识": "S",
+            "供应商编号": "VB",
+            "凭证货币价值": 400_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提运费",
+            "总账科目": "2202010001",
+            "借/贷标识": "H",
+            "供应商编号": "VA",
+            "凭证货币价值": 600_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提咨询费",
+            "总账科目": "2202010001",
+            "借/贷标识": "H",
+            "供应商编号": "VB",
+            "凭证货币价值": 400_000.0,
+        },
+    ])
+    entities = _collapse_to_accrual_entities(lines)
+    assert len(entities) == 2
+    amounts = sorted(float(x) for x in entities["凭证货币价值"].tolist())
+    assert amounts == pytest.approx([400_000.0, 600_000.0])
+
+
+def test_complete_reversal_matches_liability_leg() -> None:
+    """完整预提 + 完整冲回 → 能正确匹配 liability leg（冲回取负债借方）。"""
+    year_map = {
+        2025: pd.DataFrame([
+            {
+                "凭证编号": "A001",
+                "公司代码": "1000",
+                "会计年度": 2025,
+                "过账日期": pd.Timestamp("2025-12-20"),
+                "文本": "12月预提运费",
+                "总账科目": "6601010001",
+                "借/贷标识": "S",
+                "供应商编号": "V-SHIP",
+                "凭证货币价值": 1_000_000.0,
+            },
+            {
+                "凭证编号": "A001",
+                "公司代码": "1000",
+                "会计年度": 2025,
+                "过账日期": pd.Timestamp("2025-12-20"),
+                "文本": "12月预提运费",
+                "总账科目": "2202010001",
+                "借/贷标识": "H",
+                "供应商编号": "V-SHIP",
+                "凭证货币价值": 1_000_000.0,
+            },
+        ]),
+        2026: pd.DataFrame([
+            {
+                "凭证编号": "R001",
+                "公司代码": "1000",
+                "会计年度": 2026,
+                "过账日期": pd.Timestamp("2026-01-10"),
+                "文本": "冲销预提运费",
+                "总账科目": "2202010001",
+                "借/贷标识": "S",
+                "供应商编号": "V-SHIP",
+                "凭证货币价值": 1_000_000.0,
+            },
+            {
+                "凭证编号": "R001",
+                "公司代码": "1000",
+                "会计年度": 2026,
+                "过账日期": pd.Timestamp("2026-01-10"),
+                "文本": "冲销预提运费",
+                "总账科目": "6601010001",
+                "借/贷标识": "H",
+                "供应商编号": "V-SHIP",
+                "凭证货币价值": 1_000_000.0,
+            },
+        ]),
+    }
+    findings = _accrual_reversal_pairs(year_map)
+    assert not any(f.category == "预提冲回配对" for f in findings)
+
+
+def test_cross_year_mixed_currencies_blocked_without_scope() -> None:
+    """2024 USD + 2025 CNY → 未选币种时跨年金额分析必须 blocked。"""
+    from audit_engine.data_columns import collect_analysis_currencies, ensure_analysis_columns
+
+    y2024 = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "U1",
+            "公司代码": "1000",
+            "会计年度": 2024,
+            "过账日期": pd.Timestamp("2024-06-01"),
+            "凭证货币价值": 1_000_000.0,
+            "凭证货币代码": "USD",
+            "借/贷标识": "S",
+            "总账科目": "1122",
+            "文本": "应收",
+        },
+    ]))
+    y2025 = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "C1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-06-01"),
+            "凭证货币价值": 2_000_000.0,
+            "凭证货币代码": "CNY",
+            "借/贷标识": "S",
+            "总账科目": "1122",
+            "文本": "应收",
+        },
+    ]))
+    currencies = collect_analysis_currencies([y2024, y2025])
+    assert currencies == {"USD", "CNY"}
+    assert len(currencies) > 1
+
+
+def test_company_currency_multi_company_not_auto_summable() -> None:
+    """CNY 本位币公司 + USD 本位币公司 → 不得因 company currency 直接合计。"""
+    quality = audit_input_quality(pd.DataFrame([
+        {
+            "凭证编号": "A1",
+            "公司代码": "CN01",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "公司代码货币价值": 100.0,
+            "公司代码货币代码": "CNY",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "CN",
+        },
+        {
+            "凭证编号": "A2",
+            "公司代码": "US01",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "公司代码货币价值": 100.0,
+            "公司代码货币代码": "USD",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "US",
+        },
+    ]))
+    codes = {issue["code"] for issue in quality["issues"]}
+    assert "mixed_analysis_currencies" in codes
+    assert quality["status"] == "blocked"
+
+
+def test_reporter_writes_all_llm_statuses_by_voucher_key() -> None:
+    """confirmed/rejected/pending → Excel 三种状态都必须按 voucher_key 回写。"""
+    from audit_engine.llm_verifier import LLMJudgment
+    from audit_engine.rule_engine import RuleResult
+
+    df = ensure_voucher_identity(pd.DataFrame([
+        {
+            "凭证编号": "000123",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-01"),
+            "凭证货币价值": 100.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "费用",
+            "凭证类型": "SA",
+            "用户名": "u1",
+        },
+        {
+            "凭证编号": "000456",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-02"),
+            "凭证货币价值": 200.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "费用2",
+            "凭证类型": "SA",
+            "用户名": "u1",
+        },
+        {
+            "凭证编号": "000789",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-03"),
+            "凭证货币价值": 300.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "费用3",
+            "凭证类型": "SA",
+            "用户名": "u1",
+        },
+    ]))
+    keys = list(df["_voucher_key"].unique())
+    judgments = {
+        "大额异常": [
+            LLMJudgment(
+                voucher_id="000123",
+                confirmed=True,
+                risk_level="高",
+                reason="确认风险",
+                audit_procedures="查合同",
+                status="confirmed",
+                voucher_key=keys[0],
+            ),
+            LLMJudgment(
+                voucher_id="000456",
+                confirmed=False,
+                risk_level="中",
+                reason="排除",
+                audit_procedures="无需",
+                status="rejected",
+                voucher_key=keys[1],
+            ),
+            LLMJudgment(
+                voucher_id="000789",
+                confirmed=False,
+                risk_level="待核验",
+                reason="待复核",
+                audit_procedures="人工",
+                status="pending_review",
+                source="llm_incomplete",
+                voucher_key=keys[2],
+            ),
+        ]
+    }
+    samples = [
+        {"凭证编号": "000123", "_voucher_key": keys[0], "会计年度": 2025, "公司代码": "1000"},
+        {"凭证编号": "000456", "_voucher_key": keys[1], "会计年度": 2025, "公司代码": "1000"},
+        {"凭证编号": "000789", "_voucher_key": keys[2], "会计年度": 2025, "公司代码": "1000"},
+    ]
+    data, _stats = generate_report_bytes(
+        df,
+        [RuleResult(rule_name="大额异常", hits=[])],
+        llm_judgments=judgments,
+        explicit_samples=samples,
+        max_sample_size=10,
+    )
+    from openpyxl import load_workbook
+    from io import BytesIO as Bio
+
+    wb = load_workbook(Bio(data))
+    ws = wb["样本清单"]
+    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    status_col = headers.index("LLM状态") + 1
+    reason_col = headers.index("LLM判断理由") + 1
+    statuses = set()
+    reasons = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[status_col - 1]:
+            statuses.add(row[status_col - 1])
+        if row[reason_col - 1]:
+            reasons.add(row[reason_col - 1])
+    assert "confirmed" in statuses
+    assert "rejected" in statuses
+    assert "pending_review" in statuses
+    assert "确认风险" in reasons
+    assert "排除" in reasons
+
+
+def test_splitting_counts_voucher_not_journal_lines() -> None:
+    """一张凭证五行 → splitting min_txn_count 仍只能算 1 笔。"""
+    from audit_engine.rule_engine import rule_splitting
+
+    rows = []
+    # 同日同供应商：1 张凭证 5 个 line，金额相似 — 不应触发「5笔」
+    for i in range(5):
+        rows.append({
+            "凭证编号": "P001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-01"),
+            "供应商编号": "V1",
+            "凭证货币价值": 80_000.0,
+            "借/贷标识": "S",
+            "总账科目": "2202",
+            "文本": f"付款行{i}",
+        })
+    # 另需凑历史日均，避免无基线时仅靠金额相似误报；再放几天各 1 笔
+    for day in range(2, 8):
+        rows.append({
+            "凭证编号": f"P00{day}",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp(f"2025-03-0{day}"),
+            "供应商编号": "V1",
+            "凭证货币价值": 80_000.0,
+            "借/贷标识": "S",
+            "总账科目": "2202",
+            "文本": "日常",
+        })
+    df = ensure_voucher_identity(pd.DataFrame(rows))
+    cfg = default_rules_config()
+    cfg["splitting"] = {
+        **cfg.get("splitting", {}),
+        "enabled": True,
+        "max_single_amount": 100_000,
+        "min_total": 300_000,
+        "min_txn_count": 5,
+        "burst_multiplier": 3.0,
+        "window_days": 14,
+    }
+    result = rule_splitting(df, cfg)
+    # 3/1 仅 1 张凭证，即使 5 行也不应因 line count 命中同日拆分
+    assert not any(h.rule_type == "化整为零(同日拆分)" for h in result.hits)
+
+
+def test_dq_balance_uses_voucher_key_not_bare_id() -> None:
+    """多公司同号凭证各自不平衡时，DQ 不得按裸凭证号净额抵消。"""
+    quality = audit_input_quality(pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 100.0,
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "公司A",
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "2000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 100.0,
+            "借/贷标识": "H",
+            "总账科目": "1002",
+            "文本": "公司B",
+        },
+    ]))
+    # 两张凭证各自不平衡 → unbalanced_vouchers == 2（按 voucher_key）
+    assert quality["voucher_count"] == 2
+    assert quality["unbalanced_vouchers"] == 2

@@ -180,10 +180,14 @@ def _party_key(row: pd.Series) -> str:
 
 
 def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
-    """把含「预提/冲回」文本的 journal line 折叠为经济预提实体（每凭证一条）。
+    """把含「预提/冲回」文本的 journal line 折叠为经济预提实体。
 
-    一张平衡凭证借贷双方摘要都写「预提」时，经济金额是单边（通常取暂估负债腿），
-    绝不能把借贷两行金额相加翻倍。
+    Accrual Economic Entity =
+      voucher_key + liability account + counterparty + amount
+
+    一张凭证可产生多个实体（例如双供应商预提）。
+    优先取暂估负债科目（22*）腿；冲回凭证上负债通常在借方，
+    不再对平衡凭证默认取 credit leg（那会错拿费用贷方）。
     """
     if lines.empty:
         return lines.copy()
@@ -203,46 +207,83 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
             if "总账科目" in grp.columns
             else pd.Series("", index=grp.index)
         )
+        liability_mask = acct.str.startswith("22")
+        liability_lines = grp.loc[liability_mask]
+
+        if not liability_lines.empty:
+            # 按负债科目前缀 + 对手方 拆成多个经济实体
+            liability_work = liability_lines.copy()
+            liability_work["_entity_acct4"] = acct.loc[liability_lines.index].str[:4]
+            liability_work["_entity_party"] = liability_work.apply(_party_key, axis=1)
+            for (_acct4, _party), entity_grp in liability_work.groupby(
+                ["_entity_acct4", "_entity_party"], sort=False, dropna=False,
+            ):
+                selected_amt = float(_amount_abs(entity_grp).fillna(0).sum())
+                if selected_amt <= 0:
+                    continue
+                # 实体代表行：取该组金额最大的一行
+                amts = _amount_abs(entity_grp).fillna(0)
+                row = entity_grp.loc[amts.idxmax()].copy()
+                for col in ("凭证货币价值", "公司代码货币价值", "_amount_abs", "_amount_raw"):
+                    if col in row.index or col in work.columns:
+                        row[col] = selected_amt
+                leg_dc = str(row.get("借/贷标识", "") or "").strip()
+                row["_accrual_entity_leg"] = (
+                    "liability_debit" if leg_dc == "S" else "liability_credit"
+                )
+                row["_accrual_entity_amount"] = selected_amt
+                row["_accrual_line_count"] = int(len(grp))
+                row["_accrual_entity_party"] = str(_party or "")
+                row["_accrual_entity_acct4"] = str(_acct4 or "")
+                entities.append(row)
+            continue
+
+        # 无负债科目：回退到单边经济金额（仍按对手方拆分）
         credit = grp.loc[dc.eq("H")]
         debit = grp.loc[dc.eq("S")]
-        liability = credit.loc[acct.str.startswith("22")] if not credit.empty else credit
+        debit_amt = float(_amount_abs(debit).fillna(0).sum()) if not debit.empty else 0.0
+        credit_amt = float(_amount_abs(credit).fillna(0).sum()) if not credit.empty else 0.0
 
-        if not liability.empty:
-            selected = liability
-            leg = "liability_credit"
+        if debit_amt > 0 and credit_amt > 0:
+            # 平衡凭证且无负债科目：取金额较大单边，再按对手方拆
+            selected = credit if credit_amt >= debit_amt else debit
+            leg = "balanced_credit_leg" if credit_amt >= debit_amt else "balanced_debit_leg"
+            economic_side_amt = max(debit_amt, credit_amt)
         elif not credit.empty:
             selected = credit
             leg = "credit"
+            economic_side_amt = credit_amt
         elif not debit.empty:
             selected = debit
             leg = "debit"
+            economic_side_amt = debit_amt
         else:
             selected = grp
             leg = "all_lines"
+            economic_side_amt = float(_amount_abs(grp).fillna(0).sum())
 
-        selected_amt = float(_amount_abs(selected).fillna(0).sum())
-        # 若借贷两侧都进入候选，经济金额取较大单边（平衡凭证 = 单边金额）
-        debit_amt = float(_amount_abs(debit).fillna(0).sum()) if not debit.empty else 0.0
-        credit_amt = float(_amount_abs(credit).fillna(0).sum()) if not credit.empty else 0.0
-        if debit_amt > 0 and credit_amt > 0:
-            economic_amt = max(debit_amt, credit_amt)
-            if credit_amt >= debit_amt and not credit.empty:
-                selected = liability if not liability.empty else credit
-                leg = "balanced_credit_leg"
-            elif not debit.empty:
-                selected = debit
-                leg = "balanced_debit_leg"
-            selected_amt = economic_amt
-
-        row = selected.iloc[0].copy()
-        # 把实体金额写回标准金额列，供后续配对使用
-        for col in ("凭证货币价值", "公司代码货币价值", "_amount_abs", "_amount_raw"):
-            if col in row.index or col in work.columns:
-                row[col] = selected_amt
-        row["_accrual_entity_leg"] = leg
-        row["_accrual_entity_amount"] = selected_amt
-        row["_accrual_line_count"] = int(len(grp))
-        entities.append(row)
+        selected_work = selected.copy()
+        selected_work["_entity_party"] = selected_work.apply(_party_key, axis=1)
+        party_groups = list(selected_work.groupby("_entity_party", sort=False, dropna=False))
+        for _party, entity_grp in party_groups:
+            selected_amt = float(_amount_abs(entity_grp).fillna(0).sum())
+            if selected_amt <= 0:
+                # 若无法按行拆金额，用整边经济金额均分（极少见）
+                selected_amt = economic_side_amt / max(len(party_groups), 1)
+            if selected_amt <= 0:
+                continue
+            amts = _amount_abs(entity_grp).fillna(0)
+            row = entity_grp.loc[amts.idxmax() if amts.sum() > 0 else entity_grp.index[0]].copy()
+            for col in ("凭证货币价值", "公司代码货币价值", "_amount_abs", "_amount_raw"):
+                if col in row.index or col in work.columns:
+                    row[col] = selected_amt
+            row["_accrual_entity_leg"] = leg
+            row["_accrual_entity_amount"] = selected_amt
+            row["_accrual_line_count"] = int(len(grp))
+            row["_accrual_entity_party"] = str(_party or "")
+            acct_val = str(row.get("总账科目", "") or "")
+            row["_accrual_entity_acct4"] = acct_val[:4]
+            entities.append(row)
 
     if not entities:
         return lines.iloc[0:0].copy()
@@ -257,7 +298,7 @@ def _match_accrual_reversals(
 ) -> tuple[list[dict[str, Any]], pd.DataFrame]:
     """一对一贪心配对：科目前缀 + 对手方 + 相反借贷 + 金额容差。
 
-    输入先折叠为经济预提实体（每凭证一条），再配对。
+    输入先折叠为经济预提实体（一凭证可多实体），再配对。
     返回 (pairs, unmatched_accruals)。无关冲回不会“覆盖”未匹配预提。
     """
     if accruals.empty:

@@ -21,7 +21,7 @@
     "enabled": true,
     "pnl_amount_threshold": 100000,
     "month_end_days": 5,
-    "rationale": "AF型手工凭证424笔，损益科目10万阈值聚焦年末利润调节动机"
+    "rationale": "手工凭证中损益科目大额或月末/年末时点分录，可能存在利润调节动机；按损益金额阈值聚焦异常人工干预"
   },
   "accrual_anomaly": {
     "enabled": true,
@@ -54,7 +54,7 @@
     "enabled": true,
     "coverage_threshold": 0.8,
     "match_window_days": 90,
-    "rationale": "有3年数据，跨年预提冲销覆盖率<80%即为悬空预提，符合文章强调的跨期舞弊风险"
+    "rationale": "跨年预提冲销覆盖率低于阈值时提示悬空预提，对应跨期舞弊与截止性风险"
   },
   "cross_year_revenue": {
     "enabled": true,
@@ -78,18 +78,18 @@
     "enabled": true,
     "keywords": ["资金池", "同名划转", "上划", "下拨"],
     "large_threshold": 10000000,
-    "rationale": "数据中400笔资金池/同名划转，1000万阈值聚焦大额资金占用风险，符合文章第5.2节资金归集风险穿透要求"
+    "rationale": "资金池/同名划转大额交易可能掩盖关联方资金占用；大额阈值聚焦异常资金归集与穿透复核"
   },
   "user_concentration": {
     "enabled": true,
     "concentration_threshold": 0.25,
-    "rationale": "1个用户(01452288)占总行数1/3，25%阈值可捕捉职责分离失效风险，符合文章SoD测试要求"
+    "rationale": "单用户过账量占比过高时职责分离可能失效；集中度阈值用于捕捉SoD失效风险"
   },
   "reversal_pattern": {
     "enabled": true,
     "frequent_count": 5,
     "large_threshold": 500000,
-    "rationale": "2834笔冲销，5笔/用户为频繁冲销阈值，50万为大额冲销阈值，符合文章3.2节冲销风险分析"
+    "rationale": "高频冲销或大额冲销可能存在财务修饰；按用户频次与金额阈值捕捉异常冲销模式"
   },
   "sensitive_fees": {
     "enabled": true,

@@ -489,8 +489,8 @@ def build_financial_summary(df: pd.DataFrame, year: int) -> dict[str, Any]:
     df["_text"] = df["总账科目：长文本"].astype(str).fillna("")
     visual_work = ensure_analysis_columns(df)
     quality = analysis_quality_summary(visual_work)
-    if quality["mixed_document_currency"]:
-        raise ValueError("存在多种凭证币且缺少公司代码货币金额，禁止直接汇总")
+    if quality.get("mixed_analysis_currency") or quality["mixed_document_currency"]:
+        raise ValueError("存在多种凭证币/分析币种，禁止直接汇总金额（请先选择单一报告币种）")
     monthly_pnl_view = monthly_revenue_cost(visual_work)
 
     # 所有财务图表统一使用结合借贷标识与原始正负推断后的金额，避免各模块口径漂移。

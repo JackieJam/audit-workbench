@@ -355,7 +355,8 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
 
     amounts = _amount_abs(df).fillna(0)
     mask = df["供应商编号"].notna() & amounts.gt(0) & amounts.lt(max_single)
-    pay = pd.DataFrame({
+    # 先折叠为凭证级付款事实：(voucher_key, vendor) → 1 笔交易
+    line_pay = pd.DataFrame({
         "_vendor": df.loc[mask, "供应商编号"].astype(str).to_numpy(dtype=object),
         "_date": pd.to_datetime(df.loc[mask, "过账日期"], errors="coerce").to_numpy(),
         "_abs": amounts.loc[mask].to_numpy(dtype=float),
@@ -363,13 +364,27 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
         "_vid": df.loc[mask, "凭证编号"].astype(str).to_numpy(dtype=object),
         "_line": df.index.to_numpy()[mask.to_numpy()],
     })
+    if line_pay.empty:
+        return result
 
+    voucher_facts = (
+        line_pay.groupby(["_vendor", "_vkey"], sort=False, dropna=False)
+        .agg(
+            _date=("_date", "min"),
+            _abs=("_abs", "sum"),
+            _vid=("_vid", "first"),
+            _lines=("_line", list),
+        )
+        .reset_index()
+    )
+    # 凭证合计仍须低于单笔上限（多行加总后可能超限，不再视为「小额拆分」）
+    pay = voucher_facts.loc[voucher_facts["_abs"].lt(max_single)].copy()
     if pay.empty:
         return result
 
     flagged: set[str] = set()
 
-    # 维度1：同日同供应商 — 金额高度相似（差异≤15%）且当日笔数超过该供应商日均 burst_multiplier 倍
+    # 维度1：同日同供应商 — 金额高度相似且当日「凭证笔数」超日均 burst
     day_grouped = pay.groupby(["_vendor", "_date"], sort=False, dropna=False)
     day_stats = day_grouped["_abs"].agg(["size", "sum", "mean", "min", "max"])
     day_stats = day_stats[
@@ -383,7 +398,6 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
             (day_stats["min"] - day_stats["mean"]).abs(),
         ).div(day_stats["mean"]) <= 0.15
     ]
-    # 供应商各日笔数：burst 与「其他日期」的日均比较；无历史基线时不拦（仅靠金额相似）
     vendor_daily_counts = (
         pay.dropna(subset=["_date"])
         .groupby(["_vendor", "_date"], sort=False)
@@ -392,7 +406,7 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
     day_groups = day_grouped.indices
     vkeys = pay["_vkey"].to_numpy(dtype=object)
     vids = pay["_vid"].to_numpy(dtype=object)
-    lines = pay["_line"].to_numpy()
+    line_lists = pay["_lines"].to_numpy(dtype=object)
     for (vendor, day), stats in day_stats.iterrows():
         avg_daily = 0.0
         burst_ratio = None
@@ -413,13 +427,17 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
             continue
         group_vkeys = vkeys[positions]
         group_vids = vids[positions]
+        group_lines = line_lists[positions]
         for vkey in pd.unique(group_vkeys):
             if vkey not in flagged:
                 flagged.add(vkey)
                 voucher_mask = group_vkeys == vkey
                 vid = str(group_vids[voucher_mask][0])
+                line_indices: list[int] = []
+                for lines in group_lines[voucher_mask]:
+                    line_indices.extend(lines if isinstance(lines, list) else [lines])
                 burst_note = (
-                    f"；当日笔数{int(stats['size'])}为其余日均{avg_daily:.1f}的"
+                    f"；当日{int(stats['size'])}笔凭证为其余日均{avg_daily:.1f}的"
                     f"{burst_ratio:.1f}倍（阈值{burst_multiplier:g}倍）"
                     if burst_ratio is not None
                     else f"；无历史日均基线，已按金额相似命中（burst_multiplier={burst_multiplier:g}）"
@@ -429,16 +447,16 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
                     voucher_key=str(vkey),
                     rule_type="化整为零(同日拆分)",
                     evidence=(
-                        f"供应商{vendor}同日{int(stats['size'])}笔金额相似"
+                        f"供应商{vendor}同日{int(stats['size'])}笔凭证金额相似"
                         f"（均值{stats['mean']:,.0f}，差异≤15%），合计{stats['sum']:,.0f}"
                         f"{burst_note}"
                     ),
-                    line_indices=tuple(lines[positions][voucher_mask].tolist()),
+                    line_indices=tuple(line_indices),
                     priority=5,
                     year=_voucher_year(df[df[VOUCHER_KEY_COLUMN].eq(vkey)]),
                 ))
 
-    # 维度2：窗口期内金额高度相似（差异≤10%）
+    # 维度2：窗口期内金额高度相似（按凭证笔数，非 journal line）
     dates = pay["_date"].to_numpy()
     abs_values = pay["_abs"].to_numpy(dtype=float)
     vendor_groups = pay.groupby("_vendor", sort=False).indices
@@ -451,6 +469,7 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
         vendor_amounts = abs_values[order]
         vendor_vkeys = vkeys[order]
         vendor_vids = vids[order]
+        vendor_lines = line_lists[order]
         seen_windows = np.zeros(len(order), dtype=bool)
         right = 0
 
@@ -473,18 +492,24 @@ def rule_splitting(df: pd.DataFrame, cfg: dict) -> RuleResult:
                 seen_windows[left:right] = True
                 window_vkeys = vendor_vkeys[left:right]
                 window_vids = vendor_vids[left:right]
-                window_lines = lines[order[left:right]]
+                window_line_lists = vendor_lines[left:right]
                 for vkey in pd.unique(window_vkeys):
                     if vkey not in flagged:
                         flagged.add(vkey)
                         voucher_mask = window_vkeys == vkey
                         vid = str(window_vids[voucher_mask][0])
+                        line_indices = []
+                        for lines in window_line_lists[voucher_mask]:
+                            line_indices.extend(lines if isinstance(lines, list) else [lines])
                         result.hits.append(RuleHit(
                             voucher_id=vid,
                             voucher_key=str(vkey),
                             rule_type="化整为零(窗口相似)",
-                            evidence=f"供应商{vendor}在{window_days}天内{right - left}笔金额相似（差异≤10%）",
-                            line_indices=tuple(window_lines[voucher_mask].tolist()),
+                            evidence=(
+                                f"供应商{vendor}在{window_days}天内"
+                                f"{right - left}笔凭证金额相似（差异≤10%）"
+                            ),
+                            line_indices=tuple(line_indices),
                             priority=4,
                             year=_voucher_year(df[df[VOUCHER_KEY_COLUMN].eq(vkey)]),
                         ))

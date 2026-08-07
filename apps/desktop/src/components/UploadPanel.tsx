@@ -71,11 +71,20 @@ export function UploadPanel({ projectId, onImported }: Props) {
 
   const mappingRows = useMemo(() => {
     if (!detection) return [];
+    const tierOrder: Record<string, number> = { core: 0, important: 1, auxiliary: 2 };
+    const fromStandard = (detection.standard_columns ?? []).map((c) => c.name);
     const keys = new Set([
+      ...fromStandard,
       ...Object.keys(detection.suggested_mapping),
       ...Object.keys(editableMapping),
     ]);
-    return Array.from(keys).sort((a, b) => a.localeCompare(b, "zh"));
+    const tierOf = (name: string) =>
+      detection.standard_columns?.find((c) => c.name === name)?.tier ?? "auxiliary";
+    return Array.from(keys).sort((a, b) => {
+      const tierDiff = (tierOrder[tierOf(a)] ?? 9) - (tierOrder[tierOf(b)] ?? 9);
+      if (tierDiff !== 0) return tierDiff;
+      return a.localeCompare(b, "zh");
+    });
   }, [detection, editableMapping]);
 
   const busy = detect.isPending || commit.isPending;
@@ -146,16 +155,25 @@ export function UploadPanel({ projectId, onImported }: Props) {
       {detection && !busy && (
         <div className="detect-box">
           <p className="muted">
-            编辑列映射后确认导入。选择「{NO_COLUMN_SENTINEL}」为硬否决，系统不会再自动认回该标准列。
+            编辑列映射后确认导入。系统未自动识别的标准字段也会列出，可手动指定源列。
+            选择「{NO_COLUMN_SENTINEL}」为硬否决，系统不会再自动认回该标准列。
             （并集预览：{detection.file_label}）
           </p>
           <ul className="mapping-list mapping-list--editable">
             {mappingRows.map((std) => {
               const src = editableMapping[std] ?? detection.suggested_mapping[std] ?? NO_COLUMN_SENTINEL;
               const match = detection.mapping_matches[std];
+              const meta = detection.standard_columns?.find((c) => c.name === std);
+              const tierLabel =
+                meta?.tier === "core" ? "核心" : meta?.tier === "important" ? "推荐" : "可选";
               return (
                 <li key={std} className="mapping-edit-row">
                   <code className="mapping-std">{std}</code>
+                  {meta && (
+                    <span className="muted" title={meta.description}>
+                      [{tierLabel}]
+                    </span>
+                  )}
                   <span className="muted">←</span>
                   <select
                     value={src}

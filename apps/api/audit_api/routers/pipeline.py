@@ -53,6 +53,8 @@ class VerifyRequest(BaseModel):
     redaction: str = Field("pseudonym", pattern="^(none|pseudonym)$")
     # 发送前数据边界知情确认；未确认时接口拒绝外发
     confirm_data_boundary: bool = False
+    # current_sample=核验当前抽样；risk_signals=按规则高风险信号取 top N
+    verification_scope: Literal["current_sample", "risk_signals"] = "current_sample"
 
 
 @router.get("/{project_id}/rules")
@@ -269,6 +271,7 @@ def run_verify(
             base_url=runtime.base_url,
             max_verify=req.max_verify,
             redaction=req.redaction,
+            verification_scope=req.verification_scope,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

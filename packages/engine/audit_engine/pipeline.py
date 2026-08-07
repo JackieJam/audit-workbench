@@ -311,6 +311,8 @@ class AnalysisPipeline:
         return profiles
 
     def run_cross_year(self, project_id: str) -> list[dict]:
+        from audit_engine.data_columns import collect_analysis_currencies
+
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
         expected_token = _analysis_token(state)
@@ -320,6 +322,14 @@ class AnalysisPipeline:
             year: self._store.get_analysis_work_df(project_id, year)
             for year in manifest.years
         }
+        # 币种不变量：任何参与跨期金额比较的数据，_amount_currency 不得 > 1
+        currencies = collect_analysis_currencies(year_map.values())
+        selected = self._store.current_analysis_currency(project_id)
+        if len(currencies) > 1 and not selected:
+            raise ValueError(
+                f"跨年金额分析被阻断：检测到多种分析币种 {sorted(currencies)}。"
+                "请先在财务画像选择单一报告币种（不做汇率折算）。"
+            )
         findings = run_cross_year_analysis(year_map, rules, category_overrides=overrides)
         serialized = [_finding_to_dict(f) for f in findings]
         def update(latest: dict[str, Any]) -> dict[str, Any]:
@@ -736,7 +746,10 @@ class AnalysisPipeline:
         base_url: str,
         max_verify: int = 50,
         redaction: str | None = None,
+        verification_scope: str = "current_sample",
     ) -> dict[str, Any]:
+        from datetime import UTC, datetime
+
         from audit_engine.llm_verifier import (
             RedactionMode,
             describe_llm_verify_boundary,
@@ -748,6 +761,8 @@ class AnalysisPipeline:
         mode: RedactionMode | None = None
         if redaction in {"none", "pseudonym"}:
             mode = redaction  # type: ignore[assignment]
+
+        scope = verification_scope if verification_scope in {"current_sample", "risk_signals"} else "current_sample"
 
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
@@ -764,18 +779,80 @@ class AnalysisPipeline:
         if unified.empty:
             raise ValueError("项目无序时账数据")
 
+        sampling_plan = state.get("sampling_plan") or {}
+        samples = list(state.get("samples") or [])
+        sample_voucher_keys = [
+            str(
+                row.get(VOUCHER_KEY_COLUMN)
+                or row.get("凭证唯一键")
+                or row.get("_voucher_key")
+                or ""
+            ).strip()
+            for row in samples
+        ]
+        sample_voucher_keys = [k for k in sample_voucher_keys if k]
+        sample_voucher_keys = list(dict.fromkeys(sample_voucher_keys))
+
+        if scope == "current_sample":
+            if not sample_voucher_keys:
+                raise ValueError(
+                    "当前无抽样结果；请先在抽样底稿页完成抽样，"
+                    "或改用 verification_scope=risk_signals 核验规则高风险信号"
+                )
+            scoped_keys: set[str] | None = set(sample_voucher_keys)
+            # 核验对象 = 当前样本；max_verify 至少覆盖样本规模
+            effective_max = max(int(max_verify), len(sample_voucher_keys))
+        else:
+            scoped_keys = None
+            effective_max = int(max_verify)
+
         cached_results = self._store.load_rule_run_results(project_id, state=state)
         rule_results = _rule_results_from_dict(cached_results)
-        if not rule_results:
+        if not rule_results and scope == "risk_signals":
             cached_results = self.run_rules(project_id)
             state = self._store.load_state(project_id)
             expected_token = _analysis_token(state)
             rule_results = _rule_results_from_dict(cached_results)
 
-        if not any(rr.hits for rr in rule_results):
+        selection_trace = sampling_plan.get("selection_trace") or {}
+        population_snapshot = sampling_plan.get("population_snapshot") or {}
+        rule_run_context = state.get("rule_run_context") or {}
+        verification_run_id = "vr_" + hashlib.sha256(
+            "|".join([
+                scope,
+                str(selection_trace.get("selection_id") or ""),
+                str(population_snapshot.get("population_id") or ""),
+                str(rule_run_context.get("rule_run_id") or ""),
+                str(state.get("data_version") or ""),
+                ",".join(sorted(scoped_keys or [])),
+                model,
+                base_url,
+                mode or "pseudonym",
+            ]).encode()
+        ).hexdigest()[:16]
+        run_context = {
+            "verification_run_id": verification_run_id,
+            "verification_scope": scope,
+            "selection_id": selection_trace.get("selection_id"),
+            "population_id": population_snapshot.get("population_id"),
+            "rule_run_id": rule_run_context.get("rule_run_id"),
+            "data_version": state.get("data_version"),
+            "sample_voucher_keys": list(scoped_keys) if scoped_keys is not None else sample_voucher_keys,
+            "sample_voucher_count": len(scoped_keys) if scoped_keys is not None else len(sample_voucher_keys),
+            "model": model,
+            "endpoint": base_url,
+            "redaction": mode or "pseudonym",
+            "boundary_policy_version": describe_llm_verify_boundary(
+                base_url, model, redaction=mode,
+            ).get("policy_version"),
+            "verified_at": datetime.now(UTC).isoformat(),
+        }
+
+        if scope == "risk_signals" and not any(rr.hits for rr in rule_results):
             def clear(latest: dict[str, Any]) -> dict[str, Any]:
                 _assert_analysis_token(latest, expected_token)
                 latest["llm_judgments"] = {}
+                latest["verification_run_context"] = run_context
                 return latest
 
             boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
@@ -784,6 +861,7 @@ class AnalysisPipeline:
                 "summary": summarize_judgments({}),
                 "judgments": {},
                 "data_boundary": boundary,
+                "verification_run_context": run_context,
             }
 
         judgments = verify_with_llm(
@@ -792,9 +870,20 @@ class AnalysisPipeline:
             api_key=api_key,
             model=model,
             base_url=base_url,
-            max_verify=max_verify,
+            max_verify=effective_max,
             redaction=mode,
+            voucher_keys=scoped_keys,
+            verification_scope=scope,  # type: ignore[arg-type]
         )
+        # 记录实际核验的 voucher_key 集合
+        verified_keys = sorted({
+            str(getattr(j, "voucher_key", "") or "")
+            for items in judgments.values()
+            for j in items
+            if str(getattr(j, "voucher_key", "") or "").strip()
+        })
+        run_context["verified_voucher_keys"] = verified_keys
+        run_context["verified_voucher_count"] = len(verified_keys)
         serialized = judgments_to_state(judgments)
         boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
 
@@ -802,6 +891,10 @@ class AnalysisPipeline:
             _assert_analysis_token(latest, expected_token)
             latest["llm_judgments"] = serialized
             latest["llm_verify_boundary"] = boundary
+            latest["verification_run_context"] = run_context
+            history = list(latest.get("verification_run_history") or [])
+            history.append(run_context)
+            latest["verification_run_history"] = history[-50:]
             return latest
 
         self._store.update_state(project_id, update)
@@ -809,4 +902,5 @@ class AnalysisPipeline:
             "summary": summarize_judgments(judgments),
             "judgments": serialized,
             "data_boundary": boundary,
+            "verification_run_context": run_context,
         }

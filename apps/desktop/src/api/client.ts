@@ -64,6 +64,7 @@ export type DetectResponse = {
   source_columns: string[];
   suggested_mapping: Record<string, string>;
   mapping_matches: Record<string, { source: string; score: number; method: string }>;
+  standard_columns: Array<{ name: string; tier: string; description: string }>;
   sample_rows: Record<string, unknown>[];
   per_file?: FileDetection[];
 };
@@ -1233,6 +1234,7 @@ export const api = {
       max_verify?: number;
       redaction?: "none" | "pseudonym";
       confirm_data_boundary?: boolean;
+      verification_scope?: "current_sample" | "risk_signals";
     },
   ) =>
     request<{
@@ -1258,6 +1260,14 @@ export const api = {
         pseudonym_fields?: string[];
         policy_version?: string;
         warning: string;
+      };
+      verification_run_context?: {
+        verification_run_id?: string;
+        verification_scope?: string;
+        selection_id?: string;
+        population_id?: string;
+        sample_voucher_count?: number;
+        verified_voucher_count?: number;
       };
     }>(`/projects/${projectId}/pipeline/verify`, {
       method: "POST",

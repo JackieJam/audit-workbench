@@ -188,13 +188,19 @@ export function SamplingPage({ project }: Props) {
     `audit-llm-boundary-consent:${endpoint}|${policyVersion}`;
 
   const runVerify = useMutation({
-    mutationFn: () =>
-      api.runVerify(project!.project_id, {
+    mutationFn: () => {
+      const sampleCount =
+        (extract.data ?? samples.data)?.samples?.length
+        ?? (extract.data ?? samples.data)?.voucher_count
+        ?? 50;
+      return api.runVerify(project!.project_id, {
         profile_id: selectedProfileId ?? "",
-        max_verify: 50,
+        max_verify: Math.max(50, Number(sampleCount) || 50),
         redaction: "pseudonym",
         confirm_data_boundary: true,
-      }),
+        verification_scope: "current_sample",
+      });
+    },
     onSuccess: (data) => {
       const boundary = data.data_boundary;
       if (boundary?.endpoint && boundary.policy_version) {
@@ -651,7 +657,7 @@ export function SamplingPage({ project }: Props) {
         >
           {runVerify.isPending || boundaryLoading
             ? "辅助核验中（可能需数分钟）…"
-            : "LLM 辅助核验（非审计结论）"}
+            : "LLM 核验当前样本（非审计结论）"}
         </button>
         {verifySummary && verifyStatus.data?.has_judgments && (
           <span className="muted">

@@ -153,7 +153,19 @@ def save_endpoint_allowlist(
 
 
 def assert_llm_endpoint_allowed(base_url: str) -> None:
-    """若白名单启用，则拦截未授权 endpoint。"""
+    """若白名单启用，则拦截未授权 endpoint；非 loopback 必须 HTTPS。"""
+    text = str(base_url or "").strip()
+    if text:
+        parsed = urlparse(text if "://" in text else "https://" + text)
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        loopback = host in {"localhost", "127.0.0.1", "::1"}
+        if not loopback and scheme and scheme != "https":
+            raise ValueError(
+                f"非本机 LLM endpoint 必须使用 HTTPS：{base_url}。"
+                "localhost / 127.0.0.1 允许 HTTP。"
+            )
+
     policy = load_endpoint_allowlist()
     if not policy.get("enabled"):
         return

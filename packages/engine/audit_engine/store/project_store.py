@@ -211,12 +211,14 @@ class ProjectStore:
                 if str(value).strip() and str(value).strip() != "未维护"
             }
             available.update(year_currencies)
-            basis = str(work["_currency_basis"].iat[0]) if "_currency_basis" in work else ""
-            requires_scope = requires_scope or (basis == "document" and len(year_currencies) > 1)
+            # 不变量：无论 document / company basis，分析币种 > 1 就必须选单一报告币
+            requires_scope = requires_scope or len(year_currencies) > 1
+        # 跨年度各自单币但币种不同，同样强制选择
+        requires_scope = requires_scope or len(available) > 1
         if requested and requested not in available:
             raise ValueError(f"项目中不存在币种 {requested}；可选币种：{sorted(available)}")
         if not requested and requires_scope:
-            raise ValueError("当前项目包含多种凭证币，必须选择一个币种后才能进行金额分析")
+            raise ValueError("当前项目包含多种分析币种，必须选择一个币种后才能进行金额分析")
 
         now = datetime.now(UTC).isoformat()
 

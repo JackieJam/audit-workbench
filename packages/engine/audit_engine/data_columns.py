@@ -174,6 +174,21 @@ def _usable_amount_column(df: pd.DataFrame) -> str | None:
     return None
 
 
+def collect_analysis_currencies(frames: Any) -> set[str]:
+    """汇总多份分析帧中的有效 `_amount_currency`（排除空/未维护）。"""
+    currencies: set[str] = set()
+    for df in frames:
+        if df is None or getattr(df, "empty", True):
+            continue
+        if "_amount_currency" not in df.columns:
+            continue
+        for value in df["_amount_currency"].dropna():
+            text = str(value).strip().upper()
+            if text and text not in {"未维护", "NAN", "NONE", "(空)"}:
+                currencies.add(text)
+    return currencies
+
+
 def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
     """Describe the minimum input gate for formal journal rule analysis."""
     total = int(len(df))
@@ -183,27 +198,34 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
             {"code": "empty_population", "severity": "blocking", "message": "审计总体为空"},
         ]}
 
-    voucher = (
-        _identity_text(df["凭证编号"])
-        if "凭证编号" in df.columns
-        else pd.Series("", index=df.index, dtype="string")
+    work = ensure_voucher_identity(df)
+    voucher_key = (
+        _identity_text(work[VOUCHER_KEY_COLUMN])
+        if VOUCHER_KEY_COLUMN in work.columns
+        else _identity_text(work["凭证编号"]) if "凭证编号" in work.columns
+        else pd.Series("", index=work.index, dtype="string")
     )
-    year, _ = _identity_year(df)
+    voucher = (
+        _identity_text(work["凭证编号"])
+        if "凭证编号" in work.columns
+        else pd.Series("", index=work.index, dtype="string")
+    )
+    year, _ = _identity_year(work)
     posting_date = (
-        pd.to_datetime(df["过账日期"], errors="coerce")
-        if "过账日期" in df.columns
-        else pd.Series(pd.NaT, index=df.index)
+        pd.to_datetime(work["过账日期"], errors="coerce")
+        if "过账日期" in work.columns
+        else pd.Series(pd.NaT, index=work.index)
     )
     dc = (
-        df["借/贷标识"].astype("string").fillna("").str.strip()
-        if "借/贷标识" in df.columns
-        else pd.Series("", index=df.index, dtype="string")
+        work["借/贷标识"].astype("string").fillna("").str.strip()
+        if "借/贷标识" in work.columns
+        else pd.Series("", index=work.index, dtype="string")
     )
-    amount_col = _usable_amount_column(df)
+    amount_col = _usable_amount_column(work)
     amount_valid = (
-        pd.to_numeric(df[amount_col], errors="coerce").notna()
+        pd.to_numeric(work[amount_col], errors="coerce").notna()
         if amount_col
-        else pd.Series(False, index=df.index)
+        else pd.Series(False, index=work.index)
     )
     masks = {
         "voucher": voucher.ne(""),
@@ -212,9 +234,9 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
         "dc": dc.isin(["S", "H"]),
         "amount": amount_valid,
         "account": (
-            _identity_text(df["总账科目"]).ne("")
-            if "总账科目" in df.columns
-            else pd.Series(False, index=df.index)
+            _identity_text(work["总账科目"]).ne("")
+            if "总账科目" in work.columns
+            else pd.Series(False, index=work.index)
         ),
     }
     labels = {
@@ -243,8 +265,8 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
                 "row_count": missing_count,
             })
 
-    if "公司代码" not in df.columns or _identity_text(
-        df.get("公司代码", pd.Series("", index=df.index))
+    if "公司代码" not in work.columns or _identity_text(
+        work.get("公司代码", pd.Series("", index=work.index))
     ).eq("").any():
         issues.append({
             "code": "missing_company_code",
@@ -253,31 +275,53 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
         })
 
     currency_dist: dict[str, int] = {}
-    if amount_col == "凭证货币价值" and "凭证货币代码" in df.columns:
+    # 币种不变量：无论 document / company basis，分析金额币种 > 1 即阻断合并
+    currency_series = None
+    if amount_col == "公司代码货币价值" and "公司代码货币代码" in work.columns:
+        currency_series = work.loc[amount_valid, "公司代码货币代码"]
+    elif amount_col == "凭证货币价值" and "凭证货币代码" in work.columns:
+        currency_series = work.loc[amount_valid, "凭证货币代码"]
+    elif "_amount_currency" in work.columns:
+        currency_series = work.loc[amount_valid, "_amount_currency"]
+
+    if currency_series is not None:
         currencies = {
             str(value).strip().upper()
-            for value in df.loc[amount_valid, "凭证货币代码"].dropna()
-            if str(value).strip() and str(value).strip().lower() not in {"nan", "none"}
+            for value in currency_series.dropna()
+            if str(value).strip() and str(value).strip().lower() not in {"nan", "none", "未维护"}
         }
         currency_dist = (
-            df.loc[amount_valid, "凭证货币代码"]
-            .astype("string").fillna("").str.strip().str.upper()
-            .replace({"": "(空)", "NAN": "(空)", "NONE": "(空)"})
+            currency_series.astype("string").fillna("").str.strip().str.upper()
+            .replace({"": "(空)", "NAN": "(空)", "NONE": "(空)", "未维护": "(空)"})
             .value_counts()
             .astype(int)
             .to_dict()
         )
         if len(currencies) > 1:
+            basis_label = "本位币" if amount_col == "公司代码货币价值" else "凭证币"
             issues.append({
-                "code": "mixed_document_currencies",
+                "code": "mixed_analysis_currencies",
                 "severity": "blocking",
-                "message": f"检测到多种凭证币 {sorted(currencies)} 且未使用本位币金额，禁止合并规则分析",
+                "message": (
+                    f"检测到多种{basis_label} {sorted(currencies)}，"
+                    "禁止直接合并金额分析（需选择单一报告币种或提供汇率折算）"
+                ),
             })
+            if amount_col == "凭证货币价值":
+                # 兼容旧调用方对 mixed_document_currencies 的检查
+                issues.append({
+                    "code": "mixed_document_currencies",
+                    "severity": "blocking",
+                    "message": (
+                        f"检测到多种凭证币 {sorted(currencies)} 且未使用本位币金额，"
+                        "禁止合并规则分析"
+                    ),
+                })
 
     company_dist: dict[str, int] = {}
-    if "公司代码" in df.columns:
+    if "公司代码" in work.columns:
         company_dist = (
-            _identity_text(df["公司代码"])
+            _identity_text(work["公司代码"])
             .replace({"": "(空)"})
             .value_counts()
             .astype(int)
@@ -291,13 +335,13 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
                 "message": "多公司代码并存且存在空公司代码，金额/凭证唯一性可能失真",
             })
 
-    # 借贷平衡粗检：按凭证汇总有符号金额，显著不平衡的凭证占比
+    # 借贷平衡粗检：按 voucher_key 汇总有符号金额
     unbalanced_vouchers = 0
-    voucher_count = int(voucher[voucher.ne("")].nunique()) if voucher.ne("").any() else 0
-    if amount_col and "借/贷标识" in df.columns and voucher_count > 0:
+    voucher_count = int(voucher_key[voucher_key.ne("")].nunique()) if voucher_key.ne("").any() else 0
+    if amount_col and "借/贷标识" in work.columns and voucher_count > 0:
         try:
-            signed = normalize_signed_amount(df[amount_col], df["借/贷标识"], voucher)
-            balance = pd.DataFrame({"v": voucher, "amt": signed}).groupby("v", sort=False)["amt"].sum()
+            signed = normalize_signed_amount(work[amount_col], work["借/贷标识"], voucher_key)
+            balance = pd.DataFrame({"v": voucher_key, "amt": signed}).groupby("v", sort=False)["amt"].sum()
             unbalanced_vouchers = int((balance.abs() > 0.01).sum())
             unbalanced_rate = unbalanced_vouchers / max(len(balance), 1)
             if unbalanced_rate > 0.05:
@@ -315,8 +359,8 @@ def audit_input_quality(df: pd.DataFrame) -> dict[str, Any]:
 
     # 来源文件字段完整率（多文件异构映射风险）
     source_file_coverage: dict[str, Any] = {}
-    if "_source_file" in df.columns and amount_col:
-        for src_file, grp in df.groupby("_source_file", dropna=False):
+    if "_source_file" in work.columns and amount_col:
+        for src_file, grp in work.groupby("_source_file", dropna=False):
             amt_ok = int(pd.to_numeric(grp[amount_col], errors="coerce").notna().sum())
             source_file_coverage[str(src_file or "(unknown)")] = {
                 "rows": int(len(grp)),
@@ -745,9 +789,13 @@ def analysis_quality_summary(
     currency_distribution: list[dict[str, object]] = []
     if not work.empty and "_amount_currency" in work.columns:
         voucher_col = (
-            work["凭证编号"].fillna("").astype(str)
-            if "凭证编号" in work.columns
-            else pd.Series("", index=work.index)
+            work[VOUCHER_KEY_COLUMN].fillna("").astype(str)
+            if VOUCHER_KEY_COLUMN in work.columns
+            else (
+                work["凭证编号"].fillna("").astype(str)
+                if "凭证编号" in work.columns
+                else pd.Series("", index=work.index)
+            )
         )
         distribution = (
             work.assign(
@@ -775,6 +823,7 @@ def analysis_quality_summary(
             for _, row in distribution.iterrows()
         ]
     mixed_document_currency = currency_basis == "document" and len(currencies) > 1
+    mixed_analysis_currency = len(currencies) > 1
     return {
         "amount_source": str(work["_amount_source"].iat[0]) if not work.empty else "",
         "amount_sign_mode": str(work["_amount_sign_mode"].iat[0]) if not work.empty else "",
@@ -782,7 +831,8 @@ def analysis_quality_summary(
         "currency_basis": currency_basis,
         "currencies": currencies,
         "mixed_document_currency": mixed_document_currency,
-        "amounts_comparable": not mixed_document_currency,
+        "mixed_analysis_currency": mixed_analysis_currency,
+        "amounts_comparable": not mixed_analysis_currency,
         "currency_distribution": currency_distribution,
         "total_absolute_entry_amount": total_amount,
         "unclassified_amount": unclassified_amount,

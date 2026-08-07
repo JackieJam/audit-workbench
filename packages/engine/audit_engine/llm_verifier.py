@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,6 +21,7 @@ from audit_engine.llm_endpoint_policy import (
     assert_llm_endpoint_allowed,
     load_endpoint_allowlist,
 )
+from audit_engine.rule_engine import RuleHit, RuleResult
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +29,6 @@ RedactionMode = Literal["none", "pseudonym"]
 
 if TYPE_CHECKING:
     import pandas as pd
-
-    from audit_engine.rule_engine import RuleHit, RuleResult
 
 
 # 三态判断：只有 CONFIRMED 可进入确认率分子；fallback / incomplete → PENDING_REVIEW
@@ -83,10 +84,12 @@ RULE_CONTEXTS = {
 
 SYSTEM_PROMPT = """你是一名内部审计专家，正在核实序时账中的疑似风险凭证。
 对每个凭证，判断是否构成真实审计风险，并给出核查建议。
-仅输出 JSON 数组，不要其他文字。"""
+仅输出 JSON 数组，不要其他文字。每个条目必须原样回传 verify_id，不要编造或合并。"""
 
 _LLM_VERIFY_TIMEOUT_SECONDS = 90.0
 _LLM_RETRY_BACKOFF_BASE = 1.5
+_VERIFY_ID_PREFIX = "VERIFY_"
+VerificationScope = Literal["current_sample", "risk_signals"]
 
 
 def judgment_to_dict(j: LLMJudgment) -> dict[str, Any]:
@@ -188,6 +191,7 @@ def summarize_judgments(all_judgments: dict[str, list[LLMJudgment]]) -> dict[str
 
 # LLM 外发字段清单——产品化治理边界（发送前可提示用户）
 LLM_VERIFY_OUTBOUND_FIELDS: tuple[str, ...] = (
+    "verify_id",
     "凭证编号",
     "过账日期",
     "凭证类型",
@@ -201,7 +205,7 @@ LLM_VERIFY_OUTBOUND_FIELDS: tuple[str, ...] = (
     "用户名",
 )
 _PSEUDONYM_FIELDS = ("供应商", "客户", "用户名", "凭证编号")
-LLM_BOUNDARY_POLICY_VERSION = "2026-08-boundary-v1"
+LLM_BOUNDARY_POLICY_VERSION = "2026-08-boundary-v2"
 
 
 def default_redaction_mode() -> RedactionMode:
@@ -211,21 +215,60 @@ def default_redaction_mode() -> RedactionMode:
     return mode  # type: ignore[return-value]
 
 
-def _pseudo_token(kind: str, value: object) -> str:
+def _pseudonym_secret(run_secret: str | None = None) -> bytes:
+    """伪名化/verify_id 密钥：优先本次 run 盐，其次环境变量，最后进程内随机。"""
+    if run_secret:
+        return run_secret.encode("utf-8")
+    env = os.environ.get("AUDIT_WORKBENCH_PSEUDONYM_SECRET", "").strip()
+    if env:
+        return env.encode("utf-8")
+    # 进程级盐：同进程内稳定，避免纯 sha256(低熵值) 可字典攻击
+    global _PROCESS_PSEUDONYM_SECRET  # noqa: PLW0603
+    try:
+        secret = _PROCESS_PSEUDONYM_SECRET
+    except NameError:
+        secret = secrets.token_hex(16)
+        _PROCESS_PSEUDONYM_SECRET = secret  # type: ignore[misc]
+    return str(secret).encode("utf-8")
+
+
+def _pseudo_token(kind: str, value: object, *, run_secret: str | None = None) -> str:
     text = "" if value is None else str(value).strip()
     if not text or text.lower() in {"nan", "none", "未维护"}:
         return ""
-    digest = hashlib.sha256(f"{kind}:{text}".encode()).hexdigest()[:10]
+    digest = hmac.new(
+        _pseudonym_secret(run_secret),
+        f"{kind}:{text}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:10]
     return f"{kind}_{digest}"
 
 
-def redact_llm_row(row: dict[str, Any], mode: RedactionMode) -> dict[str, Any]:
+def make_verify_id(voucher_key: str, *, run_secret: str | None = None) -> str:
+    """唯一核验响应标识：来自 voucher_key 的 HMAC，不暴露真实凭证号。"""
+    key = str(voucher_key or "").strip()
+    if not key:
+        return ""
+    digest = hmac.new(
+        _pseudonym_secret(run_secret),
+        f"verify:{key}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:12]
+    return f"{_VERIFY_ID_PREFIX}{digest}"
+
+
+def redact_llm_row(
+    row: dict[str, Any],
+    mode: RedactionMode,
+    *,
+    run_secret: str | None = None,
+) -> dict[str, Any]:
     if mode == "none":
         return row
     out = dict(row)
     for field in _PSEUDONYM_FIELDS:
         if field in out and out[field] not in (None, ""):
-            out[field] = _pseudo_token(field, out[field])
+            out[field] = _pseudo_token(field, out[field], run_secret=run_secret)
     return out
 
 
@@ -239,9 +282,15 @@ def describe_llm_verify_boundary(
     mode = redaction or default_redaction_mode()
     fields = list(LLM_VERIFY_OUTBOUND_FIELDS)
     if mode == "pseudonym":
-        note = "供应商/客户/用户名/凭证编号已伪名化（不可逆 hash）；「文本/摘要」仍为原文"
+        note = (
+            "供应商/客户/用户名/凭证编号已伪名化（HMAC）；"
+            "模型仅回传 verify_id；「文本/摘要」仍为原文"
+        )
     else:
-        note = "未脱敏：将发送原始供应商/客户/用户名/凭证编号；「文本/摘要」仍为原文"
+        note = (
+            "未脱敏：将发送原始供应商/客户/用户名/凭证编号；"
+            "模型仅回传 verify_id；「文本/摘要」仍为原文"
+        )
     policy = load_endpoint_allowlist()
     return {
         "endpoint": base_url,
@@ -286,6 +335,71 @@ def _hit_meta(hit: Any) -> dict[str, str]:
     }
 
 
+def _synthetic_sample_hit(voucher_key: str) -> RuleHit:
+    """为无规则命中的抽样凭证构造核验占位 hit。"""
+    display = voucher_key
+    year = None
+    parts = str(voucher_key).split("|")
+    if len(parts) >= 4 and parts[0] == "VK":
+        try:
+            year = int(parts[2])
+        except ValueError:
+            year = None
+        display = parts[3]
+    return RuleHit(
+        voucher_id=display,
+        rule_type="抽样核验",
+        evidence="当前抽样样本（无规则命中）",
+        line_indices=(),
+        priority=1,
+        year=year,
+        voucher_key=voucher_key,
+    )
+
+
+def _select_verify_hits(
+    rule_results: list[RuleResult],
+    *,
+    max_verify: int,
+    voucher_keys: set[str] | None,
+    verification_scope: VerificationScope,
+) -> list[tuple[str, RuleHit]]:
+    all_hits: list[tuple[str, RuleHit]] = []
+    for rr in rule_results:
+        for h in rr.hits:
+            all_hits.append((rr.rule_name, h))
+    all_hits.sort(key=lambda x: x[1].priority, reverse=True)
+
+    top_hits: list[tuple[str, RuleHit]] = []
+    seen_keys: set[str] = set()
+    scoped = voucher_keys or set()
+
+    if verification_scope == "current_sample" and scoped:
+        hit_by_key: dict[str, tuple[str, RuleHit]] = {}
+        for rule_name, hit in all_hits:
+            key = _hit_voucher_key(hit)
+            if key in scoped and key not in hit_by_key:
+                hit_by_key[key] = (rule_name, hit)
+        for key in sorted(scoped):
+            if len(top_hits) >= max_verify:
+                break
+            if key in hit_by_key:
+                top_hits.append(hit_by_key[key])
+            else:
+                top_hits.append(("抽样核验", _synthetic_sample_hit(key)))
+        return top_hits
+
+    for rule_name, hit in all_hits:
+        hit_key = _hit_identity_key(hit)
+        voucher_key = _hit_voucher_key(hit)
+        if scoped and voucher_key not in scoped:
+            continue
+        if hit_key and hit_key not in seen_keys and len(top_hits) < max_verify:
+            seen_keys.add(hit_key)
+            top_hits.append((rule_name, hit))
+    return top_hits
+
+
 def verify_with_llm(
     df: pd.DataFrame,
     rule_results: list[RuleResult],
@@ -297,11 +411,16 @@ def verify_with_llm(
     max_verify: int = 50,
     progress_callback=None,
     redaction: RedactionMode | None = None,
+    *,
+    voucher_keys: set[str] | list[str] | None = None,
+    verification_scope: VerificationScope = "risk_signals",
+    run_secret: str | None = None,
 ) -> dict[str, list[LLMJudgment]]:
-    """对 top N 规则命中凭证调用 LLM 核实，返回 {rule_name: [LLMJudgment]}。"""
+    """对规则命中或当前抽样集合调用 LLM 核实，返回 {rule_name: [LLMJudgment]}。"""
 
     assert_llm_endpoint_allowed(base_url)
     mode = redaction or default_redaction_mode()
+    secret = run_secret or secrets.token_hex(16)
     boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
     logger.warning("LLM verify data boundary: %s", boundary["warning"])
     if progress_callback:
@@ -319,19 +438,13 @@ def verify_with_llm(
     )
     all_judgments: dict[str, list[LLMJudgment]] = {}
 
-    all_hits: list[tuple[str, RuleHit]] = []
-    for rr in rule_results:
-        for h in rr.hits:
-            all_hits.append((rr.rule_name, h))
-    all_hits.sort(key=lambda x: x[1].priority, reverse=True)
-
-    seen_keys: set[str] = set()
-    top_hits: list[tuple[str, RuleHit]] = []
-    for rule_name, hit in all_hits:
-        hit_key = _hit_identity_key(hit)
-        if hit_key and hit_key not in seen_keys and len(top_hits) < max_verify:
-            seen_keys.add(hit_key)
-            top_hits.append((rule_name, hit))
+    scoped_keys = {str(k).strip() for k in (voucher_keys or []) if str(k).strip()}
+    top_hits = _select_verify_hits(
+        rule_results,
+        max_verify=max_verify,
+        voucher_keys=scoped_keys or None,
+        verification_scope=verification_scope,
+    )
 
     hits_by_rule: dict[str, list[RuleHit]] = {}
     for rule_name, hit in top_hits:
@@ -344,16 +457,19 @@ def verify_with_llm(
         rule_judgments: list[LLMJudgment] = []
         for i in range(0, len(hits), batch_size):
             batch = hits[i: i + batch_size]
-            groups = _build_voucher_groups(df, batch, redaction=mode)
-            # 伪名化凭证号 → 稳定身份，供响应回写
-            display_to_identity = {
-                str(g["凭证编号"]): {
+            groups = _build_voucher_groups(
+                df, batch, redaction=mode, run_secret=secret,
+            )
+            # verify_id → 稳定身份（禁止用裸凭证号当 dict key，避免同号碰撞覆盖）
+            verify_to_identity = {
+                str(g["verify_id"]): {
                     "voucher_key": str(g.get("_raw_voucher_key") or ""),
-                    "voucher_id": str(g.get("_raw_voucher_id") or g["凭证编号"]),
+                    "voucher_id": str(g.get("_raw_voucher_id") or ""),
                     "company_code": str(g.get("_company_code") or ""),
                     "fiscal_year": str(g.get("_fiscal_year") or ""),
                 }
                 for g in groups
+                if g.get("verify_id")
             }
             prompt_groups = [
                 {
@@ -401,7 +517,7 @@ def verify_with_llm(
                         response_text,
                         batch_hits=batch,
                         allowed_voucher_keys={_hit_voucher_key(hit) for hit in batch},
-                        display_to_identity=display_to_identity,
+                        verify_to_identity=verify_to_identity,
                     )
                 except ValueError:
                     logger.warning(
@@ -460,6 +576,7 @@ def _build_voucher_groups(
     hits: list[RuleHit],
     *,
     redaction: RedactionMode = "pseudonym",
+    run_secret: str | None = None,
 ) -> list[dict]:
     row_cache: dict[tuple[str, int], list[dict]] = {}
 
@@ -467,7 +584,7 @@ def _build_voucher_groups(
         key = (voucher_key, max_rows)
         if key not in row_cache:
             row_cache[key] = _rows_for_voucher(
-                df, voucher_key, max_rows=max_rows, redaction=redaction,
+                df, voucher_key, max_rows=max_rows, redaction=redaction, run_secret=run_secret,
             )
         return row_cache[key]
 
@@ -485,7 +602,7 @@ def _build_voucher_groups(
                 else str(related_vid)
             )
             display_related = (
-                _pseudo_token("凭证编号", related_vid)
+                _pseudo_token("凭证编号", related_vid, run_secret=run_secret)
                 if redaction == "pseudonym"
                 else related_vid
             )
@@ -494,7 +611,7 @@ def _build_voucher_groups(
                 "行项目": _cached_rows(related_key, 6),
             })
         display_vid = (
-            _pseudo_token("凭证编号", meta["voucher_id"] or voucher_key)
+            _pseudo_token("凭证编号", meta["voucher_id"] or voucher_key, run_secret=run_secret)
             if redaction == "pseudonym"
             else (meta["voucher_id"] or voucher_key)
         )
@@ -509,7 +626,9 @@ def _build_voucher_groups(
                 if not fiscal_year:
                     fiscal_year = _year_from_row(sample)
 
+        verify_id = make_verify_id(voucher_key, run_secret=run_secret)
         groups.append({
+            "verify_id": verify_id,
             "凭证编号": display_vid,
             "_raw_voucher_key": voucher_key,
             "_raw_voucher_id": meta["voucher_id"] or voucher_key,
@@ -517,7 +636,7 @@ def _build_voucher_groups(
             "_fiscal_year": fiscal_year,
             "组合ID": hit.group_id or "",
             "关联凭证": [
-                _pseudo_token("凭证编号", v) if redaction == "pseudonym" else v
+                _pseudo_token("凭证编号", v, run_secret=run_secret) if redaction == "pseudonym" else v
                 for v in related_ids
             ],
             "规则类型": hit.rule_type,
@@ -535,6 +654,7 @@ def _rows_for_voucher(
     max_rows: int = 10,
     *,
     redaction: RedactionMode = "pseudonym",
+    run_secret: str | None = None,
 ) -> list[dict]:
     """按稳定身份 `_voucher_key` 取行；缺列时才降级到展示编号（不应混年/混公司）。"""
     if df.empty or not str(voucher_key or "").strip():
@@ -565,7 +685,7 @@ def _rows_for_voucher(
             "客户": row.get("客户科目：姓名 1"),
             "用户名": row.get("用户名"),
         }
-        rows_data.append(redact_llm_row(raw, redaction))
+        rows_data.append(redact_llm_row(raw, redaction, run_secret=run_secret))
     return rows_data
 
 
@@ -582,14 +702,14 @@ def _build_prompt(rule_name: str, groups: list[dict]) -> str:
 背景：{context}
 
 以下凭证或凭证组合已被规则标记为疑似风险，请逐一判断是否构成真实审计风险。若存在“组合ID/关联凭证”，请基于整组收入、成本、日期和文本证据判断，不要只看主凭证。
-每个条目的「凭证编号」已是该核验实体的唯一展示标识；请原样回传，不要合并不同条目。
+每个条目的 verify_id 是该核验实体的唯一响应标识；请原样回传 verify_id，不要合并不同条目，也不要编造 verify_id。
 
 {json.dumps(groups, ensure_ascii=False, indent=2, default=str)}
 
 对每个被核实的凭证都返回一条（confirmed=true 表示确认风险，false 表示排除）：
 [
   {{
-    "voucher_id": "主凭证编号字符串",
+    "verify_id": "VERIFY_xxxx",
     "confirmed": true或false,
     "risk_level": "高"或"中"（confirmed=false 时可省略）,
     "reason": "1-2句判断理由",
@@ -606,13 +726,22 @@ def _build_judgments_from_response(
     batch_hits: list[Any] | None = None,
     display_to_raw: dict[str, str] | None = None,
     display_to_identity: dict[str, dict[str, str]] | None = None,
+    verify_to_identity: dict[str, dict[str, str]] | None = None,
 ) -> list[LLMJudgment]:
-    """解析模型响应；batch 内未返回的凭证记为 pending_review（非 rejected）。"""
+    """解析模型响应；batch 内未返回的凭证记为 pending_review（非 rejected）。
+
+    优先用 verify_id 回写身份；兼容旧响应中的 voucher_id / display_to_identity。
+    """
     data = parse_json_list(text)
     judgments: list[LLMJudgment] = []
     seen: set[str] = set()
 
-    identity_map: dict[str, dict[str, str]] = dict(display_to_identity or {})
+    identity_map: dict[str, dict[str, str]] = {}
+    if verify_to_identity:
+        identity_map.update(verify_to_identity)
+    if display_to_identity:
+        for display, identity in display_to_identity.items():
+            identity_map.setdefault(display, identity)
     if display_to_raw:
         for display, raw in display_to_raw.items():
             identity_map.setdefault(display, {
@@ -634,15 +763,21 @@ def _build_judgments_from_response(
     for item in data:
         if not isinstance(item, dict):
             continue
-        displayed = str(item.get("voucher_id", "")).strip()
-        identity = identity_map.get(displayed, {
-            "voucher_key": displayed,
-            "voucher_id": displayed,
-            "company_code": "",
-            "fiscal_year": "",
-        })
-        voucher_key = str(identity.get("voucher_key") or displayed).strip()
-        voucher_id = str(identity.get("voucher_id") or displayed).strip()
+        verify_id = str(item.get("verify_id", "") or "").strip()
+        displayed = str(item.get("voucher_id", "") or "").strip()
+        lookup_key = verify_id or displayed
+        identity = identity_map.get(lookup_key)
+        if identity is None and displayed:
+            identity = identity_map.get(displayed)
+        if identity is None:
+            identity = {
+                "voucher_key": displayed or verify_id,
+                "voucher_id": displayed or verify_id,
+                "company_code": "",
+                "fiscal_year": "",
+            }
+        voucher_key = str(identity.get("voucher_key") or displayed or verify_id).strip()
+        voucher_id = str(identity.get("voucher_id") or displayed or voucher_key).strip()
         if not voucher_key or voucher_key in seen:
             continue
         if allowed_keys is not None and voucher_key not in allowed_keys:

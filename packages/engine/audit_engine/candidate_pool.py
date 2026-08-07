@@ -943,7 +943,7 @@ def sample_from_pool(
         # ── 科目权重抽样 ──
         quality = audit_input_quality(work)
         if any(
-            issue.get("code") == "mixed_document_currencies"
+            issue.get("code") in {"mixed_document_currencies", "mixed_analysis_currencies"}
             for issue in quality.get("issues", [])
         ):
             raise ValueError("多种凭证币且无本位币金额，不能进行金额加权抽样")
@@ -1020,7 +1020,7 @@ def sample_from_pool(
         # ── 货币单元抽样 (MUS) ──
         quality = audit_input_quality(work)
         if any(
-            issue.get("code") == "mixed_document_currencies"
+            issue.get("code") in {"mixed_document_currencies", "mixed_analysis_currencies"}
             for issue in quality.get("issues", [])
         ):
             raise ValueError("多种凭证币且无本位币金额，不能进行货币单元抽样")
