@@ -2,7 +2,7 @@
 
 序时账审计分析桌面产品 — **FastAPI 引擎 + React + Tauri**。
 
-从 [`15_journal-audit_序时账分析抽样`](../15_journal-audit_序时账分析抽样) 重构而来：业务算法迁入 `packages/engine`，UI 全部重写。
+基于 GitHub 上的 Streamlit 原型 [`JackieJam/journal-audit`](https://github.com/JackieJam/journal-audit) 重构而来：业务算法迁入 `packages/engine`，UI 全部重写为 FastAPI + React + Tauri 桌面产品。
 
 ## 两大功效
 
@@ -102,6 +102,10 @@ packages/engine  audit_engine（无 UI 依赖）
 | `AUDIT_WORKBENCH_CONFIG_ROOT` | 覆盖含 `config/` 的根（打包/sidecar 用） |
 | `VITE_API_BASE` | 前端 API 基址；未设时浏览器走 `/api` 代理，Tauri 走 `http://127.0.0.1:29180` |
 
-## 旧项目
+## 上游项目
 
-Streamlit 版继续维护至本仓库 M2 parity；算法迁移时从 `15_journal-audit` 的 `modules/` 拷入 `packages/engine/audit_engine/` 并去除 Streamlit 依赖。
+本仓库由 [journal-audit](https://github.com/JackieJam/journal-audit)（Streamlit 序时账分析抽样）演进而来：
+
+- 上游负责原型验证与早期算法沉淀（`modules/`）
+- 本仓库将算法迁入 `packages/engine/audit_engine/`（去除 Streamlit 依赖），并重做产品壳与交付形态
+- M2 起主流程已可在本仓库独立完成，不再依赖上游 UI；上游仓库仍可作为算法对照与历史参考
