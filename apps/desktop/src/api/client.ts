@@ -1202,6 +1202,29 @@ export const api = {
       };
       has_judgments: boolean;
     }>(`/projects/${projectId}/pipeline/verify`),
+  getVerifyBoundary: (
+    projectId: string,
+    opts?: { profile_id?: string; redaction?: "none" | "pseudonym" },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.profile_id) params.set("profile_id", opts.profile_id);
+    if (opts?.redaction) params.set("redaction", opts.redaction);
+    const qs = params.toString();
+    return request<{
+      data_boundary: {
+        endpoint: string;
+        model: string;
+        fields: string[];
+        redaction: string;
+        redaction_note?: string;
+        plaintext_fields?: string[];
+        pseudonym_fields?: string[];
+        policy_version?: string;
+        warning: string;
+      };
+      has_api_key: boolean;
+    }>(`/projects/${projectId}/pipeline/verify/boundary${qs ? `?${qs}` : ""}`);
+  },
   runVerify: (
     projectId: string,
     body?: {
@@ -1209,6 +1232,7 @@ export const api = {
       api_key?: string;
       max_verify?: number;
       redaction?: "none" | "pseudonym";
+      confirm_data_boundary?: boolean;
     },
   ) =>
     request<{
@@ -1230,11 +1254,14 @@ export const api = {
         fields: string[];
         redaction: string;
         redaction_note?: string;
+        plaintext_fields?: string[];
+        pseudonym_fields?: string[];
+        policy_version?: string;
         warning: string;
       };
     }>(`/projects/${projectId}/pipeline/verify`, {
       method: "POST",
-      body: JSON.stringify(body ?? {}),
+      body: JSON.stringify({ confirm_data_boundary: true, ...body }),
     }),
 
   expenseCrossYear: (projectId: string) =>

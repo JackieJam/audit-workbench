@@ -170,22 +170,75 @@ export function SamplingPage({ project }: Props) {
     },
   });
 
+  const [boundaryPreview, setBoundaryPreview] = useState<{
+    endpoint: string;
+    model: string;
+    fields: string[];
+    redaction: string;
+    redaction_note?: string;
+    plaintext_fields?: string[];
+    pseudonym_fields?: string[];
+    policy_version?: string;
+    warning: string;
+  } | null>(null);
+  const [boundaryLoading, setBoundaryLoading] = useState(false);
+  const [boundaryError, setBoundaryError] = useState<string | null>(null);
+
+  const consentKey = (endpoint: string, policyVersion: string) =>
+    `audit-llm-boundary-consent:${endpoint}|${policyVersion}`;
+
   const runVerify = useMutation({
     mutationFn: () =>
       api.runVerify(project!.project_id, {
         profile_id: selectedProfileId ?? "",
         max_verify: 50,
         redaction: "pseudonym",
+        confirm_data_boundary: true,
       }),
     onSuccess: (data) => {
-      if (data.data_boundary?.warning) {
-        // 明示外发边界；不阻断流程（用户已主动点击核验）
-        console.info("[LLM data boundary]", data.data_boundary.warning);
+      const boundary = data.data_boundary;
+      if (boundary?.endpoint && boundary.policy_version) {
+        try {
+          localStorage.setItem(
+            consentKey(boundary.endpoint, boundary.policy_version),
+            new Date().toISOString(),
+          );
+        } catch {
+          /* ignore storage failures */
+        }
       }
+      setBoundaryPreview(null);
+      setBoundaryError(null);
       queryClient.invalidateQueries({ queryKey: ["verify-status", project?.project_id] });
       queryClient.invalidateQueries({ queryKey: ["rule-results", project?.project_id] });
     },
   });
+
+  const requestVerify = async () => {
+    if (!project) return;
+    setBoundaryLoading(true);
+    setBoundaryPreview(null);
+    setBoundaryError(null);
+    try {
+      const { data_boundary: boundary } = await api.getVerifyBoundary(project.project_id, {
+        profile_id: selectedProfileId ?? "",
+        redaction: "pseudonym",
+      });
+      const remembered =
+        !!boundary.endpoint &&
+        !!boundary.policy_version &&
+        !!localStorage.getItem(consentKey(boundary.endpoint, boundary.policy_version));
+      if (remembered) {
+        runVerify.mutate();
+        return;
+      }
+      setBoundaryPreview(boundary);
+    } catch (err) {
+      setBoundaryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBoundaryLoading(false);
+    }
+  };
 
   const downloadExcel = useMutation({
     mutationFn: () => api.exportExcel(project!.project_id),
@@ -591,10 +644,14 @@ export function SamplingPage({ project }: Props) {
         <button
           type="button"
           className="btn-ghost"
-          disabled={runVerify.isPending || rows.length === 0}
-          onClick={() => runVerify.mutate()}
+          disabled={runVerify.isPending || boundaryLoading || rows.length === 0}
+          onClick={() => {
+            void requestVerify();
+          }}
         >
-          {runVerify.isPending ? "辅助核验中（可能需数分钟）…" : "LLM 辅助核验（非审计结论）"}
+          {runVerify.isPending || boundaryLoading
+            ? "辅助核验中（可能需数分钟）…"
+            : "LLM 辅助核验（非审计结论）"}
         </button>
         {verifySummary && verifyStatus.data?.has_judgments && (
           <span className="muted">
@@ -615,6 +672,54 @@ export function SamplingPage({ project }: Props) {
         </button>
       </div>
 
+      {boundaryPreview && (
+        <div className="llm-boundary-dialog" role="dialog" aria-modal="true" aria-labelledby="llm-boundary-title">
+          <h3 id="llm-boundary-title">确认数据外发边界</h3>
+          <p className="muted">发送前请确认以下内容；取消则不会调用模型。</p>
+          <dl className="llm-boundary-meta">
+            <div>
+              <dt>即将调用</dt>
+              <dd><code>{boundaryPreview.endpoint}</code></dd>
+            </div>
+            <div>
+              <dt>模型</dt>
+              <dd><code>{boundaryPreview.model}</code></dd>
+            </div>
+            <div>
+              <dt>发送字段</dt>
+              <dd>
+                {boundaryPreview.fields.map((field) => {
+                  const starred = (boundaryPreview.pseudonym_fields ?? []).includes(field);
+                  return (
+                    <span key={field} className="llm-boundary-field">
+                      {field}{starred ? "*" : ""}
+                    </span>
+                  );
+                })}
+              </dd>
+            </div>
+          </dl>
+          <p className="muted">
+            * 已伪名化。注意：「{(boundaryPreview.plaintext_fields ?? ["文本"]).join("、")}」仍为原文外发。
+          </p>
+          <p className="muted">{boundaryPreview.redaction_note ?? boundaryPreview.warning}</p>
+          <div className="upload-actions">
+            <button type="button" className="btn-ghost" onClick={() => setBoundaryPreview(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={runVerify.isPending}
+              onClick={() => runVerify.mutate()}
+            >
+              确认并发送
+            </button>
+          </div>
+        </div>
+      )}
+
+      {boundaryError && <p className="error">预览数据边界失败：{boundaryError}</p>}
       {runVerify.isError && <p className="error">辅助核验失败：{String(runVerify.error)}</p>}
       {downloadExcel.isError && <p className="error">下载失败：{String(downloadExcel.error)}</p>}
       {downloadExcel.isSuccess && !downloadExcel.isPending && (

@@ -51,6 +51,8 @@ class VerifyRequest(BaseModel):
     max_verify: int = Field(50, ge=1, le=200)
     # none=原文外发；pseudonym=供应商/客户/用户名/凭证号伪名化（默认）
     redaction: str = Field("pseudonym", pattern="^(none|pseudonym)$")
+    # 发送前数据边界知情确认；未确认时接口拒绝外发
+    confirm_data_boundary: bool = False
 
 
 @router.get("/{project_id}/rules")
@@ -207,6 +209,28 @@ def get_verify_status(project_id: str, store: ProjectStore = Depends(get_store))
     return {"summary": summarize_judgments(judgments), "has_judgments": bool(judgments)}
 
 
+@router.get("/{project_id}/pipeline/verify/boundary")
+def get_verify_boundary(
+    project_id: str,
+    profile_id: str = "",
+    redaction: str = "pseudonym",
+    store: ProjectStore = Depends(get_store),
+    x_llm_profile_id: str | None = Header(default=None, alias="X-LLM-Profile-Id"),
+) -> dict:
+    """发送前预览数据边界（不调用模型、不外发明细）。"""
+    from audit_engine.llm_runtime import resolve_llm_runtime
+    from audit_engine.llm_verifier import describe_llm_verify_boundary
+
+    _manifest_or_404(store, project_id)
+    resolved_profile = (profile_id or x_llm_profile_id or "").strip() or None
+    runtime = resolve_llm_runtime(profile_id=resolved_profile, manual_key=None)
+    mode = redaction if redaction in {"none", "pseudonym"} else "pseudonym"
+    boundary = describe_llm_verify_boundary(
+        runtime.base_url, runtime.model, redaction=mode,  # type: ignore[arg-type]
+    )
+    return {"data_boundary": boundary, "has_api_key": bool(runtime.api_key)}
+
+
 @router.post("/{project_id}/pipeline/verify")
 def run_verify(
     project_id: str,
@@ -223,6 +247,11 @@ def run_verify(
         raise HTTPException(status_code=400, detail="项目无序时账数据")
 
     req = body or VerifyRequest()
+    if not req.confirm_data_boundary:
+        raise HTTPException(
+            status_code=400,
+            detail="请先确认数据外发边界（confirm_data_boundary）。可先 GET /pipeline/verify/boundary 预览。",
+        )
     profile_id = (req.profile_id or x_llm_profile_id or "").strip() or None
     api_key = (req.api_key or x_llm_api_key or "").strip() or None
     runtime = resolve_llm_runtime(profile_id=profile_id, manual_key=api_key)

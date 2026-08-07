@@ -162,21 +162,31 @@ def resolve_file_mapping(
 
     优先使用 preferred_mapping 中「本文件实际存在」的源列；
     否则回退到该文件自己的自动匹配（含别名/模糊/学习别名）。
+
+    ``NO_COLUMN_SENTINEL``（无此列）是硬否决：用户明确说不要映射的标准列，
+    不得被自动 matcher 偷偷认回来。
     """
     source_set = set(source_columns)
     auto = suggest_mapping_with_confidence(source_columns, learned=learned_aliases)
     preferred = preferred_mapping or {}
+    vetoed = {
+        std_name
+        for std_name, src in preferred.items()
+        if src == NO_COLUMN_SENTINEL
+    }
     resolved: dict[str, str] = {}
 
     for std_name, match in auto.items():
+        if std_name in vetoed:
+            continue
         preferred_src = preferred.get(std_name)
-        if preferred_src and preferred_src != NO_COLUMN_SENTINEL and preferred_src in source_set:
+        if preferred_src and preferred_src in source_set:
             resolved[std_name] = preferred_src
         else:
             resolved[std_name] = match.source
 
     for std_name, src in preferred.items():
-        if not src or src == NO_COLUMN_SENTINEL or std_name in resolved:
+        if not src or src == NO_COLUMN_SENTINEL or std_name in resolved or std_name in vetoed:
             continue
         if src in source_set:
             resolved[std_name] = src
@@ -467,7 +477,10 @@ def _ensure_amount_ready(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _detect_amount_mapping_gap(df: pd.DataFrame, file_label: str) -> str | None:
-    """检测「金额标准列为空，但源文件仍残留未映射金额列」——典型静默漏数。"""
+    """检测金额不可用：未映射残留列，或文件完全没有任何金额字段。
+
+    禁止「缺失金额 → 补 0 → DQ 误判可用」的路径。
+    """
     has_usable = False
     for col in _AMOUNT_STD_COLS:
         if col in df.columns and pd.to_numeric(df[col], errors="coerce").notna().any():
@@ -489,12 +502,23 @@ def _detect_amount_mapping_gap(df: pd.DataFrame, file_label: str) -> str | None:
         and _is_amount_like_column(str(col))
         and pd.to_numeric(df[col], errors="coerce").notna().any()
     ]
-    if not leftover_amount_cols:
-        return None
-    return (
-        f"{file_label} 的金额列未映射到标准字段"
-        f"（残留列：{', '.join(leftover_amount_cols[:3])}）"
+    if leftover_amount_cols:
+        return (
+            f"{file_label} 的金额列未映射到标准字段"
+            f"（残留列：{', '.join(leftover_amount_cols[:3])}）"
+        )
+
+    # 完全没有任何金额字段：若已有凭证/日期/科目等核心列，必须阻断
+    has_core_context = any(
+        col in df.columns and df[col].astype("string").fillna("").str.strip().ne("").any()
+        for col in ("凭证编号", "过账日期", "总账科目", "借/贷标识")
     )
+    if has_core_context:
+        return (
+            f"{file_label} 完全没有任何可用金额字段"
+            f"（凭证货币价值/公司代码货币价值/借方贷方金额均缺失），已阻断导入"
+        )
+    return None
 
 
 def _read_single_file(
@@ -645,11 +669,12 @@ def _post_process(
         if std.name in FALLBACK_ALTERNATE_COLUMNS:
             missing.append(std.name)
             continue
-        # 占位列：保证下游 add_analysis_columns / 各分析模块取列时不抛 KeyError
+        # 占位列：保证下游取列不抛 KeyError。
+        # 金额等事实字段必须用 NaN，禁止 missing→0（0 会被 DQ 当成合法金额）。
         if std.name in DATE_COLUMNS:
             df[std.name] = pd.NaT
         elif std.name in NUMERIC_COLUMNS or std.name in ("借方金额", "贷方金额"):
-            df[std.name] = 0.0
+            df[std.name] = float("nan")
         else:
             df[std.name] = ""
         missing.append(std.name)
@@ -759,6 +784,7 @@ def _synthesize_amount_from_dc(df: pd.DataFrame) -> pd.DataFrame:
             .astype(float)
         )
     df["凭证货币价值"] = amount
+    df["_amount_provenance"] = "synthesized_debit_credit"
     return df
 
 

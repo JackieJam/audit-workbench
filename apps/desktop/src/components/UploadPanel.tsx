@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type DetectResponse, type IngestResponse } from "@/api/client";
 import { ChartLoadingBar, useSimulatedProgress } from "@/components/ChartLoadingBar";
 import { EmptyState } from "@/components/EmptyState";
+
+const NO_COLUMN_SENTINEL = "(无此列)";
 
 type Props = {
   projectId: string | null;
@@ -19,6 +21,7 @@ function ingestStageLabel(percent: number): string {
 export function UploadPanel({ projectId, onImported }: Props) {
   const [files, setFiles] = useState<File[]>([]);
   const [detection, setDetection] = useState<DetectResponse | null>(null);
+  const [editableMapping, setEditableMapping] = useState<Record<string, string>>({});
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,6 +34,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
     },
     onSuccess: (data) => {
       setDetection(data);
+      setEditableMapping({ ...data.suggested_mapping });
       setResult(null);
       setError(null);
     },
@@ -42,8 +46,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
       if (!projectId || files.length === 0) {
         throw new Error("请选择项目并上传文件");
       }
-      const mapping = detection?.suggested_mapping ?? {};
-      return api.commitIngest(projectId, files, mapping);
+      return api.commitIngest(projectId, files, editableMapping);
     },
     onSuccess: (data) => {
       setResult(data);
@@ -52,6 +55,28 @@ export function UploadPanel({ projectId, onImported }: Props) {
     },
     onError: (e: Error) => setError(e.message),
   });
+
+  useEffect(() => {
+    if (!detection) return;
+    setEditableMapping((prev) => {
+      if (Object.keys(prev).length > 0) return prev;
+      return { ...detection.suggested_mapping };
+    });
+  }, [detection]);
+
+  const sourceOptions = useMemo(() => {
+    const cols = detection?.source_columns ?? [];
+    return [NO_COLUMN_SENTINEL, ...cols];
+  }, [detection]);
+
+  const mappingRows = useMemo(() => {
+    if (!detection) return [];
+    const keys = new Set([
+      ...Object.keys(detection.suggested_mapping),
+      ...Object.keys(editableMapping),
+    ]);
+    return Array.from(keys).sort((a, b) => a.localeCompare(b, "zh"));
+  }, [detection, editableMapping]);
 
   const busy = detect.isPending || commit.isPending;
   const progress = useSimulatedProgress(busy);
@@ -82,6 +107,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
         onChange={(e) => {
           setFiles(Array.from(e.target.files ?? []));
           setDetection(null);
+          setEditableMapping({});
           setResult(null);
           setError(null);
         }}
@@ -100,7 +126,7 @@ export function UploadPanel({ projectId, onImported }: Props) {
         <button
           type="button"
           className="primary"
-          disabled={!files.length || busy}
+          disabled={!files.length || busy || !detection}
           onClick={() => commit.mutate()}
         >
           {commit.isPending ? "导入中…" : "2. 确认导入"}
@@ -119,25 +145,51 @@ export function UploadPanel({ projectId, onImported }: Props) {
       {error && <p className="error">{error}</p>}
       {detection && !busy && (
         <div className="detect-box">
-          <p className="muted">建议映射（并集预览：{detection.file_label}）</p>
-          <ul className="mapping-list">
-            {Object.entries(detection.suggested_mapping).map(([std, src]) => (
-              <li key={std}>
-                <code>{std}</code> ← <code>{src}</code>
-                {detection.mapping_matches[std] && (
-                  <span className="muted">
-                    {" "}
-                    ({detection.mapping_matches[std].method}{" "}
-                    {(detection.mapping_matches[std].score * 100).toFixed(0)}%)
-                  </span>
-                )}
-              </li>
-            ))}
+          <p className="muted">
+            编辑列映射后确认导入。选择「{NO_COLUMN_SENTINEL}」为硬否决，系统不会再自动认回该标准列。
+            （并集预览：{detection.file_label}）
+          </p>
+          <ul className="mapping-list mapping-list--editable">
+            {mappingRows.map((std) => {
+              const src = editableMapping[std] ?? detection.suggested_mapping[std] ?? NO_COLUMN_SENTINEL;
+              const match = detection.mapping_matches[std];
+              return (
+                <li key={std} className="mapping-edit-row">
+                  <code className="mapping-std">{std}</code>
+                  <span className="muted">←</span>
+                  <select
+                    value={src}
+                    onChange={(e) =>
+                      setEditableMapping((prev) => ({
+                        ...prev,
+                        [std]: e.target.value,
+                      }))
+                    }
+                    aria-label={`${std} 映射源列`}
+                  >
+                    {!sourceOptions.includes(src) && (
+                      <option value={src}>{src}</option>
+                    )}
+                    {sourceOptions.map((col) => (
+                      <option key={col} value={col}>
+                        {col}
+                      </option>
+                    ))}
+                  </select>
+                  {match && src !== NO_COLUMN_SENTINEL && (
+                    <span className="muted">
+                      （建议 {match.method} {(match.score * 100).toFixed(0)}%）
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
           {(detection.per_file?.length ?? 0) > 1 && (
             <div className="per-file-mapping">
               <p className="muted">
-                各文件将独立解析映射（避免异构列名静默漏数）。导入时若并集偏好列在某文件不存在，自动回退该文件匹配。
+                各文件将独立解析映射（避免异构列名静默漏数）。上方编辑为并集偏好；
+                若偏好列在某文件不存在则回退该文件自动匹配；「{NO_COLUMN_SENTINEL}」对所有文件硬否决。
               </p>
               {detection.per_file!.map((fileDet) => (
                 <details key={fileDet.file_label} className="per-file-mapping-item">

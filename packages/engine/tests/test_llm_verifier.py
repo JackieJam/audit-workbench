@@ -64,8 +64,10 @@ def test_build_judgments_records_rejected_and_fills_omissions() -> None:
     assert set(by_id) == {"X1", "X2", "X3"}
     assert by_id["X1"].status == JUDGMENT_REJECTED
     assert by_id["X2"].status == JUDGMENT_CONFIRMED
-    assert by_id["X3"].status == JUDGMENT_REJECTED  # 模型省略 → 驳回
-    assert confirmation_rate(judgments) == pytest.approx(1 / 3)
+    assert by_id["X3"].status == JUDGMENT_PENDING_REVIEW  # 模型省略 → 待核验，非驳回
+    assert by_id["X3"].source == "llm_incomplete"
+    # pending 不进确认率分母：1 confirmed / (1 confirmed + 1 rejected)
+    assert confirmation_rate(judgments) == pytest.approx(1 / 2)
 
 
 def test_build_judgments_rejects_out_of_batch_and_duplicates() -> None:

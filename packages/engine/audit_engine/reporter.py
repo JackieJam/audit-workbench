@@ -107,17 +107,31 @@ def generate_report(
             max_size=max_sample_size,
         )
     elif judgment_lookup:
-        # 有 LLM 核实：按风险级别排序，取 top N
-        confirmed_primary_vids = sorted(
+        # 有 LLM 核实：按风险级别排序，取 top N（lookup 键已是 voucher_key）
+        confirmed_primary_keys = sorted(
             judgment_lookup.keys(),
             key=lambda v: judgment_lookup[v].risk_level == "高",
             reverse=True,
         )
+        available_keys = set(work[VOUCHER_KEY_COLUMN].dropna().astype(str)) if VOUCHER_KEY_COLUMN in work.columns else set()
         confirmed_vids = []
-        for display_id in confirmed_primary_vids:
-            sample_vids = _resolve_display_keys(work, display_id)
-            for primary_key in list(sample_vids):
-                for hit in hit_lookup.get(primary_key, []):
+        for primary_key in confirmed_primary_keys:
+            sample_vids: list[str] = []
+            if primary_key in available_keys:
+                sample_vids.append(primary_key)
+            else:
+                # 兼容旧 judgment 仅有展示编号的情况
+                judgment = judgment_lookup[primary_key]
+                sample_vids.extend(
+                    _resolve_display_keys(
+                        work,
+                        getattr(judgment, "voucher_id", primary_key),
+                        year=getattr(judgment, "fiscal_year", None) or None,
+                        company=getattr(judgment, "company_code", None) or None,
+                    )
+                )
+            for key in list(sample_vids):
+                for hit in hit_lookup.get(key, []):
                     sample_vids.extend(_hit_voucher_keys(hit, work))
             for sample_vid in dict.fromkeys(sample_vids):
                 if sample_vid and sample_vid not in confirmed_vids:
@@ -173,15 +187,21 @@ def generate_report(
 
 
 def _build_judgment_lookup(llm_judgments: dict) -> dict[str, Any]:
-    """仅纳入 status=confirmed；pending/rejected/fallback 不进样本主表。"""
+    """仅纳入 status=confirmed；pending/rejected/fallback 不进样本主表。
+
+    查找键优先 voucher_key（稳定身份），避免同号凭证跨年/跨公司扩散。
+    """
     lookup: dict = {}
     for judgments in llm_judgments.values():
         for j in judgments:
             status = getattr(j, "status", "")
             if status != "confirmed":
                 continue
-            if j.voucher_id not in lookup or j.risk_level == "高":
-                lookup[j.voucher_id] = j
+            key = str(getattr(j, "voucher_key", "") or getattr(j, "voucher_id", "") or "").strip()
+            if not key:
+                continue
+            if key not in lookup or j.risk_level == "高":
+                lookup[key] = j
     return lookup
 
 
@@ -505,8 +525,11 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
         total_high += high
         total_med += med
 
+    # 合计确认率与单规则口径一致：confirmed / (confirmed + rejected)，pending 不进分母
+    all_judgments = [j for items in llm_judgments.values() for j in items]
+    total_rate_value = confirmation_rate(all_judgments)
+    total_rate = f"{total_rate_value:.0%}" if total_rate_value is not None else "N/A"
     total_row = len(rule_results) + 2
-    total_rate = f"{total_confirmed / total_hits:.0%}" if total_hits > 0 else "N/A"
     for col_idx, val in enumerate(
         ["合计", total_hits, total_confirmed, total_rate, total_pending, total_high, total_med], 1
     ):

@@ -9,7 +9,6 @@ from typing import Any
 import pandas as pd
 from audit_engine.experience import learned_column_aliases, record_column_mappings
 from audit_engine.ingestion import (
-    NO_COLUMN_SENTINEL,
     STANDARD_COLUMNS,
     DetectionResult,
     detect_columns,
@@ -177,11 +176,9 @@ async def commit_ingest(
         det = detect_columns(buffers, learned_aliases=learned)
         mapping = det.suggested_mapping
 
-    # 过滤无此列
-    mapping = {
-        k: v for k, v in mapping.items()
-        if v and v != NO_COLUMN_SENTINEL
-    }
+    # 保留 NO_COLUMN_SENTINEL 作为硬否决传给 resolve_file_mapping；
+    # 仅丢弃空值，避免「用户明确不要此列」被自动 matcher 偷偷认回。
+    mapping = {k: v for k, v in mapping.items() if v}
 
     try:
         # load_files 按文件独立解析映射；mapping 仅作偏好，缺失源列时回退该文件自动匹配

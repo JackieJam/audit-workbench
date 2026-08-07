@@ -402,6 +402,69 @@
   overflow: auto;
 }
 
+.mapping-list--editable {
+  list-style: none;
+  padding-left: 0;
+  max-height: 280px;
+}
+
+.mapping-edit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.mapping-edit-row .mapping-std {
+  min-width: 9em;
+}
+
+.mapping-edit-row select {
+  min-width: 10em;
+  max-width: 16em;
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 4px);
+  background: var(--bg, #fff);
+  color: inherit;
+}
+
+.llm-boundary-dialog {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-subtle);
+}
+
+.llm-boundary-dialog h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.llm-boundary-meta {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.llm-boundary-meta dt {
+  font-size: 0.75rem;
+  color: var(--muted, #666);
+}
+
+.llm-boundary-meta dd {
+  margin: 2px 0 0;
+}
+
+.llm-boundary-field {
+  display: inline-block;
+  margin: 0 8px 4px 0;
+  font-size: 0.82rem;
+}
+
 .per-file-mapping {
   margin-top: 10px;
   padding-top: 8px;

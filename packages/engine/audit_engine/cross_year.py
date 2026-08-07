@@ -179,6 +179,76 @@ def _party_key(row: pd.Series) -> str:
     return ""
 
 
+def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
+    """把含「预提/冲回」文本的 journal line 折叠为经济预提实体（每凭证一条）。
+
+    一张平衡凭证借贷双方摘要都写「预提」时，经济金额是单边（通常取暂估负债腿），
+    绝不能把借贷两行金额相加翻倍。
+    """
+    if lines.empty:
+        return lines.copy()
+
+    work = ensure_voucher_identity(lines)
+    group_col = VOUCHER_KEY_COLUMN if VOUCHER_KEY_COLUMN in work.columns else "凭证编号"
+    entities: list[pd.Series] = []
+
+    for _, grp in work.groupby(group_col, sort=False):
+        dc = (
+            grp["借/贷标识"].astype(str).str.strip()
+            if "借/贷标识" in grp.columns
+            else pd.Series("", index=grp.index)
+        )
+        acct = (
+            grp["总账科目"].astype(str)
+            if "总账科目" in grp.columns
+            else pd.Series("", index=grp.index)
+        )
+        credit = grp.loc[dc.eq("H")]
+        debit = grp.loc[dc.eq("S")]
+        liability = credit.loc[acct.str.startswith("22")] if not credit.empty else credit
+
+        if not liability.empty:
+            selected = liability
+            leg = "liability_credit"
+        elif not credit.empty:
+            selected = credit
+            leg = "credit"
+        elif not debit.empty:
+            selected = debit
+            leg = "debit"
+        else:
+            selected = grp
+            leg = "all_lines"
+
+        selected_amt = float(_amount_abs(selected).fillna(0).sum())
+        # 若借贷两侧都进入候选，经济金额取较大单边（平衡凭证 = 单边金额）
+        debit_amt = float(_amount_abs(debit).fillna(0).sum()) if not debit.empty else 0.0
+        credit_amt = float(_amount_abs(credit).fillna(0).sum()) if not credit.empty else 0.0
+        if debit_amt > 0 and credit_amt > 0:
+            economic_amt = max(debit_amt, credit_amt)
+            if credit_amt >= debit_amt and not credit.empty:
+                selected = liability if not liability.empty else credit
+                leg = "balanced_credit_leg"
+            elif not debit.empty:
+                selected = debit
+                leg = "balanced_debit_leg"
+            selected_amt = economic_amt
+
+        row = selected.iloc[0].copy()
+        # 把实体金额写回标准金额列，供后续配对使用
+        for col in ("凭证货币价值", "公司代码货币价值", "_amount_abs", "_amount_raw"):
+            if col in row.index or col in work.columns:
+                row[col] = selected_amt
+        row["_accrual_entity_leg"] = leg
+        row["_accrual_entity_amount"] = selected_amt
+        row["_accrual_line_count"] = int(len(grp))
+        entities.append(row)
+
+    if not entities:
+        return lines.iloc[0:0].copy()
+    return pd.DataFrame(entities)
+
+
 def _match_accrual_reversals(
     accruals: pd.DataFrame,
     reversals: pd.DataFrame,
@@ -187,11 +257,14 @@ def _match_accrual_reversals(
 ) -> tuple[list[dict[str, Any]], pd.DataFrame]:
     """一对一贪心配对：科目前缀 + 对手方 + 相反借贷 + 金额容差。
 
+    输入先折叠为经济预提实体（每凭证一条），再配对。
     返回 (pairs, unmatched_accruals)。无关冲回不会“覆盖”未匹配预提。
     """
     if accruals.empty:
         return [], accruals.copy()
 
+    accruals = _collapse_to_accrual_entities(accruals)
+    reversals = _collapse_to_accrual_entities(reversals)
     work_rev = reversals.copy()
     if work_rev.empty:
         return [], accruals.copy()
@@ -297,14 +370,16 @@ def _accrual_reversal_pairs(
         df_n = year_map[yr_n]
         df_n1 = year_map[yr_n1]
 
-        # 年末预提：12月，文本含"预提"，非冲销
+        # 年末预提行：12月，文本含"预提"，非冲销 —— 随后折叠为经济预提实体
         text_n = df_n["文本"].astype(str) if "文本" in df_n.columns else pd.Series("", index=df_n.index)
-        dec_accruals = df_n[
+        dec_accrual_lines = df_n[
             (df_n["过账日期"].dt.month == 12)
             & text_n.str.contains("预提", na=False, regex=False)
             & ~text_n.str.contains("冲销|冲回|红字", na=False, regex=True)
         ].copy()
-        dec_accruals = dec_accruals[_amount_abs(dec_accruals).fillna(0).ge(min_amount)]
+        dec_accruals = _collapse_to_accrual_entities(dec_accrual_lines)
+        if not dec_accruals.empty:
+            dec_accruals = dec_accruals[_amount_abs(dec_accruals).fillna(0).ge(min_amount)]
 
         if dec_accruals.empty:
             continue
@@ -315,11 +390,12 @@ def _accrual_reversal_pairs(
         window_label = f"{yr_n1}年1月1日起{window_days}天内"
 
         text_n1 = df_n1["文本"].astype(str) if "文本" in df_n1.columns else pd.Series("", index=df_n1.index)
-        reversals = df_n1[
+        reversal_lines = df_n1[
             (df_n1["过账日期"] >= window_start)
             & (df_n1["过账日期"] <= window_end)
             & text_n1.str.contains("冲销|冲回|红字", na=False, regex=True)
         ].copy()
+        reversals = _collapse_to_accrual_entities(reversal_lines)
 
         pairs, unmatched = _match_accrual_reversals(
             dec_accruals, reversals, amount_tolerance=amount_tolerance,
@@ -343,13 +419,14 @@ def _accrual_reversal_pairs(
             if not unmatched.empty and VOUCHER_KEY_COLUMN in unmatched.columns
             else []
         )
+        entity_count = int(len(dec_accruals))
 
         # 悬空预提：逐笔未匹配金额占比过高
         if coverage < coverage_threshold:
             findings.append(CrossYearFinding(
                 category="预提冲回配对",
                 description=(
-                    f"{yr_n}年末预提{total_accrual:,.0f}（{len(dec_accruals)}笔），"
+                    f"{yr_n}年末预提{total_accrual:,.0f}（{entity_count}笔经济实体），"
                     f"{window_label}逐笔配对冲回{matched_amount:,.0f}（{len(pairs)}笔，覆盖{coverage:.0%}），"
                     f"未匹配悬空{unmatched_amount:,.0f}（{len(unmatched)}笔）"
                 ),
@@ -369,7 +446,8 @@ def _accrual_reversal_pairs(
                     "threshold_used": coverage_threshold,
                     "match_window_days": window_days,
                     "amount_tolerance": amount_tolerance,
-                    "pairing_mode": "voucher_level",
+                    "pairing_mode": "economic_accrual_entity",
+                    "source_line_count": int(len(dec_accrual_lines)),
                 },
             ))
         elif abs(coverage - 1.0) > mismatch_tolerance and unmatched_amount > 0:
@@ -388,7 +466,7 @@ def _accrual_reversal_pairs(
                     "coverage_ratio": round(coverage, 4),
                     "match_window_days": window_days,
                     "pair_sample": pair_sample,
-                    "pairing_mode": "voucher_level",
+                    "pairing_mode": "economic_accrual_entity",
                 },
             ))
 

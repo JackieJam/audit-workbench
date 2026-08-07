@@ -7,6 +7,10 @@
 - 样本量变化不得改变总体异常数量
 - LLM API 失败不得推高 confirmation_rate
 - 混合凭证白名单不得拆散分录
+- 同一凭证号跨年/跨公司 → LLM 必须按 voucher_key 隔离
+- 完全无金额字段 → DQ/导入必须 blocked
+- 模型漏答 → pending_review 而非 rejected
+- 平衡预提凭证经济金额不得翻倍
 """
 
 from __future__ import annotations
@@ -18,14 +22,27 @@ import pandas as pd
 import pytest
 from audit_engine.cross_year import (
     _accrual_reversal_pairs,
+    _collapse_to_accrual_entities,
     _match_accrual_reversals,
     _yearend_balance_buildup,
 )
-from audit_engine.ingestion import load_files, resolve_file_mapping
+from audit_engine.data_columns import audit_input_quality, ensure_voucher_identity
+from audit_engine.ingestion import (
+    NO_COLUMN_SENTINEL,
+    _detect_amount_mapping_gap,
+    _ensure_amount_ready,
+    _post_process,
+    load_files,
+    resolve_file_mapping,
+)
 from audit_engine.llm_verifier import (
     JUDGMENT_PENDING_REVIEW,
+    JUDGMENT_REJECTED,
     LLMJudgment,
+    _build_judgments_from_response,
+    _build_voucher_groups,
     _fallback_judgments_for_hits,
+    _hit_identity_key,
     confirmation_rate,
     summarize_judgments,
 )
@@ -123,6 +140,7 @@ def test_debit_credit_only_file_not_blocked_as_amount_gap() -> None:
 
 
 def test_currency_code_column_not_flagged_as_amount_leftover() -> None:
+    """货币代码列不得被当成「未映射金额残留」；但完全无金额仍应阻断。"""
     from audit_engine.ingestion import _detect_amount_mapping_gap, _ensure_amount_ready
 
     df = pd.DataFrame({
@@ -133,7 +151,10 @@ def test_currency_code_column_not_flagged_as_amount_leftover() -> None:
         "总账科目": ["6601"],
         "文本": ["x"],
     })
-    assert _detect_amount_mapping_gap(_ensure_amount_ready(df), "c.xlsx") is None
+    gap = _detect_amount_mapping_gap(_ensure_amount_ready(df), "c.xlsx")
+    assert gap is not None
+    assert "残留列" not in gap  # 不是把货币代码当残留
+    assert "没有任何可用金额" in gap
 
 
 # ── P0-2: 期末余额 ≠ 12 月绝对发生额 ────────────────────────
@@ -478,3 +499,229 @@ def test_burst_multiplier_changes_splitting_results() -> None:
     # 日均其余日=2，突发日=6 → 倍数=3；阈值 10 不命中同日，阈值 2 命中
     assert not any(h.rule_type == "化整为零(同日拆分)" for h in hits_strict.hits)
     assert any(h.rule_type == "化整为零(同日拆分)" for h in hits_loose.hits)
+
+
+# ── Review P0/P1 invariants (2026-08) ─────────────────────────
+
+
+def test_same_voucher_id_across_years_are_distinct_llm_entities() -> None:
+    """同一凭证号跨两个年度 → LLM 必须生成两个独立核验实体。"""
+    hits = [
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="2024",
+            line_indices=(0,),
+            priority=3,
+            year=2024,
+            voucher_key="VK|1000|2024|000123",
+        ),
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="2025",
+            line_indices=(1,),
+            priority=3,
+            year=2025,
+            voucher_key="VK|1000|2025|000123",
+        ),
+    ]
+    keys = [_hit_identity_key(h) for h in hits]
+    assert len(set(keys)) == 2
+
+    df = ensure_voucher_identity(pd.DataFrame([
+        {
+            "凭证编号": "000123",
+            "公司代码": "1000",
+            "会计年度": 2024,
+            "过账日期": pd.Timestamp("2024-06-01"),
+            "凭证货币价值": 1_000_000.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "2024费用",
+        },
+        {
+            "凭证编号": "000123",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-06-01"),
+            "凭证货币价值": 2_000_000.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "2025费用",
+        },
+    ]))
+    groups = _build_voucher_groups(df, hits, redaction="none")
+    assert len(groups) == 2
+    amounts = {
+        float(g["主凭证行项目"][0]["金额"])
+        for g in groups
+        if g["主凭证行项目"]
+    }
+    assert amounts == {1_000_000.0, 2_000_000.0}
+
+
+def test_same_voucher_id_across_companies_do_not_mix_in_llm_prompt() -> None:
+    """两家公司相同凭证号 → LLM prompt 绝不能混行。"""
+    hits = [
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="公司A",
+            line_indices=(0,),
+            priority=3,
+            year=2025,
+            voucher_key="VK|1000|2025|000123",
+        ),
+        RuleHit(
+            voucher_id="000123",
+            rule_type="大额整数",
+            evidence="公司B",
+            line_indices=(1,),
+            priority=3,
+            year=2025,
+            voucher_key="VK|2000|2025|000123",
+        ),
+    ]
+    df = ensure_voucher_identity(pd.DataFrame([
+        {
+            "凭证编号": "000123",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-01"),
+            "凭证货币价值": 111.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "A公司",
+            "用户名": "uA",
+        },
+        {
+            "凭证编号": "000123",
+            "公司代码": "2000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-03-02"),
+            "凭证货币价值": 222.0,
+            "借/贷标识": "S",
+            "总账科目": "6601",
+            "文本": "B公司",
+            "用户名": "uB",
+        },
+    ]))
+    groups = _build_voucher_groups(df, hits, redaction="none")
+    assert len(groups) == 2
+    for group, expected_amt, expected_text in zip(
+        groups, [111.0, 222.0], ["A公司", "B公司"], strict=True,
+    ):
+        rows = group["主凭证行项目"]
+        assert len(rows) == 1
+        assert float(rows[0]["金额"]) == expected_amt
+        assert rows[0]["文本"] == expected_text
+
+
+def test_missing_amount_fields_block_dq_and_do_not_placeholder_zero() -> None:
+    """完全没有金额字段 → DQ 必须 blocked；post_process 不得补 0。"""
+    df = pd.DataFrame({
+        "凭证编号": ["V1"],
+        "过账日期": pd.Timestamp("2024-01-01"),
+        "借/贷标识": ["S"],
+        "总账科目": ["6601"],
+        "文本": ["无金额"],
+    })
+    gap = _detect_amount_mapping_gap(_ensure_amount_ready(df), "no-amt.xlsx")
+    assert gap is not None and "没有任何可用金额" in gap
+
+    processed, missing = _post_process(df.copy(), {})
+    assert "凭证货币价值" in missing or "凭证货币价值" in processed.columns
+    if "凭证货币价值" in processed.columns:
+        assert pd.to_numeric(processed["凭证货币价值"], errors="coerce").isna().all()
+
+    quality = audit_input_quality(processed)
+    assert quality["status"] == "blocked"
+    assert any(i["code"] == "missing_usable_amount" for i in quality["issues"])
+
+    # 导入路径同样阻断
+    f = _xlsx([{
+        "凭证编号": "V1",
+        "过账日期": "2024-01-01",
+        "借/贷标识": "S",
+        "总账科目": "6601",
+        "文本": "无金额",
+    }], "no-amt.xlsx")
+    with pytest.raises(ValueError, match="没有任何可用金额|金额"):
+        load_files([f])
+
+
+def test_llm_incomplete_response_is_pending_not_rejected() -> None:
+    """模型返回 9/10 条结果 → 第 10 条必须 pending_review。"""
+    text = "[" + ",".join(
+        f'{{"voucher_id": "X{i}", "confirmed": true, "risk_level": "中", "reason": "ok", "audit_procedures": "查"}}'
+        for i in range(1, 10)
+    ) + "]"
+    allowed = {f"X{i}" for i in range(1, 11)}
+    judgments = _build_judgments_from_response(text, allowed_voucher_ids=allowed)
+    by_id = {j.voucher_id: j for j in judgments}
+    assert by_id["X10"].status == JUDGMENT_PENDING_REVIEW
+    assert by_id["X10"].source == "llm_incomplete"
+    assert by_id["X10"].status != JUDGMENT_REJECTED
+    # 9 confirmed / 9 decided；pending 不进分母
+    assert confirmation_rate(judgments) == pytest.approx(1.0)
+
+
+def test_balanced_accrual_voucher_does_not_double_economic_amount() -> None:
+    """一张预提凭证两条平衡分录均写「预提」→ 经济预提金额不能翻倍。"""
+    lines = pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "12月预提运费",
+            "总账科目": "6601010001",
+            "借/贷标识": "S",
+            "供应商编号": "V-SHIP",
+            "凭证货币价值": 1_000_000.0,
+        },
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "12月预提运费",
+            "总账科目": "2202010001",
+            "借/贷标识": "H",
+            "供应商编号": "V-SHIP",
+            "凭证货币价值": 1_000_000.0,
+        },
+    ])
+    entities = _collapse_to_accrual_entities(lines)
+    assert len(entities) == 1
+    economic = float(entities.iloc[0]["凭证货币价值"])
+    assert economic == pytest.approx(1_000_000.0)
+    assert economic != pytest.approx(2_000_000.0)
+
+    year_map = {
+        2025: lines,
+        2026: pd.DataFrame([{
+            "凭证编号": "R001",
+            "公司代码": "1000",
+            "会计年度": 2026,
+            "过账日期": pd.Timestamp("2026-01-10"),
+            "文本": "冲销预提运费",
+            "总账科目": "2202010001",
+            "借/贷标识": "S",
+            "供应商编号": "V-SHIP",
+            "凭证货币价值": 1_000_000.0,
+        }]),
+    }
+    findings = _accrual_reversal_pairs(year_map)
+    # 已配对完成，不应因金额翻倍而报悬空
+    assert not any(f.category == "预提冲回配对" for f in findings)
+
+
+def test_no_column_sentinel_is_hard_veto() -> None:
+    """用户确认「(无此列)」后，自动 matcher 不得偷偷认回。"""
+    resolved = resolve_file_mapping(
+        ["凭证编号", "过账日期", "金额总计", "借/贷标识", "总账科目"],
+        preferred_mapping={"凭证货币价值": NO_COLUMN_SENTINEL},
+    )
+    assert "凭证货币价值" not in resolved
