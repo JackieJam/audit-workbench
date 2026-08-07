@@ -1272,6 +1272,7 @@ def test_verification_freshness_stale_after_selection_change() -> None:
     fresh = verification_freshness(
         verification_context={
             "verification_run_id": "vr_aaa",
+            "verification_scope": "current_sample",
             "selection_id": "sel_A",
             "verified_at": "2026-08-07T00:00:00Z",
         },
@@ -1283,6 +1284,7 @@ def test_verification_freshness_stale_after_selection_change() -> None:
     stale = verification_freshness(
         verification_context={
             "verification_run_id": "vr_aaa",
+            "verification_scope": "current_sample",
             "selection_id": "sel_A",
             "verified_at": "2026-08-07T00:00:00Z",
         },
@@ -1290,6 +1292,47 @@ def test_verification_freshness_stale_after_selection_change() -> None:
     )
     assert stale["fresh"] is False
     assert stale["status"] == "stale"
+
+
+def test_risk_signals_verify_never_fresh_for_current_sample() -> None:
+    """Sample A → Verify(scope=risk_signals) → current-sample freshness 必须为 false。"""
+    from audit_engine.analysis_context import (
+        verification_freshness,
+        verification_freshness_for_current_sample,
+        verification_freshness_for_risk_signals,
+    )
+
+    risk_ctx = {
+        "verification_run_id": "vr_risk",
+        "verification_scope": "risk_signals",
+        "selection_id": None,
+        "sample_keys_digest": None,
+        "rule_run_id": "rr_1",
+        "data_version": "dv_1",
+        "verified_at": "2026-08-07T00:00:00Z",
+    }
+    sampling = {"selection_trace": {"selection_id": "sel_A"}}
+    current = verification_freshness_for_current_sample(
+        verification_context=risk_ctx,
+        sampling_plan=sampling,
+    )
+    assert current["fresh"] is False
+    assert current["status"] == "stale"
+
+    # 即使误写了 selection_id=sel_A，也不得冒充 current_sample
+    polluted = {**risk_ctx, "selection_id": "sel_A"}
+    assert verification_freshness(
+        verification_context=polluted,
+        sampling_plan=sampling,
+        purpose="current_sample",
+    )["fresh"] is False
+
+    risk_fresh = verification_freshness_for_risk_signals(
+        verification_context=risk_ctx,
+        rule_run_context={"rule_run_id": "rr_1"},
+        data_version="dv_1",
+    )
+    assert risk_fresh["fresh"] is True
 
 
 def test_amount_analysis_blocks_mixed_and_unknown_currency() -> None:
@@ -1325,6 +1368,39 @@ def test_amount_analysis_blocks_mixed_and_unknown_currency() -> None:
     ]))
     with pytest.raises(ValueError, match="币种未知|多种分析币种"):
         assert_amount_analysis_ready([known, unknown], selected_currency=None)
+
+
+def test_selected_currency_scope_still_blocks_unknown_rows() -> None:
+    """selected=CNY 时，Raw Frame 含未知币行仍须阻断（禁止先过滤再 gate）。"""
+    from audit_engine.analysis_context import resolve_analysis_frames
+    from audit_engine.data_columns import ensure_analysis_columns
+
+    raw = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "C1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "凭证货币价值": 100.0,
+            "凭证货币代码": "CNY",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "CNY",
+        },
+        {
+            "凭证编号": "U1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-02"),
+            "凭证货币价值": 200.0,
+            "凭证货币代码": "",
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "文本": "未知",
+        },
+    ]))
+    with pytest.raises(ValueError, match="币种未知|未维护"):
+        resolve_analysis_frames({2025: raw}, selected_currency="CNY")
 
 
 def test_same_vendor_two_liability_accounts_are_two_entities() -> None:
@@ -1379,6 +1455,159 @@ def test_same_vendor_two_liability_accounts_are_two_entities() -> None:
     assert len(entities) == 2
     accts = set(entities["总账科目"].astype(str).tolist())
     assert accts == {"2202010001", "2202020001"}
+
+
+def test_accrual_match_requires_full_liability_account() -> None:
+    """220201 accrual + 220202 reversal（同供应商同金额）→ MUST remain unmatched。"""
+    accruals = pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-12-20"),
+            "文本": "预提运费",
+            "总账科目": "2202010001",
+            "借/贷标识": "H",
+            "供应商编号": "VA",
+            "凭证货币价值": 1_000_000.0,
+        },
+    ])
+    reversals = pd.DataFrame([
+        {
+            "凭证编号": "R001",
+            "公司代码": "1000",
+            "会计年度": 2026,
+            "过账日期": pd.Timestamp("2026-01-10"),
+            "文本": "冲销预提",
+            "总账科目": "2202020001",
+            "借/贷标识": "S",
+            "供应商编号": "VA",
+            "凭证货币价值": 1_000_000.0,
+        },
+    ])
+    pairs, unmatched = _match_accrual_reversals(
+        accruals, reversals, amount_tolerance=0.05,
+    )
+    assert pairs == []
+    assert len(unmatched) == 1
+
+    # 完整科目一致时仍应配对
+    same_acct_rev = reversals.copy()
+    same_acct_rev["总账科目"] = "2202010001"
+    pairs2, unmatched2 = _match_accrual_reversals(
+        accruals, same_acct_rev, amount_tolerance=0.05,
+    )
+    assert len(pairs2) == 1
+    assert pairs2[0]["account"] == "2202010001"
+    assert unmatched2.empty
+
+
+def test_profiler_uses_canonical_amount_not_document_currency() -> None:
+    """功能币 CNY 与凭证币 USD/EUR 并存时，画像金额合计必须用公司代码货币金额。"""
+    from audit_engine.data_columns import ensure_analysis_columns
+    from audit_engine.profiler import _account_structure, _vendor_patterns
+
+    df = ensure_analysis_columns(pd.DataFrame([
+        {
+            "凭证编号": "A1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "借/贷标识": "S",
+            "总账科目": "1002010001",
+            "供应商编号": "V1",
+            "凭证货币价值": 100.0,
+            "凭证货币代码": "USD",
+            "公司代码货币价值": 720.0,
+            "公司代码货币代码": "CNY",
+            "文本": "A",
+        },
+        {
+            "凭证编号": "B1",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-02"),
+            "借/贷标识": "S",
+            "总账科目": "1002010001",
+            "供应商编号": "V1",
+            "凭证货币价值": 100.0,
+            "凭证货币代码": "EUR",
+            "公司代码货币价值": 780.0,
+            "公司代码货币代码": "CNY",
+            "文本": "B",
+        },
+    ]))
+    acct = _account_structure(df)
+    assert acct["by_class"]["1"]["total"] == pytest.approx(1500.0)
+    vendors = _vendor_patterns(df)
+    top = vendors["top_vendors_by_amount"]
+    assert "V1" in top
+    assert top["V1"]["total_amount"] == pytest.approx(1500.0)
+
+
+def test_profiler_source_avoids_raw_amount_columns_for_aggregates() -> None:
+    """架构约束：profiler 金额聚合不得直接引用原始金额列名。"""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "audit_engine" / "profiler.py"
+    text = src.read_text(encoding="utf-8")
+    # 允许模块 docstring 叙述 SAP 字段；禁止可执行聚合表达式
+    forbidden = [
+        'grp["凭证货币价值"]',
+        '["凭证货币价值"].abs()',
+        'txn_count=("凭证货币价值"',
+        'total_amount=("凭证货币价值"',
+        'avg_amount=("凭证货币价值"',
+        'vendor_df["凭证货币价值"]',
+        'grp["公司代码货币价值"]',
+    ]
+    for needle in forbidden:
+        assert needle not in text, f"profiler.py 仍含原始金额引用: {needle}"
+
+
+def test_excel_provenance_sheet_is_self_describing() -> None:
+    """Excel 必须内嵌追溯信息 sheet，不依赖 HTTP header。"""
+    import tempfile
+    from pathlib import Path
+
+    from openpyxl import load_workbook
+
+    from audit_engine.reporter import generate_report_bytes
+    from audit_engine.rule_engine import RuleResult
+
+    df = pd.DataFrame([
+        {
+            "凭证编号": "A001",
+            "公司代码": "1000",
+            "会计年度": 2025,
+            "过账日期": pd.Timestamp("2025-01-01"),
+            "借/贷标识": "S",
+            "总账科目": "1002",
+            "凭证货币价值": 100.0,
+            "文本": "t",
+        },
+    ])
+    data, _stats = generate_report_bytes(
+        df,
+        [RuleResult(rule_name="r", hits=[])],
+        provenance={
+            "Project": "p1",
+            "Data Version": "dv_x",
+            "Selection ID": "sel_x",
+            "Verification Run ID": "vr_x",
+            "Currency Scope": "CNY",
+        },
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "r.xlsx"
+        path.write_bytes(data)
+        wb = load_workbook(path)
+        assert "追溯信息" in wb.sheetnames
+        ws = wb["追溯信息"]
+        kv = {ws.cell(row=r, column=1).value: ws.cell(row=r, column=2).value for r in range(2, ws.max_row + 1)}
+        assert kv["Data Version"] == "dv_x"
+        assert kv["Selection ID"] == "sel_x"
+        assert kv["Verification Run ID"] == "vr_x"
 
 
 def test_current_sample_merges_multi_rule_context() -> None:

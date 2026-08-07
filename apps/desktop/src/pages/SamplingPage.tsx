@@ -191,7 +191,11 @@ export function SamplingPage({ project }: Props) {
     `audit-llm-boundary-consent:${endpoint}|${policyVersion}|${boundaryHash}`;
 
   const runVerify = useMutation({
-    mutationFn: (opts?: { boundary_hash?: string }) => {
+    mutationFn: (opts: { boundary_hash: string }) => {
+      const hash = (opts.boundary_hash || pendingBoundaryHash || "").trim();
+      if (!hash) {
+        throw new Error("缺少 boundary_hash：请先预览并确认数据外发边界");
+      }
       const sampleCount =
         (extract.data ?? samples.data)?.samples?.length
         ?? (extract.data ?? samples.data)?.voucher_count
@@ -202,7 +206,7 @@ export function SamplingPage({ project }: Props) {
         redaction: "pseudonym",
         confirm_data_boundary: true,
         verification_scope: "current_sample",
-        boundary_hash: opts?.boundary_hash || pendingBoundaryHash || undefined,
+        boundary_hash: hash,
       });
     },
     onSuccess: (data) => {
@@ -732,7 +736,7 @@ export function SamplingPage({ project }: Props) {
               disabled={runVerify.isPending}
               onClick={() =>
                 runVerify.mutate({
-                  boundary_hash: boundaryPreview.boundary_hash || pendingBoundaryHash || undefined,
+                  boundary_hash: boundaryPreview.boundary_hash || pendingBoundaryHash || "",
                 })
               }
             >

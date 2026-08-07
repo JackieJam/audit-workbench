@@ -1243,7 +1243,8 @@ export const api = {
       max_verify?: number;
       redaction?: "none" | "pseudonym";
       confirm_data_boundary?: boolean;
-      boundary_hash?: string;
+      /** 必填：须与 GET /pipeline/verify/boundary 返回的 boundary_hash 绑定 */
+      boundary_hash: string;
       verification_scope?: "current_sample" | "risk_signals";
     },
   ) =>

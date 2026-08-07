@@ -60,6 +60,7 @@ def generate_report_bytes(
     manual_final_samples: list[dict] | None = None,
     explicit_samples: list[dict] | None = None,
     rules_config: dict | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict]:
     """生成 Excel 报告字节流，返回 (bytes, stats)。"""
     import tempfile
@@ -74,6 +75,7 @@ def generate_report_bytes(
             manual_final_samples=manual_final_samples,
             explicit_samples=explicit_samples,
             rules_config=rules_config,
+            provenance=provenance,
         )
         data = Path(path).read_bytes()
     return data, stats
@@ -88,6 +90,7 @@ def generate_report(
     manual_final_samples: list[dict] | None = None,
     explicit_samples: list[dict] | None = None,
     rules_config: dict | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict:
     """
     生成 Excel 报告，返回统计摘要 dict。
@@ -174,6 +177,8 @@ def generate_report(
         _write_manual_final_sheet(wb, work, manual_final_samples)
     _write_stats_sheet(wb, rule_results, llm_judgments)
     _write_rules_sheet(wb, rule_results)
+    if provenance:
+        _write_provenance_sheet(wb, provenance)
 
     wb.save(output_path)
 
@@ -573,6 +578,57 @@ def _write_stats_sheet(wb, rule_results, llm_judgments):
         cell.font = Font(bold=True)
         cell.border = THIN_BORDER
 
+    ws.freeze_panes = "A2"
+
+
+def _write_provenance_sheet(wb, provenance: dict[str, Any]) -> None:
+    """底稿自描述追溯信息：文件本身可回答来自哪个 data/rule/sample/verify run。"""
+    ws = wb.create_sheet("追溯信息")
+    headers = ["字段", "值"]
+    for col_idx, (h, w) in enumerate(zip(headers, [28, 64], strict=True), 1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = CENTER
+        cell.border = THIN_BORDER
+        ws.column_dimensions[get_column_letter(col_idx)].width = w
+
+    ordered_keys = [
+        "Project",
+        "Generated At",
+        "Engine Revision",
+        "Data Version",
+        "Ingest Run ID",
+        "Rule Run ID",
+        "Rule Result Hash",
+        "Population ID",
+        "Selection ID",
+        "Verification Run ID",
+        "Verification Context Hash",
+        "Verification Result Hash",
+        "Verification Scope",
+        "Currency Scope",
+    ]
+    seen: set[str] = set()
+    row_num = 2
+    for key in ordered_keys:
+        if key not in provenance:
+            continue
+        seen.add(key)
+        ws.cell(row=row_num, column=1, value=excel_safe_value(key)).border = THIN_BORDER
+        val = provenance.get(key)
+        ws.cell(
+            row=row_num, column=2, value=excel_safe_value("" if val is None else str(val))
+        ).border = THIN_BORDER
+        row_num += 1
+    for key, val in provenance.items():
+        if key in seen:
+            continue
+        ws.cell(row=row_num, column=1, value=excel_safe_value(str(key))).border = THIN_BORDER
+        ws.cell(
+            row=row_num, column=2, value=excel_safe_value("" if val is None else str(val))
+        ).border = THIN_BORDER
+        row_num += 1
     ws.freeze_panes = "A2"
 
 

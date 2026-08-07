@@ -118,9 +118,9 @@ def _amount_distribution(df: pd.DataFrame) -> dict:
     voucher_total = float(voucher_nonzero.sum())
 
     by_type: dict[str, dict] = {}
-    if "凭证类型" in df.columns:
-        for vtype, grp in df.groupby("凭证类型"):
-            s = grp["凭证货币价值"].abs().dropna()
+    if "凭证类型" in work.columns:
+        for vtype, grp in work.groupby("凭证类型"):
+            s = grp["_amount_abs"].dropna()
             s = s[s > 0]
             if len(s) >= 5:
                 by_type[str(vtype)] = _percentiles(s)
@@ -298,30 +298,30 @@ def _account_structure(df: pd.DataFrame) -> dict:
     if "总账科目" not in df.columns:
         return {}
 
-    df = df.copy()
-    acct = df["总账科目"].astype(str).str.strip()
-    df["_acct1"] = acct.str[:1]   # 一级：1=资产, 2=负债, 3=权益, 5=成本, 6=损益
-    df["_acct4"] = acct.str[:4]   # 二级：6001=主营收入, 6401=主营成本, etc.
-    df["_acct6"] = acct.str[:6]   # 三级：600101=主营收入-第三方, etc.
+    work = ensure_analysis_columns(df).copy()
+    acct = work["总账科目"].astype(str).str.strip()
+    work["_acct1"] = acct.str[:1]   # 一级：1=资产, 2=负债, 3=权益, 5=成本, 6=损益
+    work["_acct4"] = acct.str[:4]   # 二级：6001=主营收入, 6401=主营成本, etc.
+    work["_acct6"] = acct.str[:6]   # 三级：600101=主营收入-第三方, etc.
 
-    # 一级科目汇总
+    # 一级科目汇总（金额只允许用 canonical _amount_*）
     by_class = {}
-    for cls, grp in df.groupby("_acct1"):
+    for cls, grp in work.groupby("_acct1"):
         by_class[str(cls)] = {
             "count": int(len(grp)),
-            "total": round(float(grp["凭证货币价值"].abs().sum()), 2),
+            "total": round(float(grp["_amount_abs"].fillna(0).sum()), 2),
         }
 
     # 二级科目 Top20
-    top_accounts = df["_acct4"].value_counts().head(20)
+    top_accounts = work["_acct4"].value_counts().head(20)
 
     # 三级科目 Top30（更细粒度）
-    top_acct6 = df["_acct6"].value_counts().head(30)
+    top_acct6 = work["_acct6"].value_counts().head(30)
 
     # 关键科目是否存在（按自动分类结果检测，与可视化模块口径一致）
-    acct4_set = set(df["_acct4"].astype(str).unique())
+    acct4_set = set(work["_acct4"].astype(str).unique())
     name_col = next(
-        (c for c in ("总账科目：长文本", "总账科目：短文本") if c in df.columns),
+        (c for c in ("总账科目：长文本", "总账科目：短文本") if c in work.columns),
         None,
     )
     if name_col is not None:
@@ -330,7 +330,7 @@ def _account_structure(df: pd.DataFrame) -> dict:
             CAT_REVENUE,
             auto_classify,
         )
-        unique_names = df[name_col].fillna("").astype(str).unique()
+        unique_names = work[name_col].fillna("").astype(str).unique()
         cats_seen = {auto_classify(n) for n in unique_names}
         has_revenue = CAT_REVENUE in cats_seen
         has_cost = CAT_COST in cats_seen
@@ -397,24 +397,24 @@ def _vendor_patterns(df: pd.DataFrame) -> dict:
 
     vendor_counts = vendor_col.value_counts()
 
-    # 每供应商的交易频率和金额
-    vendor_df = df[df["供应商编号"].notna()].copy()
+    # 每供应商的交易频率和金额（canonical _amount_abs）
+    vendor_df = ensure_analysis_columns(df[df["供应商编号"].notna()].copy())
     vcol = _voucher_id_col(vendor_df)
     vendor_stats = vendor_df.groupby("供应商编号").agg(
-        txn_count=("凭证货币价值", "count"),
-        total_amount=("凭证货币价值", lambda x: round(float(x.abs().sum()), 2)),
-        avg_amount=("凭证货币价值", lambda x: round(float(x.abs().mean()), 2)),
+        txn_count=("_amount_abs", "count"),
+        total_amount=("_amount_abs", lambda x: round(float(x.fillna(0).sum()), 2)),
+        avg_amount=("_amount_abs", lambda x: round(float(x.fillna(0).mean()), 2)),
         unique_vouchers=(vcol, "nunique"),
     )
 
     # 同日多笔供应商（化整为零候选）
     high_freq_same_day = 0
-    if "过账日期" in df.columns:
+    if "过账日期" in vendor_df.columns:
         same_day = vendor_df.groupby(["供应商编号", "过账日期"]).size()
         high_freq_same_day = int((same_day >= 3).sum())
 
     # 供应商单笔金额分布
-    vendor_amt = vendor_df["凭证货币价值"].abs()
+    vendor_amt = vendor_df["_amount_abs"].fillna(0)
 
     return {
         "total_vendors": int(vendor_counts.count()),

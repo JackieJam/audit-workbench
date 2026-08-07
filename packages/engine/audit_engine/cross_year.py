@@ -235,7 +235,6 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
                 row["_accrual_line_count"] = int(len(grp))
                 row["_accrual_entity_party"] = str(_party or "")
                 row["_accrual_entity_acct"] = str(_acct or "")
-                row["_accrual_entity_acct4"] = str(_acct or "")[:4]
                 entities.append(row)
             continue
 
@@ -282,13 +281,25 @@ def _collapse_to_accrual_entities(lines: pd.DataFrame) -> pd.DataFrame:
             row["_accrual_entity_amount"] = selected_amt
             row["_accrual_line_count"] = int(len(grp))
             row["_accrual_entity_party"] = str(_party or "")
-            acct_val = str(row.get("总账科目", "") or "")
-            row["_accrual_entity_acct4"] = acct_val[:4]
+            row["_accrual_entity_acct"] = str(row.get("总账科目", "") or "")
             entities.append(row)
 
     if not entities:
         return lines.iloc[0:0].copy()
     return pd.DataFrame(entities)
+
+
+def _entity_liability_account(frame: pd.DataFrame) -> pd.Series:
+    """Accrual economic entity 的完整负债科目（与 entity grain 对齐）。"""
+    if "_accrual_entity_acct" in frame.columns:
+        acct = frame["_accrual_entity_acct"].astype(str).str.strip()
+        if "总账科目" in frame.columns:
+            fallback = frame["总账科目"].astype(str).str.strip()
+            acct = acct.where(acct.ne("") & acct.ne("nan") & acct.ne("None"), fallback)
+        return acct
+    if "总账科目" in frame.columns:
+        return frame["总账科目"].astype(str).str.strip()
+    return pd.Series("", index=frame.index, dtype="string")
 
 
 def _match_accrual_reversals(
@@ -297,9 +308,10 @@ def _match_accrual_reversals(
     *,
     amount_tolerance: float,
 ) -> tuple[list[dict[str, Any]], pd.DataFrame]:
-    """一对一贪心配对：科目前缀 + 对手方 + 相反借贷 + 金额容差。
+    """一对一贪心配对：完整负债科目 + 对手方 + 相反借贷 + 金额容差。
 
-    输入先折叠为经济预提实体（一凭证可多实体），再配对。
+    Entity grain 与 Match grain 必须一致（full liability account）。
+    无 allowed_account_mapping 时禁止跨科目（含同 4 位前缀）配对。
     返回 (pairs, unmatched_accruals)。无关冲回不会“覆盖”未匹配预提。
     """
     if accruals.empty:
@@ -311,11 +323,6 @@ def _match_accrual_reversals(
     if work_rev.empty:
         return [], accruals.copy()
 
-    def _acct4(frame: pd.DataFrame) -> pd.Series:
-        if "总账科目" in frame.columns:
-            return frame["总账科目"].astype(str).str[:4]
-        return pd.Series("", index=frame.index, dtype="string")
-
     def _dc(frame: pd.DataFrame) -> pd.Series:
         if "借/贷标识" in frame.columns:
             return frame["借/贷标识"].astype(str).str.strip()
@@ -323,7 +330,7 @@ def _match_accrual_reversals(
 
     work_rev["_match_amt"] = _amount_abs(work_rev).fillna(0)
     work_rev["_match_date"] = pd.to_datetime(work_rev["过账日期"], errors="coerce")
-    work_rev["_acct4"] = _acct4(work_rev)
+    work_rev["_full_acct"] = _entity_liability_account(work_rev)
     work_rev["_party"] = work_rev.apply(_party_key, axis=1)
     work_rev["_dc"] = _dc(work_rev)
     used: set[Any] = set()
@@ -333,7 +340,7 @@ def _match_accrual_reversals(
     ordered = accruals.assign(
         _match_amt=_amount_abs(accruals).fillna(0),
         _match_date=pd.to_datetime(accruals["过账日期"], errors="coerce"),
-        _acct4=_acct4(accruals),
+        _full_acct=_entity_liability_account(accruals),
         _party=accruals.apply(_party_key, axis=1),
         _dc=_dc(accruals),
     ).sort_values("_match_amt", ascending=False)
@@ -346,7 +353,8 @@ def _match_accrual_reversals(
         accrual_dc = str(accrual["_dc"])
         opposite = "H" if accrual_dc == "S" else "S"
         available = work_rev.loc[~work_rev.index.isin(used)].copy()
-        candidates = available[available["_acct4"].eq(str(accrual["_acct4"]))].copy()
+        # Match grain = full liability account（禁止仅凭 4 位前缀跨科目配对）
+        candidates = available[available["_full_acct"].eq(str(accrual["_full_acct"]))].copy()
         if accrual_dc in {"S", "H"}:
             candidates = candidates[
                 candidates["_dc"].eq(opposite) | candidates["_dc"].eq("")
@@ -385,7 +393,8 @@ def _match_accrual_reversals(
             "accrual_amount": round(amt, 2),
             "reversal_amount": round(float(best["_match_amt"]), 2),
             "tolerance": round(float(best["_tol"]), 4),
-            "account_prefix": str(accrual["_acct4"]),
+            "account": str(accrual["_full_acct"]),
+            "account_prefix": str(accrual["_full_acct"])[:4],
             "party": accrual_party,
         })
 

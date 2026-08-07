@@ -53,8 +53,8 @@ class VerifyRequest(BaseModel):
     redaction: str = Field("pseudonym", pattern="^(none|pseudonym)$")
     # 发送前数据边界知情确认；未确认时接口拒绝外发
     confirm_data_boundary: bool = False
-    # GET boundary 返回的 boundary_hash；若提供则必须与服务端重算一致
-    boundary_hash: str = ""
+    # GET boundary 返回的 boundary_hash；必填且必须与服务端重算一致（禁止仅 bool consent）
+    boundary_hash: str = Field(..., min_length=1)
     # current_sample=核验当前抽样；risk_signals=按规则高风险信号取 top N
     verification_scope: Literal["current_sample", "risk_signals"] = "current_sample"
 
@@ -261,11 +261,22 @@ def run_verify(
     if not manifest.years:
         raise HTTPException(status_code=400, detail="项目无序时账数据")
 
-    req = body or VerifyRequest()
+    if body is None:
+        raise HTTPException(
+            status_code=400,
+            detail="请求体必填：须包含 confirm_data_boundary 与 boundary_hash。"
+            "请先 GET /pipeline/verify/boundary 预览并确认。",
+        )
+    req = body
     if not req.confirm_data_boundary:
         raise HTTPException(
             status_code=400,
             detail="请先确认数据外发边界（confirm_data_boundary）。可先 GET /pipeline/verify/boundary 预览。",
+        )
+    if not str(req.boundary_hash or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="缺少 boundary_hash：须与 GET /pipeline/verify/boundary 返回值绑定后外发，禁止仅用布尔确认。",
         )
     profile_id = (req.profile_id or x_llm_profile_id or "").strip() or None
     api_key = (req.api_key or x_llm_api_key or "").strip() or None
@@ -285,7 +296,7 @@ def run_verify(
             max_verify=req.max_verify,
             redaction=req.redaction,
             verification_scope=req.verification_scope,
-            boundary_hash=req.boundary_hash or None,
+            boundary_hash=str(req.boundary_hash).strip(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

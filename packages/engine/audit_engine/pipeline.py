@@ -290,19 +290,23 @@ class AnalysisPipeline:
         return merged
 
     def build_profiles(self, project_id: str) -> dict[int, dict]:
-        from audit_engine.analysis_context import assert_amount_analysis_ready
+        from audit_engine.analysis_context import resolve_analysis_frames
         from audit_engine.runtime import workbench_version
 
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
         expected_token = _analysis_token(state)
-        year_map = {
-            year: self._store.get_analysis_work_df(project_id, year)
+        # Raw frames → AnalysisContext validate → scope → filter（禁止调用方先过滤）
+        raw_year_map = {
+            year: self._store.get_work_df(project_id, year)
             for year in manifest.years
         }
-        assert_amount_analysis_ready(
-            year_map.values(),
-            selected_currency=self._store.current_analysis_currency(project_id),
+        currency = self._store.current_analysis_currency(project_id)
+        ctx, year_map = resolve_analysis_frames(
+            raw_year_map,
+            selected_currency=currency,
+            data_version=self._store.current_data_version(project_id),
+            engine_revision=workbench_version(),
         )
         profiles: dict[int, dict] = {}
         financials: dict[int, dict] = {}
@@ -316,9 +320,11 @@ class AnalysisPipeline:
             latest["profiles"] = profiles
             latest["financials"] = financials
             latest["profile_context"] = {
-                "data_version": self._store.current_data_version(project_id),
-                "currency_scope": self._store.current_analysis_currency(project_id),
-                "engine_revision": workbench_version(),
+                "data_version": ctx.data_version,
+                "currency_scope": ctx.currency_scope,
+                "currencies_present": list(ctx.currencies_present),
+                "amount_basis": ctx.amount_basis,
+                "engine_revision": ctx.engine_revision,
             }
             return latest
 
@@ -326,20 +332,23 @@ class AnalysisPipeline:
         return profiles
 
     def run_cross_year(self, project_id: str) -> list[dict]:
-        from audit_engine.analysis_context import assert_amount_analysis_ready
+        from audit_engine.analysis_context import resolve_analysis_frames
+        from audit_engine.runtime import workbench_version
 
         manifest = self._store.load_manifest(project_id)
         state = self._store.load_state(project_id)
         expected_token = _analysis_token(state)
         overrides = _category_overrides(state)
         rules = self.load_rules(project_id)
-        year_map = {
-            year: self._store.get_analysis_work_df(project_id, year)
+        raw_year_map = {
+            year: self._store.get_work_df(project_id, year)
             for year in manifest.years
         }
-        assert_amount_analysis_ready(
-            year_map.values(),
+        _ctx, year_map = resolve_analysis_frames(
+            raw_year_map,
             selected_currency=self._store.current_analysis_currency(project_id),
+            data_version=self._store.current_data_version(project_id),
+            engine_revision=workbench_version(),
         )
         findings = run_cross_year_analysis(year_map, rules, category_overrides=overrides)
         serialized = [_finding_to_dict(f) for f in findings]
@@ -739,6 +748,8 @@ class AnalysisPipeline:
         }
 
     def export_excel(self, project_id: str) -> tuple[bytes, dict]:
+        from datetime import UTC, datetime
+
         from audit_engine.analysis_context import verification_freshness
         from audit_engine.llm_verifier import judgments_from_state
 
@@ -766,6 +777,7 @@ class AnalysisPipeline:
         freshness = verification_freshness(
             verification_context=state.get("verification_run_context"),
             sampling_plan=state.get("sampling_plan"),
+            purpose="current_sample",
         )
         # stale 核验不得写入当前正式底稿
         llm_judgments = (
@@ -773,6 +785,39 @@ class AnalysisPipeline:
             if freshness.get("fresh")
             else {}
         )
+        verify_ctx = state.get("verification_run_context") or {}
+        sampling_plan = state.get("sampling_plan") or {}
+        selection_trace = sampling_plan.get("selection_trace") or {}
+        population_snapshot = sampling_plan.get("population_snapshot") or {}
+        rule_run_context = state.get("rule_run_context") or {}
+
+        provenance = {
+            "Project": project_id,
+            "Generated At": datetime.now(UTC).isoformat(),
+            "Engine Revision": workbench_version(),
+            "Data Version": state.get("data_version"),
+            "Ingest Run ID": state.get("ingest_run_id")
+            or (state.get("ingest_context") or {}).get("ingest_run_id"),
+            "Rule Run ID": rule_run_context.get("rule_run_id"),
+            "Rule Result Hash": rule_run_context.get("rule_result_hash")
+            or state.get("rule_result_hash"),
+            "Population ID": population_snapshot.get("population_id"),
+            "Selection ID": selection_trace.get("selection_id")
+            or freshness.get("current_selection_id"),
+            "Verification Run ID": (
+                freshness.get("verification_run_id") if freshness.get("fresh") else None
+            ),
+            "Verification Context Hash": (
+                verify_ctx.get("verification_context_hash") if freshness.get("fresh") else None
+            ),
+            "Verification Result Hash": (
+                verify_ctx.get("verification_result_hash") if freshness.get("fresh") else None
+            ),
+            "Verification Scope": (
+                verify_ctx.get("verification_scope") if freshness.get("fresh") else None
+            ),
+            "Currency Scope": self._store.current_analysis_currency(project_id),
+        }
         data, stats = generate_report_bytes(
             unified,
             rule_results,
@@ -781,12 +826,14 @@ class AnalysisPipeline:
             manual_final_samples=manual_final,
             explicit_samples=list(state.get("samples") or []) if "samples" in state else None,
             rules_config=rules,
+            provenance=provenance,
         )
         stats["verification_freshness"] = freshness
         stats["selection_id"] = freshness.get("current_selection_id")
         stats["verification_run_id"] = (
             freshness.get("verification_run_id") if freshness.get("fresh") else None
         )
+        stats["provenance"] = provenance
         return data, stats
 
     def verify_with_llm(
@@ -876,26 +923,42 @@ class AnalysisPipeline:
         rule_run_context = state.get("rule_run_context") or {}
         boundary = describe_llm_verify_boundary(base_url, model, redaction=mode)
         expected_boundary_hash = boundary_consent_hash(boundary)
-        if boundary_hash is not None and str(boundary_hash).strip():
-            if str(boundary_hash).strip() != expected_boundary_hash:
-                raise ValueError(
-                    "数据边界已变化，请重新确认后再发送。"
-                    f"（expected={expected_boundary_hash[:12]}…）"
-                )
+        provided_hash = str(boundary_hash or "").strip()
+        if not provided_hash:
+            raise ValueError(
+                "缺少 boundary_hash：请先 GET /pipeline/verify/boundary 取得边界摘要并确认后再发送。"
+            )
+        if provided_hash != expected_boundary_hash:
+            raise ValueError(
+                "数据边界已变化，请重新确认后再发送。"
+                f"（expected={expected_boundary_hash[:12]}…）"
+            )
 
         engine_rev = workbench_version()
         prompt_revision = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]
-        sample_digest = hashlib.sha256(
-            ",".join(sorted(scoped_keys or sample_voucher_keys)).encode()
-        ).hexdigest()[:16]
+        currency_scope = self._store.current_analysis_currency(project_id)
+        # risk_signals 与 sample 解耦：不得携带 selection_id / sample_digest
+        if scope == "current_sample":
+            selection_id = selection_trace.get("selection_id")
+            population_id = population_snapshot.get("population_id")
+            sample_keys_for_ctx = list(scoped_keys) if scoped_keys is not None else list(sample_voucher_keys)
+            sample_digest = hashlib.sha256(
+                ",".join(sorted(sample_keys_for_ctx)).encode()
+            ).hexdigest()[:16]
+        else:
+            selection_id = None
+            population_id = None
+            sample_keys_for_ctx = []
+            sample_digest = None
         context_hash = hashlib.sha256(
             "|".join([
                 scope,
-                str(selection_trace.get("selection_id") or ""),
-                str(population_snapshot.get("population_id") or ""),
+                str(selection_id or ""),
+                str(population_id or ""),
                 str(rule_run_context.get("rule_run_id") or ""),
                 str(state.get("data_version") or ""),
-                sample_digest,
+                str(sample_digest or ""),
+                str(currency_scope or ""),
                 model,
                 base_url,
                 mode or "pseudonym",
@@ -911,12 +974,13 @@ class AnalysisPipeline:
             "verification_run_id": verification_run_id,
             "verification_context_hash": context_hash,
             "verification_scope": scope,
-            "selection_id": selection_trace.get("selection_id"),
-            "population_id": population_snapshot.get("population_id"),
+            "selection_id": selection_id,
+            "population_id": population_id,
             "rule_run_id": rule_run_context.get("rule_run_id"),
             "data_version": state.get("data_version"),
-            "sample_voucher_keys": list(scoped_keys) if scoped_keys is not None else sample_voucher_keys,
-            "sample_voucher_count": len(scoped_keys) if scoped_keys is not None else len(sample_voucher_keys),
+            "currency_scope": currency_scope,
+            "sample_voucher_keys": sample_keys_for_ctx,
+            "sample_voucher_count": len(sample_keys_for_ctx),
             "sample_keys_digest": sample_digest,
             "model": model,
             "endpoint": base_url,

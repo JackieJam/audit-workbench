@@ -799,7 +799,12 @@ class ProjectStore:
         return work
 
     def get_analysis_work_df(self, project_id: str, year: int) -> pd.DataFrame:
-        """按用户选择的单币种口径返回分析数据，不进行跨币种金额合并。"""
+        """按用户选择的单币种口径返回分析数据，不进行跨币种金额合并。
+
+        金额分析门禁路径请勿直接依赖本方法做 validate：调用方应先取
+        ``get_work_df``（Raw Frame），再经 ``resolve_analysis_frames``
+        完成 validate → scope → filter，否则未知币种行会被提前滤掉。
+        """
         work = self.get_work_df(project_id, year)
         currency = self.current_analysis_currency(project_id)
         if work.empty or not currency or "_amount_currency" not in work.columns:
