@@ -253,20 +253,20 @@ class ProjectStore:
                 ):
                     state.pop(key, None)
                 thread = dict(state.get("agent_thread") or {})
-                if thread:
-                    thread["pinned_context"] = None
-                    messages = list(thread.get("messages") or [])
-                    messages.append({
-                        "role": "assistant",
-                        "content": (
-                            f"财务画像分析口径已切换为 {selected} 单币种；"
-                            "旧画像、规则结果与模块分析已失效，请基于当前币种重新分析。"
-                        ),
-                        "at": now,
-                    })
-                    thread["messages"] = messages[-40:]
-                    thread["updated_at"] = now
-                    state["agent_thread"] = thread
+                thread["pinned_context"] = None
+                from audit_engine.agent.sessions import append_active_notice
+
+                append_active_notice(
+                    state,
+                    (
+                        f"财务画像分析口径已切换为 {selected} 单币种；"
+                        "旧画像、规则结果与模块分析已失效，请基于当前币种重新分析。"
+                    ),
+                    at=now,
+                )
+                thread["updated_at"] = now
+                thread.pop("messages", None)
+                state["agent_thread"] = thread
             events = list(state.get("analysis_currency_events") or [])
             events.append({
                 "at": now,
@@ -616,17 +616,13 @@ class ProjectStore:
         ):
             state.pop(key, None)
         thread = dict(state.get("agent_thread") or {})
-        if thread:
-            thread["pinned_context"] = None
-            messages = list(thread.get("messages") or [])
-            messages.append({
-                "role": "assistant",
-                "content": notification,
-                "at": now,
-            })
-            thread["messages"] = messages[-40:]
-            thread["updated_at"] = now
-            state["agent_thread"] = thread
+        thread["pinned_context"] = None
+        from audit_engine.agent.sessions import append_active_notice
+
+        append_active_notice(state, notification, at=now)
+        thread["updated_at"] = now
+        thread.pop("messages", None)
+        state["agent_thread"] = thread
         return state
 
     def save_journal_year(self, project_id: str, year: int, df: pd.DataFrame) -> int:

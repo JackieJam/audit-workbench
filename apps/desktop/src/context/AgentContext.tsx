@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type AgentChatResponse, type AuditSelection } from "@/api/client";
+import { api, type AgentChatResponse, type AgentSessionSummary, type AuditSelection } from "@/api/client";
 
 type AgentMessage = {
   role: string;
@@ -15,13 +15,17 @@ type AgentContextValue = {
   pinSelection: (ctx: AuditSelection | null) => void;
   suggestions: string[];
   messages: AgentMessage[];
+  sessions: AgentSessionSummary[];
+  activeSessionId: string | null;
   refreshState: () => void;
   draftPrompt: string | null;
   focusAgentNonce: number;
   askAgent: (prompt: string) => void;
   clearDraftPrompt: () => void;
-  /** 开启新对话：清空历史消息，保留当前选中销。 */
+  /** 新建空会话并切换（保留历史会话）。 */
   startNewThread: () => Promise<void>;
+  switchSession: (sessionId: string) => Promise<void>;
+  removeSession: (sessionId: string) => Promise<void>;
 };
 
 const Ctx = createContext<AgentContextValue | null>(null);
@@ -32,6 +36,14 @@ const DEFAULT_SUGGESTIONS = [
   "抽样规则有哪些？",
   "根据反馈建议规则调参",
 ];
+
+function applyAgentStateCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectId: string,
+  data: Awaited<ReturnType<typeof api.getAgentState>>,
+) {
+  queryClient.setQueryData(["agent-state", projectId], data);
+}
 
 export function AgentProvider({ projectId, children }: { projectId: string | null; children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -113,8 +125,20 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
 
   const startNewThread = useCallback(async () => {
     if (!projectId) return;
-    await api.clearAgentThread(projectId);
-    await queryClient.invalidateQueries({ queryKey: ["agent-state", projectId] });
+    const data = await api.createAgentSession(projectId);
+    applyAgentStateCache(queryClient, projectId, data);
+  }, [projectId, queryClient]);
+
+  const switchSession = useCallback(async (sessionId: string) => {
+    if (!projectId) return;
+    const data = await api.activateAgentSession(projectId, sessionId);
+    applyAgentStateCache(queryClient, projectId, data);
+  }, [projectId, queryClient]);
+
+  const removeSession = useCallback(async (sessionId: string) => {
+    if (!projectId) return;
+    const data = await api.deleteAgentSession(projectId, sessionId);
+    applyAgentStateCache(queryClient, projectId, data);
   }, [projectId, queryClient]);
 
   const value = useMemo(
@@ -124,12 +148,16 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
       pinSelection,
       suggestions,
       messages: (stateQ.data?.messages ?? []) as AgentMessage[],
+      sessions: (stateQ.data?.sessions ?? []) as AgentSessionSummary[],
+      activeSessionId: stateQ.data?.active_session_id ?? null,
       refreshState,
       draftPrompt,
       focusAgentNonce,
       askAgent,
       clearDraftPrompt,
       startNewThread,
+      switchSession,
+      removeSession,
     }),
     [
       projectId,
@@ -137,12 +165,16 @@ export function AgentProvider({ projectId, children }: { projectId: string | nul
       pinSelection,
       suggestions,
       stateQ.data?.messages,
+      stateQ.data?.sessions,
+      stateQ.data?.active_session_id,
       refreshState,
       draftPrompt,
       focusAgentNonce,
       askAgent,
       clearDraftPrompt,
       startNewThread,
+      switchSession,
+      removeSession,
     ],
   );
 

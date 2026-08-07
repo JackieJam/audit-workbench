@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { CaretRight, Plus } from "@phosphor-icons/react";
-import { api, type AgentChatResponse, type InsightJob } from "@/api/client";
+import { CaretDown, CaretRight, Plus, Trash } from "@phosphor-icons/react";
+import { api, type AgentChatResponse, type AgentSessionSummary, type InsightJob } from "@/api/client";
 import { useAgent } from "@/context/AgentContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { useLlm } from "@/context/LlmContext";
@@ -134,17 +134,99 @@ function ToolCallsCard({
   );
 }
 
+function SessionSwitcher({
+  sessions,
+  activeSessionId,
+  busy,
+  onSwitch,
+  onDelete,
+}: {
+  sessions: AgentSessionSummary[];
+  activeSessionId: string | null;
+  busy: boolean;
+  onSwitch: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const active = sessions.find((s) => s.id === activeSessionId) ?? sessions[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  return (
+    <div className="agent-session-switcher" ref={rootRef}>
+      <button
+        type="button"
+        className="agent-session-switcher__trigger"
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy}
+        aria-expanded={open}
+        title="切换历史对话"
+      >
+        <span className="agent-session-switcher__title">{active?.title ?? "新对话"}</span>
+        <CaretDown size={12} weight="bold" />
+      </button>
+      {open ? (
+        <div className="agent-session-switcher__menu" role="listbox">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              className={`agent-session-switcher__item${session.active ? " is-active" : ""}`}
+            >
+              <button
+                type="button"
+                className="agent-session-switcher__pick"
+                onClick={() => {
+                  setOpen(false);
+                  if (!session.active) onSwitch(session.id);
+                }}
+              >
+                <span>{session.title}</span>
+                <small>{session.message_count} 条</small>
+              </button>
+              <button
+                type="button"
+                className="agent-session-switcher__delete"
+                title="删除此对话"
+                aria-label={`删除对话 ${session.title}`}
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(session.id);
+                }}
+              >
+                <Trash size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
   const {
     projectId,
     pinnedContext,
     suggestions,
     messages,
+    sessions,
+    activeSessionId,
     refreshState,
     draftPrompt,
     focusAgentNonce,
     clearDraftPrompt,
     startNewThread,
+    switchSession,
+    removeSession,
   } = useAgent();
   const { applyUiActions } = useWorkspace();
   const { selectedProfileId, selectedProfile } = useLlm();
@@ -152,14 +234,15 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
   const [input, setInput] = useState("");
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [resolvedActions, setResolvedActions] = useState<Set<string>>(() => new Set());
-  const [clearing, setClearing] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setLocalMessages(messages.map((m) => ({ role: m.role, content: m.content, toolCalls: m.tool_calls })));
-  }, [messages]);
+    setResolvedActions(new Set());
+  }, [messages, activeSessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -223,21 +306,33 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
     chat.mutate(msg);
   };
 
-  const onNewThread = async () => {
-    if (clearing || chat.isPending) return;
-    if (localMessages.length > 0) {
-      const ok = window.confirm("开启新对话？将清空当前问答历史，保留图表/模块选中销。");
-      if (!ok) return;
-    }
-    setClearing(true);
+  const withSessionBusy = async (fn: () => Promise<void>) => {
+    if (sessionBusy || chat.isPending) return;
+    setSessionBusy(true);
     try {
+      await fn();
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+
+  const onNewThread = () =>
+    void withSessionBusy(async () => {
       await startNewThread();
       setLocalMessages([]);
       setResolvedActions(new Set());
-    } finally {
-      setClearing(false);
-    }
-  };
+      inputRef.current?.focus();
+    });
+
+  const onSwitchSession = (sessionId: string) =>
+    void withSessionBusy(async () => {
+      await switchSession(sessionId);
+    });
+
+  const onDeleteSession = (sessionId: string) =>
+    void withSessionBusy(async () => {
+      await removeSession(sessionId);
+    });
 
   return (
     <aside className="agent-panel" ref={panelRef}>
@@ -248,9 +343,9 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
             <button
               type="button"
               className="agent-panel__new-thread"
-              onClick={() => void onNewThread()}
-              disabled={clearing || chat.isPending}
-              title="开启新对话，避免旧话题污染上下文"
+              onClick={onNewThread}
+              disabled={sessionBusy || chat.isPending}
+              title="开启新对话（保留历史会话，可随时切换回来）"
             >
               <Plus size={14} weight="bold" />
               新对话
@@ -268,6 +363,13 @@ export function AgentPanel({ onCollapse }: { onCollapse?: () => void }) {
             ) : null}
           </div>
         </div>
+        <SessionSwitcher
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          busy={sessionBusy || chat.isPending}
+          onSwitch={onSwitchSession}
+          onDelete={onDeleteSession}
+        />
         <p className="muted">中枢 Agent · 可查询序时账、解释画像、复核口径并编排疑点与抽样</p>
         <details className="agent-boundary">
           <summary>能力与证据边界</summary>

@@ -209,9 +209,30 @@ export type AgentChatResponse = {
   reply: string;
   tool_calls: Array<{ tool: string; args: Record<string, unknown>; result: Record<string, unknown> }>;
   pinned_context?: AuditSelection | null;
+  session_id?: string;
   suggestions: string[];
   needs_api_key?: boolean;
   ui_actions?: AgentUiAction[];
+};
+
+export type AgentSessionSummary = {
+  id: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  message_count: number;
+  active: boolean;
+};
+
+export type AgentStateResponse = {
+  messages: Array<{ role: string; content: string; at?: string; tool_calls?: AgentChatResponse["tool_calls"] }>;
+  pinned_context: AuditSelection | null;
+  suggestions?: string[];
+  updated_at?: string;
+  active_session_id?: string;
+  sessions?: AgentSessionSummary[];
+  audit_events?: Array<Record<string, unknown>>;
+  pending_actions?: Array<Record<string, unknown>>;
 };
 
 export type LlmProfile = {
@@ -904,15 +925,7 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) },
     ),
   getAgentState: (projectId: string) =>
-    request<{
-      messages: Array<{ role: string; content: string; at?: string; tool_calls?: AgentChatResponse["tool_calls"] }>;
-      pinned_context: AuditSelection | null;
-      suggestions?: string[];
-      updated_at?: string;
-      audit_events?: Array<Record<string, unknown>>;
-    }>(
-      `/projects/${projectId}/agent/state`,
-    ),
+    request<AgentStateResponse>(`/projects/${projectId}/agent/state`),
   setAgentContext: (projectId: string, pinned_context: AuditSelection | null) =>
     request<{ pinned_context: AuditSelection | null; suggestions: string[] }>(
       `/projects/${projectId}/agent/context`,
@@ -933,6 +946,24 @@ export const api = {
         api_key: opts?.apiKey ?? "",
       }),
     }),
+  createAgentSession: (projectId: string) =>
+    request<AgentStateResponse>(`/projects/${projectId}/agent/sessions`, { method: "POST" }),
+  activateAgentSession: (projectId: string, sessionId: string) =>
+    request<AgentStateResponse>(
+      `/projects/${projectId}/agent/sessions/${encodeURIComponent(sessionId)}/activate`,
+      { method: "POST" },
+    ),
+  renameAgentSession: (projectId: string, sessionId: string, title: string) =>
+    request<AgentStateResponse>(
+      `/projects/${projectId}/agent/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "PATCH", body: JSON.stringify({ title }) },
+    ),
+  deleteAgentSession: (projectId: string, sessionId: string) =>
+    request<AgentStateResponse>(
+      `/projects/${projectId}/agent/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+    ),
+  /** @deprecated 等价于 createAgentSession；保留给旧调用方 */
   clearAgentThread: (projectId: string) =>
     request<{ ok: boolean }>(`/projects/${projectId}/agent/thread`, { method: "DELETE" }),
   resolveAgentAction: (projectId: string, actionId: string, decision: "approve" | "reject") =>

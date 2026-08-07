@@ -254,7 +254,9 @@ def test_reingest_invalidates_derived_state_and_versions_data(store: ProjectStor
         assert key not in refreshed
     assert refreshed["rules_config"] == {"max_sample_size": 20}
     assert refreshed["agent_thread"]["pinned_context"] is None
-    assert "重新导入" in refreshed["agent_thread"]["messages"][-1]["content"]
+    from audit_engine.agent.sessions import active_messages
+
+    assert "重新导入" in active_messages(refreshed)[-1]["content"]
 
 
 def test_append_year_invalidates_derived_state_and_updates_version(store: ProjectStore) -> None:

@@ -64,7 +64,9 @@ def test_reconcile_marks_interrupted_job_and_agent_event_error(tmp_path):
 
     state = store.load_state(pid)
     failed = state["module_insight_jobs"]["收入成本"]
-    tool_result = state["agent_thread"]["messages"][0]["tool_calls"][0]["result"]
+    from audit_engine.agent.sessions import active_messages
+
+    tool_result = active_messages(state)[0]["tool_calls"][0]["result"]
     assert failed["status"] == "error"
     assert "进程中断" in failed["error"]
     assert tool_result["status"] == "error"

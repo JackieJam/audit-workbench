@@ -584,6 +584,119 @@ body.is-resizing-agent canvas {
   cursor: default;
 }
 
+.agent-session-switcher {
+  position: relative;
+  margin-top: 2px;
+}
+
+.agent-session-switcher__trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-session-switcher__trigger:hover:not(:disabled),
+.agent-session-switcher__trigger:focus-visible:not(:disabled) {
+  border-color: var(--border-strong);
+  outline: none;
+}
+
+.agent-session-switcher__trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.agent-session-switcher__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-switcher__menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.agent-session-switcher__item {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-session-switcher__item:last-child {
+  border-bottom: none;
+}
+
+.agent-session-switcher__item.is-active {
+  background: var(--accent-softer);
+}
+
+.agent-session-switcher__pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-session-switcher__pick span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  font-size: 0.8rem;
+}
+
+.agent-session-switcher__pick small {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.agent-session-switcher__delete {
+  flex-shrink: 0;
+  width: 32px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-session-switcher__delete:hover:not(:disabled) {
+  color: var(--danger, #b42318);
+}
+
 .agent-panel__collapse {
   width: 28px;
   height: 28px;

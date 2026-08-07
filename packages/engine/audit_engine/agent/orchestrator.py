@@ -10,6 +10,19 @@ from typing import Any
 
 from audit_engine.agent.audit_questions import MODULE_ID_TO_KEY, MODULE_KEY_TO_ID
 from audit_engine.agent.context import AuditSelection, selection_to_text
+from audit_engine.agent.sessions import (
+    activate_session,
+    active_messages,
+    create_session,
+    delete_session,
+    ensure_agent_sessions,
+    get_active_session,
+    iter_session_messages,
+    list_session_summaries,
+    rename_session,
+    set_active_messages,
+    touch_session_updated,
+)
 from audit_engine.agent.tools import TOOL_SCHEMAS, execute_tool
 from audit_engine.llm_client import make_openai_client
 from audit_engine.llm_runtime import resolve_llm_runtime
@@ -244,13 +257,16 @@ def _persist_agent_exchange(
     proposed_actions = list(thread.get("pending_actions") or [])
 
     def update(state: dict[str, Any]) -> None:
-        latest = dict(state.get("agent_thread") or {})
-        if "messages" in latest:
-            messages = list(latest.get("messages") or [])
-        else:
-            messages = list(history)
+        ensure_agent_sessions(state)
+        # 并发写入时以当前活动会话消息为准；否则回退到本轮读到的 history
+        current = active_messages(state)
+        messages = list(current if current else history)
         messages.extend((user_entry, assistant_entry))
-        latest["messages"] = messages[-MAX_HISTORY:]
+        set_active_messages(state, messages, updated_at=now)
+
+        latest = dict(state.get("agent_thread") or {})
+        # 兼容旧读取方：不再把 messages 写回 thread
+        latest.pop("messages", None)
 
         latest_actions = list(latest.get("pending_actions") or [])
         latest_ids = {
@@ -275,6 +291,7 @@ def _persist_agent_exchange(
 
     saved_state = store.update_state(project_id, update)
     saved_thread = saved_state.get("agent_thread") or {}
+    saved_session = get_active_session(saved_state)
     saved_context = (
         saved_thread.get("pinned_context")
         if isinstance(saved_thread.get("pinned_context"), dict)
@@ -284,6 +301,7 @@ def _persist_agent_exchange(
         "reply": reply,
         "tool_calls": compact_tool_log,
         "pinned_context": saved_thread.get("pinned_context"),
+        "session_id": saved_session.get("id"),
         "suggestions": _suggested_followups(saved_context),
         "ui_actions": ui_actions or [],
         "needs_api_key": False,
@@ -300,8 +318,9 @@ def record_module_insight_dispatch(
 ) -> dict[str, Any]:
     """把确定性模块任务作为真实 Agent 工具事件持久化。"""
     state = store.load_state(project_id)
+    ensure_agent_sessions(state)
     thread = dict(state.get("agent_thread") or {})
-    history: list[dict[str, Any]] = list(thread.get("messages") or [])
+    history: list[dict[str, Any]] = active_messages(state)
     if pinned_context:
         thread["pinned_context"] = pinned_context
     ctx = thread.get("pinned_context") or pinned_context
@@ -381,8 +400,10 @@ def update_agent_module_insight_job(
     now = datetime.now().isoformat(timespec="seconds")
 
     def update(state: dict[str, Any]) -> None:
+        ensure_agent_sessions(state)
         thread = dict(state.get("agent_thread") or {})
         changed = False
+        touched_session_ids: set[str] = set()
         summary = None
         if insight is not None:
             summary = {
@@ -393,7 +414,7 @@ def update_agent_module_insight_job(
                 "recommendations": (insight.get("recommendations") or [])[:3],
                 "input_signature": insight.get("input_signature"),
             }
-        for message in thread.get("messages") or []:
+        for sess, message in iter_session_messages(state):
             for call in message.get("tool_calls") or []:
                 result = call.get("result") or {}
                 if str(result.get("job_id") or "") != job_id:
@@ -408,8 +429,12 @@ def update_agent_module_insight_job(
                 if summary is not None:
                     result["insight"] = summary
                 changed = True
+                touched_session_ids.add(str(sess.get("id") or ""))
         if not changed:
             return
+        for sid in touched_session_ids:
+            if sid:
+                touch_session_updated(state, sid, at=now)
         events = list(thread.get("audit_events") or [])
         events.append(
             {
@@ -494,8 +519,9 @@ def run_agent_chat(
         }
 
     state = store.load_state(project_id)
+    ensure_agent_sessions(state)
     thread = dict(state.get("agent_thread") or {})
-    history: list[dict[str, Any]] = list(thread.get("messages") or [])
+    history: list[dict[str, Any]] = active_messages(state)
     if pinned_context:
         thread["pinned_context"] = pinned_context
     ctx = thread.get("pinned_context") or pinned_context
@@ -588,13 +614,19 @@ def run_agent_chat(
 
 
 def get_agent_state(store: ProjectStore, project_id: str) -> dict[str, Any]:
-    thread = store.load_state(project_id).get("agent_thread") or {}
+    # 迁移可能写回 state，用 update_state 保证落盘
+    def ensure(state: dict[str, Any]) -> None:
+        ensure_agent_sessions(state)
+
+    state = store.update_state(project_id, ensure)
+    thread = state.get("agent_thread") or {}
+    session = get_active_session(state)
     actions_by_id = {
         str(action.get("action_id")): action
         for action in thread.get("pending_actions") or []
         if action.get("action_id")
     }
-    messages = json.loads(json.dumps(thread.get("messages") or [], ensure_ascii=False, default=str))
+    messages = json.loads(json.dumps(session.get("messages") or [], ensure_ascii=False, default=str))
     for message in messages:
         for call in message.get("tool_calls") or []:
             result = call.get("result") or {}
@@ -609,12 +641,51 @@ def get_agent_state(store: ProjectStore, project_id: str) -> dict[str, Any]:
         "suggestions": _suggested_followups(
             thread.get("pinned_context") if isinstance(thread.get("pinned_context"), dict) else None
         ),
-        "updated_at": thread.get("updated_at"),
+        "updated_at": session.get("updated_at") or thread.get("updated_at"),
+        "active_session_id": session.get("id"),
+        "sessions": list_session_summaries(state),
         "audit_events": thread.get("audit_events") or [],
         "pending_actions": [
             action for action in thread.get("pending_actions") or [] if action.get("status") == "pending"
         ],
     }
+
+
+def create_agent_session(store: ProjectStore, project_id: str) -> dict[str, Any]:
+    """开启新对话并设为活动会话（保留历史会话）。"""
+
+    def update(state: dict[str, Any]) -> None:
+        create_session(state, activate=True)
+
+    store.update_state(project_id, update)
+    return get_agent_state(store, project_id)
+
+
+def activate_agent_session(store: ProjectStore, project_id: str, session_id: str) -> dict[str, Any]:
+    def update(state: dict[str, Any]) -> None:
+        activate_session(state, session_id)
+
+    try:
+        store.update_state(project_id, update)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    return get_agent_state(store, project_id)
+
+
+def rename_agent_session(store: ProjectStore, project_id: str, session_id: str, title: str) -> dict[str, Any]:
+    def update(state: dict[str, Any]) -> None:
+        rename_session(state, session_id, title)
+
+    store.update_state(project_id, update)
+    return get_agent_state(store, project_id)
+
+
+def delete_agent_session(store: ProjectStore, project_id: str, session_id: str) -> dict[str, Any]:
+    def update(state: dict[str, Any]) -> None:
+        delete_session(state, session_id)
+
+    store.update_state(project_id, update)
+    return get_agent_state(store, project_id)
 
 
 def resolve_pending_action(
@@ -715,9 +786,5 @@ def set_pinned_context(store: ProjectStore, project_id: str, context: AuditSelec
 
 
 def clear_agent_thread(store: ProjectStore, project_id: str) -> None:
-    def update(state: dict[str, Any]) -> None:
-        thread = dict(state.get("agent_thread") or {})
-        thread["messages"] = []
-        state["agent_thread"] = thread
-
-    store.update_state(project_id, update)
+    """兼容旧接口：行为改为「新建会话并切换」，不再清空历史。"""
+    create_agent_session(store, project_id)

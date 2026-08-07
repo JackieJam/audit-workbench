@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from audit_engine.agent.orchestrator import (
+    activate_agent_session,
     clear_agent_thread,
+    create_agent_session,
+    delete_agent_session,
     detect_module_insight_request,
     get_agent_state,
     record_module_insight_dispatch,
+    rename_agent_session,
     resolve_pending_action,
     run_agent_chat,
     set_pinned_context,
@@ -34,6 +38,10 @@ class ChatRequest(BaseModel):
 
 class ContextRequest(BaseModel):
     pinned_context: dict[str, Any] | None = None
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=80)
 
 
 @router.get("/{project_id}/agent/state")
@@ -101,8 +109,56 @@ def agent_chat(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/{project_id}/agent/sessions")
+def agent_create_session(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
+    """新建空会话并切换为当前活动会话。"""
+    _manifest_or_404(store, project_id)
+    return create_agent_session(store, project_id)
+
+
+@router.post("/{project_id}/agent/sessions/{session_id}/activate")
+def agent_activate_session(
+    project_id: str,
+    session_id: str,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        return activate_agent_session(store, project_id, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/{project_id}/agent/sessions/{session_id}")
+def agent_rename_session(
+    project_id: str,
+    session_id: str,
+    body: RenameSessionRequest,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        return rename_agent_session(store, project_id, session_id, body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{project_id}/agent/sessions/{session_id}")
+def agent_delete_session(
+    project_id: str,
+    session_id: str,
+    store: ProjectStore = Depends(get_store),
+) -> dict:
+    _manifest_or_404(store, project_id)
+    try:
+        return delete_agent_session(store, project_id, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.delete("/{project_id}/agent/thread")
 def agent_clear(project_id: str, store: ProjectStore = Depends(get_store)) -> dict:
+    """兼容旧客户端：等价于新建会话。"""
     _manifest_or_404(store, project_id)
     clear_agent_thread(store, project_id)
     return {"ok": True}

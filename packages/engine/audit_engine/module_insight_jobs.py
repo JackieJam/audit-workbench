@@ -50,9 +50,13 @@ def _update_agent_job_result(
     status: str,
     error: str | None = None,
 ) -> None:
+    from audit_engine.agent.sessions import ensure_agent_sessions, iter_session_messages, touch_session_updated
+
+    ensure_agent_sessions(state)
     thread = dict(state.get("agent_thread") or {})
     changed = False
-    for message in thread.get("messages") or []:
+    touched: set[str] = set()
+    for sess, message in iter_session_messages(state):
         for call in message.get("tool_calls") or []:
             result = call.get("result") or {}
             if str(result.get("job_id") or "") != job_id:
@@ -60,7 +64,11 @@ def _update_agent_job_result(
             result["status"] = status
             result["error"] = error
             changed = True
+            touched.add(str(sess.get("id") or ""))
     if changed:
+        for sid in touched:
+            if sid:
+                touch_session_updated(state, sid)
         thread["updated_at"] = _now()
         state["agent_thread"] = thread
 
