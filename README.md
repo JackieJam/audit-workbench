@@ -1,36 +1,37 @@
 # 审计分析工作台
 
-序时账审计分析桌面产品 — **FastAPI 引擎 + React + Tauri**。
+把序时账变成能看、能查、能交出去的底稿。本地桌面工具，账留在你电脑里。
 
-基于 GitHub 上的 Streamlit 原型 [`JackieJam/journal-audit`](https://github.com/JackieJam/journal-audit) 重构而来：业务算法迁入 `packages/engine`，UI 全部重写为 FastAPI + React + Tauri 桌面产品。
+打开软件，上传 Excel 序时账，然后可以：
 
-## 两大功效
+1. **财务画像** — 收入、成本、费用、往来摊开看，点图就能看到凭证
+2. **疑点工作台** — 化整为零、大额、年末突击等常见问题先筛一遍，也可以自己从图上圈
+3. **抽样底稿** — 从疑点或全部凭证里抽样本，导出 Excel
 
-1. **财务画像** — 多维度理解被审单位（收入成本、费用、投资及营业外、暂估、资产负债…）
-2. **抽样底稿** — 疑点圈定 → 规则/抽样 → Excel 输出
+旁边有审计助手，能对着当前项目和疑点说话。改规则、动样本都要你点头。
 
-连接层：**疑点工作台**。
+技术栈：Tauri · React · FastAPI · `audit_engine`（Python）。
 
-内置审计 Agent 可读取当前项目、图表选择和疑点上下文；所有会改变规则、疑点或样本的工具调用均进入人工批准/拒绝流程并保留审计记录。
+## 现在到哪一步
 
-## 当前数据边界
+主流程已经能独立走完：导入 → 画像 → 疑点 → 抽样 →（可选）大模型帮看样本 → 导出 Excel。不再依赖旧的 Streamlit 原型。
 
-- 正式支持 `.xlsx` 序时账；旧 `.xls` 会给出转换提示，不做不可靠的静默解析。
-- 金额统一结合凭证平衡、借贷标识和原始正负判断，保留负借方、正贷方等冲回方向。
-- 优先使用公司代码货币金额；仅有凭证货币且存在混合币种时，阻止跨币种图表聚合。
-- 月度图包含 Period 13；费用子类互斥；图表和钻取使用同一口径。
-- 科目余额表、财务报表及原始单据 adapter 尚未纳入正式支持范围。
+当前按 **Trusted Audit Beta** 交付：规则命中先全部列出来再抽样；每张样本能说清为什么入选；大模型失败只会标「未核验」，不会写成已确认。
 
-## 架构
+| 阶段 | 状态 |
+|------|------|
+| 地基、财务画像 | 完成 |
+| 可替代旧工具的主流程 | 闭合 |
+| 桌面安装包、试用样例 | 脚手架已完成 |
+| Key 管理、列映射编辑、余额表 / 报表 | 还在做 |
 
-```
-apps/desktop     Tauri + React (Vite)
-apps/api         FastAPI 本地服务
-packages/engine  audit_engine（无 UI 依赖）
-~/.audit_tool/   Parquet + DuckDB + JSON 状态
-```
+更细的清单见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-## 快速开始（开发）
+**目前正式支持** `.xlsx` 序时账。旧 `.xls` 会提示你先转换，不会偷偷乱解析。科目余额表、财务报表、原始单据还不能当正式输入。
+
+## 试用
+
+仓库里有一份虚构脱敏样例：[samples/demo_journal_2022.xlsx](samples/demo_journal_2022.xlsx)。
 
 ```bash
 ./scripts/bootstrap.sh
@@ -42,70 +43,51 @@ packages/engine  audit_engine（无 UI 依赖）
 ./scripts/dev-ui.sh
 ```
 
-打开 **http://localhost:5188** — 应看到 API 连通、可创建项目。
+打开 http://localhost:5188 ，新建项目，上传该文件。先看「财务画像」，再跑规则、抽样、导出。
 
-> **端口约定**：`26_MutiAgentComm` 前端占 **5173**（roundtable SSE：`/api/stream`）。审计工作台前端默认 **5188**，避免浏览器标签误把 SSE 代理到本项目的 FastAPI。
+真实客户账放本机，不要提交到 git。说明见 [docs/TEST_DATA.md](docs/TEST_DATA.md)。
 
-### 常见问题
+重新生成样例：
 
-**日志里出现 `GET /stream ... 404`**
-
-多半是 **MutiAgentComm** 的浏览器标签仍在 `localhost:5173` 轮询 `/api/stream`；若审计工作台也占 5173，Vite 会把 `/api/*` 转到审计 API，于是出现 `/stream` 404。
-
-- 关闭 MutiAgentComm 相关标签，或确保审计 UI 只用 **5188**
-- 审计 API 是否正常：看 `/health`、`/projects` 是否为 **200**
+```bash
+uv run python scripts/generate_demo_journal.py
+```
 
 ## 桌面安装包
 
-打包后的应用会**自动拉起本地 FastAPI sidecar**（`127.0.0.1:29180`），无需另开终端。
+打包后的应用会自己拉起本机服务（`127.0.0.1:29180`），不用另开终端。
 
 | 平台 | 命令 | 产物 |
 |------|------|------|
-| macOS (arm64/x64 本机) | `./scripts/build-desktop.sh` | `apps/desktop/src-tauri/target/release/bundle/macos/`（`.app`）与 `bundle/dmg/` |
-| Windows x64 | `powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1` | `...\bundle\nsis\` |
+| macOS | `./scripts/build-desktop.sh` | `apps/desktop/src-tauri/target/release/bundle/` 下的 `.app` / `.dmg` |
+| Windows x64 | `scripts/build-desktop.ps1` | NSIS 安装包 |
 
-脚本会把 `CARGO_TARGET_DIR` 固定到仓库内 `apps/desktop/src-tauri/target`，避免产物落到沙箱缓存目录。
+前置：Rust、Node 20+、`uv`。Windows 包要在 Windows 或 GitHub Actions 上打（[`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml)）。
 
-前置：Rust（`rustup`）、Node 20+、`uv`。Windows 包须在 Windows 机或 GitHub Actions `windows-latest` 上构建（本仓库提供 [`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml)）。
+还没有 Apple 公证和 Windows 签名。macOS 打不开时，右键「打开」，或执行 `xattr -cr /path/to/审计分析工作台.app`。
 
-内部分发注意：未做 Apple 公证 / Windows 代码签名。macOS 若提示无法打开，可右键「打开」或执行 `xattr -cr /path/to/审计分析工作台.app`；Windows 可能出现 SmartScreen「仍要运行」。
+## 仓库结构
 
-### 试用样例
+```
+apps/desktop     桌面界面（Tauri + React）
+apps/api         本地 FastAPI，只做编排
+packages/engine  分析内核（不依赖界面）
+config/          规则阈值、审计问题清单
+samples/         试用样例账
+```
 
-仓库内附带**虚构脱敏**序时账：[`samples/demo_journal_2022.xlsx`](samples/demo_journal_2022.xlsx)。真实客户账只能放本机私有目录（见 [docs/TEST_DATA.md](docs/TEST_DATA.md)），不会也不应提交。
-
-1. 打开安装包或开发 UI  
-2. 新建项目 → 上传该文件  
-3. 进入「财务画像」查看收入成本等模块；需要时再跑规则 / 抽样 / Excel 导出  
-
-重新生成样例：`uv run python scripts/generate_demo_journal.py`
-
-## 里程碑
-
-见 [docs/ROADMAP.md](docs/ROADMAP.md)。
-
-| 阶段 | 内容 |
-|------|------|
-| M0 | Monorepo、ProjectStore、/health、/projects、React 三页壳（完成） |
-| M1 | ingest + 收入成本模块完整交互（完成） |
-| M2 | 可替代 Streamlit：规则 UI、疑点工作台、LLM 核验进 Excel（闭合） |
-| **M3（进行中）** | Tauri 安装包（macOS + Windows sidecar）、试用样例；Key 管理继续完善 |
+项目数据在本机 `~/.audit_tool/projects/<id>/`：导入的账、分析结果、疑点和抽样状态都在这里。明细走分页查询，不会把整本账灌进浏览器。
 
 ## 环境变量
 
 | 变量 | 说明 |
 |------|------|
 | `AUDIT_API_PORT` | API 端口，默认 `29180` |
-| `AUDIT_UI_PORT` | 前端 Vite 端口，默认 `5188`（`26_MutiAgentComm` 占用 `5173`） |
-| `AUDIT_WORKBENCH_DATA_ROOT` | 覆盖数据根目录（测试用） |
-| `AUDIT_WORKBENCH_NAMESPACE` | 多用户隔离子目录 |
-| `AUDIT_WORKBENCH_CONFIG_ROOT` | 覆盖含 `config/` 的根（打包/sidecar 用） |
-| `VITE_API_BASE` | 前端 API 基址；未设时浏览器走 `/api` 代理，Tauri 走 `http://127.0.0.1:29180` |
+| `AUDIT_UI_PORT` | 开发界面端口，默认 `5188` |
+| `AUDIT_WORKBENCH_DATA_ROOT` | 覆盖数据目录（测试用） |
+| `AUDIT_WORKBENCH_CONFIG_ROOT` | 打包时指定 `config/` 所在根目录 |
+| `VITE_API_BASE` | 前端 API 地址；未设时浏览器走 `/api` 代理，桌面端走 `http://127.0.0.1:29180` |
 
-## 上游项目
+## 从哪来
 
-本仓库由 [journal-audit](https://github.com/JackieJam/journal-audit)（Streamlit 序时账分析抽样）演进而来：
-
-- 上游负责原型验证与早期算法沉淀（`modules/`）
-- 本仓库将算法迁入 `packages/engine/audit_engine/`（去除 Streamlit 依赖），并重做产品壳与交付形态
-- M2 起主流程已可在本仓库独立完成，不再依赖上游 UI；上游仓库仍可作为算法对照与历史参考
+由 [JackieJam/journal-audit](https://github.com/JackieJam/journal-audit)（Streamlit 序时账分析抽样）演进而来：算法迁到 `packages/engine`，界面重做成桌面产品。主流程已在本仓库独立完成。
